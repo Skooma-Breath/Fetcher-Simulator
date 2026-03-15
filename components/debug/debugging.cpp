@@ -1,10 +1,15 @@
 #include "debugging.hpp"
 
+#include <algorithm>
 #include <chrono>
 #include <deque>
+#include <filesystem>
 #include <fstream>
+#include <iomanip>
 #include <iostream>
 #include <memory>
+#include <sstream>
+#include <vector>
 
 #ifdef _MSC_VER
 // TODO: why is this necessary? this has /external:I
@@ -396,6 +401,55 @@ namespace Debug
         return Error;
     }
 
+    namespace
+    {
+        // Rotate existing log file: rename to <name>_YYYY-MM-DD_HH-MM-SS.log,
+        // then prune so at most maxKeep rotated logs remain.
+        void rotateLogFile(const std::filesystem::path& logDir, const std::string& logName, int maxKeep = 10)
+        {
+            namespace fs = std::filesystem;
+            const fs::path current = logDir / logName;
+            if (!fs::exists(current))
+                return;
+
+            // Build timestamp suffix
+            const auto now = std::chrono::system_clock::now();
+            const std::time_t t = std::chrono::system_clock::to_time_t(now);
+            std::tm tm{};
+#ifdef _WIN32
+            localtime_s(&tm, &t);
+#else
+            localtime_r(&t, &tm);
+#endif
+            std::ostringstream ts;
+            ts << std::put_time(&tm, "%Y-%m-%d_%H-%M-%S");
+
+            // e.g. openmw_2025-06-01_14-30-22.log
+            const std::string stem = logName.substr(0, logName.rfind('.'));
+            const fs::path dest = logDir / (stem + "_" + ts.str() + ".log");
+            std::error_code ec;
+            fs::rename(current, dest, ec); // silent on failure
+
+            // Prune: collect all rotated logs for this stem, delete oldest
+            std::vector<fs::path> old;
+            for (const auto& entry : fs::directory_iterator(logDir, ec))
+            {
+                const std::string fname = entry.path().filename().string();
+                if (fname.size() > stem.size() + 1
+                    && fname.substr(0, stem.size() + 1) == stem + "_"
+                    && fname.size() > 4
+                    && fname.substr(fname.size() - 4) == ".log")
+                    old.push_back(entry.path());
+            }
+            if (static_cast<int>(old.size()) > maxKeep)
+            {
+                std::sort(old.begin(), old.end()); // lexicographic = chronological for our format
+                for (int i = 0; i < static_cast<int>(old.size()) - maxKeep; ++i)
+                    fs::remove(old[i], ec);
+            }
+        }
+    }
+
     void setupLogging(const std::filesystem::path& logDir, std::string_view appName)
     {
         Log::sMinDebugLevel = getDebugLevel();
@@ -403,6 +457,7 @@ namespace Debug
 
 #if !(defined(_WIN32) && defined(_DEBUG))
         const std::string logName = Misc::StringUtils::lowerCase(appName) + ".log";
+        rotateLogFile(logDir, logName);
         logfile.open(logDir / logName, std::ios::out);
 
         Identity log(logfile);
