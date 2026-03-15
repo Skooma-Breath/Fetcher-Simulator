@@ -63,6 +63,7 @@ CONFIGURATIONS=()
 TEST_FRAMEWORK=""
 INSTALL_PREFIX="."
 BUILD_BENCHMARKS=""
+BUILD_MULTIPLAYER="true"
 USE_WERROR=""
 USE_CLANG_TIDY=""
 
@@ -131,6 +132,9 @@ while [ $# -gt 0 ]; do
 			b )
 				BUILD_BENCHMARKS=true ;;
 
+			X )
+				BUILD_MULTIPLAYER="" ;;
+
 			E )
 				USE_WERROR=true ;;
 
@@ -175,6 +179,8 @@ Options:
 		CMake install prefix
 	-b
 		Build benchmarks
+	-X
+		Disable multiplayer build (BUILD_MULTIPLAYER=OFF, BUILD_DEDICATED_SERVER=OFF)
 	-M
 		Use a multiview build of OSG
 	-E
@@ -666,6 +672,102 @@ printf "vcpkg packages ${VCPKG_TAG:?}... "
 
 cd $DEPS
 echo
+if [ -n "$BUILD_MULTIPLAYER" ]; then
+	# Protobuf: required by GNS. Build from source using the VS generator
+	# (same approach as GNS itself - no shell activation needed).
+	PROTOBUF_SRC="${DEPS}/protobuf-src-${PROTOBUF_TAG}"
+	PROTOBUF_INSTALL="${DEPS}/protobuf-install-${PROTOBUF_TAG}"
+	printf "Protobuf ${PROTOBUF_TAG}... "
+	{
+		if [ -f "${PROTOBUF_INSTALL}/lib/libprotobufd.lib" ]; then
+			printf "Exists. "
+		else
+			if [ ! -d "${PROTOBUF_SRC}" ]; then
+				git clone \
+					--depth 1 \
+					--branch "${PROTOBUF_TAG}" \
+					https://github.com/protocolbuffers/protobuf.git \
+					"${PROTOBUF_SRC}"
+			fi
+			PROTOBUF_BUILD="${PROTOBUF_SRC}/build"
+			rm -rf "${PROTOBUF_BUILD}"
+			mkdir -p "${PROTOBUF_BUILD}"
+			GNS_PLAT_PROTO=$([ $BITS -eq 64 ] && echo "x64" || echo "Win32")
+			cmake "${PROTOBUF_SRC}/cmake" \
+				-B "${PROTOBUF_BUILD}" \
+				-G "${GENERATOR}" \
+				-A "${GNS_PLAT_PROTO}" \
+				-Dprotobuf_BUILD_TESTS=OFF \
+				-Dprotobuf_BUILD_PROTOC_BINARIES=ON \
+				-Dprotobuf_MSVC_STATIC_RUNTIME=OFF \
+				-DCMAKE_INSTALL_PREFIX="${PROTOBUF_INSTALL}"
+			cmake --build "${PROTOBUF_BUILD}" --config Release --target install
+			cmake --build "${PROTOBUF_BUILD}" --config Debug --target install
+		fi
+		echo Done.
+	}
+
+	printf "GameNetworkingSockets ${GNS_TAG}... "
+	{
+		GNS_DIR="${DEPS}/GameNetworkingSockets-${GNS_TAG}"
+		GNS_BUILD="${GNS_DIR}/build-msvc${MSVC_REAL_VER}-${BITS}"
+
+		if [ -d "${GNS_DIR}" ]; then
+			printf "Exists. "
+		else
+			git clone \
+				--depth 1 \
+				--branch "${GNS_TAG}" \
+				https://github.com/ValveSoftware/GameNetworkingSockets.git \
+				"${GNS_DIR}"
+		fi
+
+		if [ ! -f "${GNS_BUILD}/install/lib/GameNetworkingSockets.lib" ]; then
+			# Wipe any partial/stale build dir (e.g. a previously failed configure
+			# that cached VCPKG_MANIFEST_MODE=ON) so CMake starts clean.
+			rm -rf "${GNS_BUILD}"
+			mkdir -p "${GNS_BUILD}"
+			pushd "${GNS_BUILD}" > /dev/null
+
+			# Use the VS generator - it locates MSVC automatically without
+			# any shell activation (unlike Ninja which requires cl on PATH).
+			GNS_PLAT=$([ $BITS -eq 64 ] && echo "x64" || echo "Win32")
+			cmake "${GNS_DIR}" \
+				-G "${GENERATOR}" \
+				-A "${GNS_PLAT}" \
+				-DProtobuf_INCLUDE_DIR="$(cygpath -m "${PROTOBUF_INSTALL}/include")" \
+				-DProtobuf_LIBRARY="$(cygpath -m "${PROTOBUF_INSTALL}/lib/libprotobuf.lib")" \
+				-DProtobuf_LIBRARY_DEBUG="$(cygpath -m "${PROTOBUF_INSTALL}/lib/libprotobufd.lib")" \
+				-DProtobuf_LITE_LIBRARY="$(cygpath -m "${PROTOBUF_INSTALL}/lib/libprotobuf-lite.lib")" \
+				-DProtobuf_LITE_LIBRARY_DEBUG="$(cygpath -w "${PROTOBUF_INSTALL}/lib/libprotobuf-lited.lib")" \
+				-DProtobuf_PROTOC_EXECUTABLE="$(cygpath -w "${PROTOBUF_INSTALL}/bin/protoc.exe")" \
+				-DProtobuf_USE_STATIC_LIBS=ON \
+				-DUSE_CRYPTO=BCrypt \
+				-DUSE_CRYPTO25519=Reference \
+				-DSTEAMNETWORKINGSOCKETS_BUILD_EXAMPLES=OFF \
+				-DSTEAMNETWORKINGSOCKETS_BUILD_TESTS=OFF \
+				-DCMAKE_INSTALL_PREFIX="${GNS_BUILD}/install"
+			cmake --build . --config RelWithDebInfo --target install
+			cmake --build . --config Debug --target install
+
+			popd > /dev/null
+		fi
+
+		GNS_INSTALL="${GNS_BUILD}/install"
+		add_cmake_opts -DGameNetworkingSockets_DIR="$(cygpath -m "${GNS_INSTALL}/lib/cmake/GameNetworkingSockets")"
+		add_cmake_opts -DGNS_INCLUDE_DIR="$(cygpath -m "${GNS_DIR}/include")"
+
+		# VS generator installs DLL flat to bin/ (no per-config subdir)
+		for CONFIGURATION in ${CONFIGURATIONS[@]}; do
+			add_runtime_dlls ${CONFIGURATION} "${GNS_BUILD}/install/bin/GameNetworkingSockets.dll"
+		done
+
+		echo Done.
+	}
+fi
+
+cd $DEPS
+echo
 printf "Qt ${QT_VER}... "
 {
 	if [ $BITS -eq 64 ]; then
@@ -736,12 +838,28 @@ echo
 cd $DEPS_INSTALL/..
 echo
 echo "Setting up OpenMW build..."
-if [[ -z "$USE_CCACHE" ]]; then
-	add_cmake_opts -DOPENMW_MP_BUILD=on
-fi
 add_cmake_opts -DCMAKE_INSTALL_PREFIX="${INSTALL_PREFIX}"
+add_cmake_opts -DOPENMW_MP_BUILD=on
 add_cmake_opts -DOPENMW_USE_SYSTEM_SQLITE3=OFF
 add_cmake_opts -DOPENMW_USE_SYSTEM_YAML_CPP=OFF
+if [ -n "$BUILD_MULTIPLAYER" ]; then
+	add_cmake_opts -DBUILD_MULTIPLAYER=ON
+	add_cmake_opts -DBUILD_DEDICATED_SERVER=ON
+	# Tell GNS (built as subdirectory) to use BCrypt instead of OpenSSL,
+	# and point it at our pre-built Protobuf.
+	add_cmake_opts -DUSE_CRYPTO=BCrypt
+	add_cmake_opts -DUSE_CRYPTO25519=Reference
+	add_cmake_opts -DProtobuf_INCLUDE_DIR="$(cygpath -m "${PROTOBUF_INSTALL}/include")"
+	add_cmake_opts -DProtobuf_LIBRARY="$(cygpath -m "${PROTOBUF_INSTALL}/lib/libprotobuf.lib")"
+	add_cmake_opts -DProtobuf_LIBRARY_DEBUG="$(cygpath -m "${PROTOBUF_INSTALL}/lib/libprotobufd.lib")"
+	add_cmake_opts -DProtobuf_LITE_LIBRARY="$(cygpath -m "${PROTOBUF_INSTALL}/lib/libprotobuf-lite.lib")"
+	add_cmake_opts -DProtobuf_LITE_LIBRARY_DEBUG="$(cygpath -m "${PROTOBUF_INSTALL}/lib/libprotobuf-lited.lib")"
+	add_cmake_opts -DProtobuf_PROTOC_EXECUTABLE="$(cygpath -m "${PROTOBUF_INSTALL}/bin/protoc.exe")"
+	add_cmake_opts -DProtobuf_USE_STATIC_LIBS=ON
+else
+	add_cmake_opts -DBUILD_MULTIPLAYER=OFF
+	add_cmake_opts -DBUILD_DEDICATED_SERVER=OFF
+fi
 if [ ! -z $CI ]; then
 	case $STEP in
 		components )
@@ -773,6 +891,18 @@ if [ ! -z $CI ]; then
 			echo "  Building subprojects: Misc."
 			add_cmake_opts -DBUILD_OPENCS=no \
 				-DBUILD_OPENMW=no
+			;;
+		multiplayer )
+			echo "  Building subproject: Multiplayer client + dedicated server."
+			add_cmake_opts -DBUILD_ESSIMPORTER=no \
+				-DBUILD_LAUNCHER=no \
+				-DBUILD_MWINIIMPORTER=no \
+				-DBUILD_OPENCS=no \
+				-DBUILD_WIZARD=no \
+				-DBUILD_NAVMESHTOOL=no \
+				-DBUILD_BULLETOBJECTTOOL=no \
+				-DBUILD_OPENMW=no
+			# openmw-server is the only target needed for this step
 			;;
 	esac
 fi
@@ -880,7 +1010,7 @@ else
 	echo "- cmake .. $CMAKE_OPTS"
 fi
 RET=0
-run_cmd cmake .. $CMAKE_OPTS || RET=$?
+eval cmake .. $CMAKE_OPTS || RET=$?
 if [ -z $VERBOSE ]; then
 	if [ $RET -eq 0 ]; then
 		echo Done.

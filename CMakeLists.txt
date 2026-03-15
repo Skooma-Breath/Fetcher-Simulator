@@ -47,6 +47,10 @@ option(BUILD_OPENCS_TESTS       "Build OpenMW Construction Set tests" OFF)
 option(BUILD_OPENMW_TESTS       "Build OpenMW tests" OFF)
 option(PRECOMPILE_HEADERS_WITH_MSVC "Precompile most common used headers with MSVC (alternative to ccache)" ON)
 
+# Multiplayer options
+option(BUILD_MULTIPLAYER        "Build multiplayer client support" ON)
+option(BUILD_DEDICATED_SERVER   "Build OpenMW dedicated multiplayer server" ON)
+
 set(OpenGL_GL_PREFERENCE LEGACY)  # Use LEGACY as we use GL2; GLNVD is for GL3 and up.
 
 if (BUILD_LAUNCHER OR BUILD_OPENCS OR BUILD_WIZARD OR BUILD_OPENCS_TESTS)
@@ -628,6 +632,14 @@ endif()
 add_subdirectory (extern/osg-ffmpeg-videoplayer)
 add_subdirectory (extern/oics)
 add_subdirectory (extern/Base64)
+
+# GameNetworkingSockets (multiplayer networking)
+if (BUILD_MULTIPLAYER OR BUILD_DEDICATED_SERVER)
+    set(STEAMNETWORKINGSOCKETS_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
+    set(STEAMNETWORKINGSOCKETS_BUILD_TESTS    OFF CACHE BOOL "" FORCE)
+    add_subdirectory(extern/GameNetworkingSockets)
+    set(GNS_INCLUDE_DIR ${CMAKE_SOURCE_DIR}/extern/GameNetworkingSockets/include)
+endif()
 if (BUILD_OPENCS OR BUILD_OPENCS_TESTS)
     add_subdirectory (extern/osgQt)
 endif()
@@ -732,6 +744,10 @@ endif()
 
 if (BUILD_BULLETOBJECTTOOL)
     add_subdirectory(apps/bulletobjecttool)
+endif()
+
+if (BUILD_DEDICATED_SERVER)
+    add_subdirectory(apps/openmw-server)
 endif()
 
 if (BUILD_OPENCS_TESTS)

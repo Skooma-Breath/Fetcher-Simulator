@@ -116,6 +116,22 @@ add_openmw_dir (mwbase
     inputmanager windowmanager statemanager luamanager
     )
 
+if (BUILD_MULTIPLAYER)
+    add_openmw_dir (mwmp/network
+        Client Protocol Serialization
+    )
+    add_openmw_dir (mwmp/sync
+        PlayerSync RemotePlayer ActorSync CellSync ObjectSync WorldStateSync
+    )
+    add_openmw_dir (mwmp/gui
+        ChatWindow LoginDialog PlayerListWindow ServerBrowser
+    )
+    add_openmw_dir (mwmp
+        Main
+    )
+    add_compile_definitions(BUILD_MULTIPLAYER)
+endif()
+
 # Main executable
 
 add_library(openmw-lib STATIC
@@ -190,6 +206,11 @@ target_link_libraries(openmw-lib
     oics
     components
 )
+
+if (BUILD_MULTIPLAYER)
+    target_link_libraries(openmw-lib GameNetworkingSockets::GameNetworkingSockets)
+    target_include_directories(openmw-lib PRIVATE ${GNS_INCLUDE_DIR})
+endif()
 
 if (MSVC AND PRECOMPILE_HEADERS_WITH_MSVC)
     target_precompile_headers(openmw-lib PRIVATE

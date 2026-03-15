@@ -522,6 +522,15 @@ add_component_dir(testing
     util
 )
 
+if (BUILD_MULTIPLAYER OR BUILD_DEDICATED_SERVER)
+    add_component_dir (openmw-mp/Base
+        BaseStructs BasePlayer BaseActor
+    )
+    add_component_dir (openmw-mp/Packets
+        BasePacket Serialization
+    )
+endif()
+
 if (USE_QT)
     add_component_qt_dir (contentselector
         model/modelitem model/esmfile
@@ -626,6 +635,11 @@ target_link_libraries(components
     ${ICU_LIBRARIES}
     ZLIB::ZLIB
     )
+
+if (BUILD_MULTIPLAYER OR BUILD_DEDICATED_SERVER)
+    target_link_libraries(components GameNetworkingSockets::GameNetworkingSockets)
+    target_include_directories(components PUBLIC ${GNS_INCLUDE_DIR})
+endif()
 
 if(yaml-cpp_VERSION VERSION_GREATER_EQUAL 0.8.0)
     target_link_libraries(components yaml-cpp::yaml-cpp)
