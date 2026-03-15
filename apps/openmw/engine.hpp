@@ -174,6 +174,14 @@ namespace OMW
 
         bool mExportFonts;
         unsigned int mRandomSeed;
+
+#ifdef BUILD_MULTIPLAYER
+        std::string  mMPServerAddress;
+        uint16_t     mMPServerPort     = 25565;
+        std::string  mMPPlayerName;
+        std::string  mMPPasswordHash;
+        bool         mMPEnabled        = false;
+#endif
         Debug::Level mMaxRecastLogLevel = Debug::Error;
 
         Compiler::Extensions mExtensions;
@@ -265,6 +273,19 @@ namespace OMW
         void setRandomSeed(unsigned int seed);
 
         void setRecastMaxLogLevel(Debug::Level value) { mMaxRecastLogLevel = value; }
+
+#ifdef BUILD_MULTIPLAYER
+        /// Configure multiplayer connection (called from main.cpp after CLI parsing).
+        void setMultiplayer(const std::string& address, uint16_t port,
+                            const std::string& playerName, const std::string& passwordHash)
+        {
+            mMPServerAddress = address;
+            mMPServerPort    = port;
+            mMPPlayerName    = playerName;
+            mMPPasswordHash  = passwordHash;
+            mMPEnabled       = !address.empty();
+        }
+#endif
     };
 }
 

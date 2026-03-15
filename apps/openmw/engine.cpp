@@ -54,6 +54,10 @@
 #include <components/settings/shadermanager.hpp>
 #include <components/settings/values.hpp>
 
+#ifdef BUILD_MULTIPLAYER
+#include "mwmp/Main.hpp"
+#endif
+
 #include "mwinput/inputmanagerimp.hpp"
 
 #include "mwgui/windowmanagerimp.hpp"
@@ -308,6 +312,12 @@ bool OMW::Engine::frame(unsigned frameNumber, float frametime)
             ScopedProfile<UserStatsType::Gui> profile(frameStart, frameNumber, *timer, *stats);
             mWindowManager->update(frametime);
         }
+
+#ifdef BUILD_MULTIPLAYER
+        // update multiplayer
+        if (mwmp::Main::isInitialised())
+            mwmp::Main::get().frame(frametime);
+#endif
     }
     catch (const std::exception& e)
     {
@@ -497,8 +507,13 @@ void OMW::Engine::createWindow()
     const SDLUtil::VSyncMode vsync = Settings::video().mVsyncMode;
     unsigned antialiasing = static_cast<unsigned>(Settings::video().mAntialiasing);
 
-    int posX = SDL_WINDOWPOS_CENTERED_DISPLAY(screen);
-    int posY = SDL_WINDOWPOS_CENTERED_DISPLAY(screen);
+    const int windowX = Settings::video().mWindowX;
+    const int windowY = Settings::video().mWindowY;
+
+    // -1 is the sentinel meaning "use default centred position".
+    // Any other value (including negative coords for monitors left/above primary) is used as-is.
+    int posX = (windowX != -1) ? windowX : SDL_WINDOWPOS_CENTERED_DISPLAY(screen);
+    int posY = (windowY != -1) ? windowY : SDL_WINDOWPOS_CENTERED_DISPLAY(screen);
 
     if (windowMode == Settings::WindowMode::Fullscreen || windowMode == Settings::WindowMode::WindowedFullscreen)
     {
@@ -1024,6 +1039,15 @@ void OMW::Engine::go()
         mWindowManager->executeInConsole(mStartupScript);
     }
 
+    #ifdef BUILD_MULTIPLAYER
+    if (mMPEnabled)
+    {
+        Log(Debug::Info) << "Initialising multiplayer: " << mMPServerAddress << ":" << mMPServerPort;
+        if (!mwmp::Main::init(mMPServerAddress, mMPServerPort, mMPPlayerName, mMPPasswordHash))
+            Log(Debug::Error) << "Multiplayer init failed — continuing in single-player mode";
+    }
+#endif
+
     // Start the main rendering loop
     MWWorld::DateTimeManager& timeManager = *mWorld->getTimeManager();
     Misc::FrameRateLimiter frameRateLimiter = Misc::makeFrameRateLimiter(mEnvironment.getFrameRateLimit());
@@ -1068,6 +1092,11 @@ void OMW::Engine::go()
 
         frameRateLimiter.limit();
     }
+
+    #ifdef BUILD_MULTIPLAYER
+    if (mwmp::Main::isInitialised())
+        mwmp::Main::destroy();
+#endif
 
     mLuaWorker->join();
 

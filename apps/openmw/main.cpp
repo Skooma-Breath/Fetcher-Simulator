@@ -65,7 +65,14 @@ bool parseOptions(int argc, char** argv, OMW::Engine& engine, Files::Configurati
 
     cfgMgr.readConfiguration(variables, desc);
 
-    Debug::setupLogging(cfgMgr.getLogPath(), "OpenMW");
+    {
+        const auto logDirOverride = variables["log-dir"].as<Files::MaybeQuotedPath>();
+        const std::filesystem::path logPath = logDirOverride.empty()
+            ? cfgMgr.getLogPath()
+            : static_cast<std::filesystem::path>(logDirOverride);
+        std::filesystem::create_directories(logPath);
+        Debug::setupLogging(logPath, "OpenMW");
+    }
     Log(Debug::Info) << Version::getOpenmwVersionDescription();
 
     Settings::Manager::load(cfgMgr);
@@ -157,6 +164,26 @@ bool parseOptions(int argc, char** argv, OMW::Engine& engine, Files::Configurati
     engine.setActivationDistanceOverride(variables["activate-dist"].as<int>());
     engine.enableFontExport(variables["export-fonts"].as<bool>());
     engine.setRandomSeed(variables["random-seed"].as<unsigned int>());
+
+#ifdef BUILD_MULTIPLAYER
+    {
+        const std::string connectStr = variables["connect"].as<std::string>();
+        if (!connectStr.empty())
+        {
+            std::string host = connectStr;
+            uint16_t    port = 25565;
+            const auto  sep  = connectStr.rfind(':');
+            if (sep != std::string::npos)
+            {
+                host = connectStr.substr(0, sep);
+                port = static_cast<uint16_t>(std::stoi(connectStr.substr(sep + 1)));
+            }
+            const std::string playerName  = variables["mp-name"].as<std::string>();
+            const std::string passwordRaw = variables["mp-password"].as<std::string>();
+            engine.setMultiplayer(host, port, playerName, passwordRaw);
+        }
+    }
+#endif
 
     return true;
 }

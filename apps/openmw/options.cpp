@@ -95,6 +95,22 @@ namespace OpenMW
         addOption("random-seed", bpo::value<unsigned int>()->default_value(Misc::Rng::generateDefaultSeed()),
             "seed value for random number generator");
 
+#ifdef BUILD_MULTIPLAYER
+        addOption("connect",
+            bpo::value<std::string>()->default_value(""),
+            "connect to multiplayer server, e.g. --connect=127.0.0.1:25565");
+        addOption("mp-name",
+            bpo::value<std::string>()->default_value(""),
+            "multiplayer player name (required when --connect is set)");
+        addOption("mp-password",
+            bpo::value<std::string>()->default_value(""),
+            "multiplayer server password (leave empty for open servers)");
+#endif
+
+        addOption("log-dir",
+            bpo::value<Files::MaybeQuotedPath>()->default_value(Files::MaybeQuotedPath(), ""),
+            "override the directory where openmw.log is written");
+
         return desc;
     }
 }
