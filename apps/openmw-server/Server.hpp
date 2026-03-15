@@ -1,0 +1,118 @@
+#ifndef OPENMW_SERVER_SERVER_HPP
+#define OPENMW_SERVER_SERVER_HPP
+
+#include <cstdint>
+#include <string>
+#include <unordered_map>
+#include <memory>
+#include <vector>
+#include <atomic>
+
+#include <steam/isteamnetworkingsockets.h>
+#include <steam/isteamnetworkingutils.h>
+#include <steam/steamnetworkingsockets.h>
+
+#include <components/openmw-mp/Base/BasePlayer.hpp>
+#include <components/openmw-mp/NetworkMessages.hpp>
+
+namespace mwmp
+{
+
+// ---------------------------------------------------------------------------
+// ConnectedClient — server-side representation of one connected player.
+// ---------------------------------------------------------------------------
+struct ConnectedClient
+{
+    HSteamNetConnection conn   = k_HSteamNetConnection_Invalid;
+    uint32_t            guid   = 0;
+    std::string         name;
+    BasePlayer          player;
+    bool                handshakeComplete = false;
+};
+
+// ---------------------------------------------------------------------------
+// MPServer — dedicated multiplayer server.
+//
+// Run lifecycle:
+//   MPServer server(25565);
+//   server.run();          ← blocks; call requestStop() from signal handler
+//   server.shutdown();
+// ---------------------------------------------------------------------------
+class MPServer
+{
+public:
+    explicit MPServer(uint16_t port);
+    ~MPServer();
+
+    MPServer(const MPServer&)            = delete;
+    MPServer& operator=(const MPServer&) = delete;
+
+    // Main loop — returns when requestStop() is called
+    void run();
+    void requestStop() { mRunning = false; }
+    void shutdown();
+
+private:
+    // GNS callbacks
+    static MPServer* sInstance;
+    static void staticConnectionStatusChanged(SteamNetConnectionStatusChangedCallback_t* info);
+    void onConnectionStatusChanged(SteamNetConnectionStatusChangedCallback_t* info);
+
+    // Per-frame update
+    void tick(float dt);
+    void processIncomingMessages();
+
+    // Client management
+    void onClientConnected   (HSteamNetConnection conn);
+    void onClientDisconnected(HSteamNetConnection conn, const std::string& reason);
+
+    // Packet dispatch
+    void onClientMessage(ConnectedClient& client, const uint8_t* data, size_t size);
+
+    // Packet handlers
+    void handleHandshake     (ConnectedClient& c, const uint8_t* data, size_t size);
+    void handlePlayerBaseInfo(ConnectedClient& c, const uint8_t* data, size_t size);
+    void handlePlayerPosition(ConnectedClient& c, const uint8_t* data, size_t size);
+    void handlePlayerCellChange(ConnectedClient& c, const uint8_t* data, size_t size);
+    void handlePlayerEquipment(ConnectedClient& c, const uint8_t* data, size_t size);
+    void handlePlayerStatsDynamic(ConnectedClient& c, const uint8_t* data, size_t size);
+    void handleChatMessage   (ConnectedClient& c, const uint8_t* data, size_t size);
+
+    // Broadcast helpers
+    void broadcastToAll      (const std::vector<uint8_t>& data,
+                              HSteamNetConnection except = k_HSteamNetConnection_Invalid,
+                              bool reliable = true);
+    void sendTo              (HSteamNetConnection conn,
+                              const std::vector<uint8_t>& data,
+                              bool reliable = true);
+
+    // Validation
+    bool validateMovement(const ConnectedClient& c, const BasePlayer& proposed) const;
+
+    // State
+    ISteamNetworkingSockets* mInterface    = nullptr;
+    HSteamListenSocket       mListenSocket = k_HSteamListenSocket_Invalid;
+    HSteamNetPollGroup       mPollGroup    = k_HSteamNetPollGroup_Invalid;
+
+    std::unordered_map<HSteamNetConnection, ConnectedClient> mClients;
+    uint32_t    mNextGuid = 1;
+    uint16_t    mPort;
+    std::atomic<bool> mRunning { false };
+
+    // Simple world state
+    struct WorldState
+    {
+        float gameHour   = 8.f;
+        float timeScale  = 30.f;
+        int   weather    = 0;
+    } mWorld;
+
+    // Server config (later: load from cfg file)
+    static constexpr int         MAX_PLAYERS    = 32;
+    static constexpr float       MAX_MOVE_SPEED = 600.f; // units/sec anti-cheat cap
+    static constexpr const char* SERVER_VERSION = "0.1.0";
+};
+
+} // namespace mwmp
+
+#endif // OPENMW_SERVER_SERVER_HPP
