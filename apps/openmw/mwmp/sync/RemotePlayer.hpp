@@ -10,6 +10,8 @@
 
 #include "../../mwworld/ptr.hpp"
 
+#include "Nameplate.hpp"
+
 namespace mwmp
 {
     // -----------------------------------------------------------------------
@@ -70,6 +72,7 @@ namespace mwmp
         // --- world NPC ---
         MWWorld::Ptr mNpcPtr;
         bool         mIsSpawned = false;
+        std::unique_ptr<Nameplate> mNameplate;
 
         // --- trySpawn cooldown ---
         // trySpawn() is called every frame until the NPC is placed.

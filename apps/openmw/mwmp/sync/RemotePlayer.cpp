@@ -18,6 +18,7 @@
 #include "../../mwworld/manualref.hpp"
 #include "../../mwworld/class.hpp"
 #include "../../mwworld/esmstore.hpp"
+#include <components/sceneutil/positionattitudetransform.hpp>
 #include "../../mwmechanics/creaturestats.hpp"
 
 namespace mwmp
@@ -161,6 +162,18 @@ void RemotePlayer::trySpawn()
         world->setActorCollisionMode(mNpcPtr, false, false);
 
         mIsSpawned = true;
+
+        // Attach world-space nameplate above the NPC's head.
+        // Also tag the base node with the player's network name so that
+        // Npc::getName() can return it instead of the generic ESM record name.
+        if (auto* baseNode = mNpcPtr.getRefData().getBaseNode())
+        {
+            baseNode->setUserValue("mp_player_name", mName);
+            mNameplate = std::make_unique<Nameplate>(baseNode, mName);
+        }
+        else
+            Log(Debug::Warning) << "[MP] RemotePlayer " << mName << ": no base node for nameplate";
+
         Log(Debug::Info) << "[MP] RemotePlayer " << mName << ": spawned in world at ("
                          << pos.pos[0] << ", " << pos.pos[1] << ", " << pos.pos[2] << ")";
     }
@@ -175,6 +188,9 @@ void RemotePlayer::trySpawn()
 void RemotePlayer::despawnFromWorld()
 {
     if (!mIsSpawned) return;
+
+    // Detach nameplate before deleting the NPC so the parent node is still valid
+    mNameplate.reset();
 
     MWBase::World* world = MWBase::Environment::get().getWorld();
     if (world && !mNpcPtr.isEmpty())
