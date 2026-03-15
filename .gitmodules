@@ -1,0 +1,4 @@
+[submodule "extern/GameNetworkingSockets"]
+	path = extern/GameNetworkingSockets
+	url = https://github.com/ValveSoftware/GameNetworkingSockets.git
+	ignore = dirty
