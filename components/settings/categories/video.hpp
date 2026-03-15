@@ -26,6 +26,12 @@ namespace Settings
         SettingValue<int> mScreen{ mIndex, "Video", "screen", makeMaxSanitizerInt(0) };
         SettingValue<bool> mMinimizeOnFocusLoss{ mIndex, "Video", "minimize on focus loss" };
         SettingValue<bool> mWindowBorder{ mIndex, "Video", "window border" };
+        // Explicit window position in screen coordinates.
+        // -1 (default) means centre on the display selected by 'screen'.
+        // -32768 lower bound supports negative x/y for monitors left of or above the primary.
+        // -1 is the sentinel meaning "centre on the 'screen' display".
+        SettingValue<int> mWindowX{ mIndex, "Video", "window x", makeClampSanitizerInt(-32768, 32767) };
+        SettingValue<int> mWindowY{ mIndex, "Video", "window y", makeClampSanitizerInt(-32768, 32767) };
         SettingValue<int> mAntialiasing{ mIndex, "Video", "antialiasing", makeMaxSanitizerInt(0) };
         SettingValue<SDLUtil::VSyncMode> mVsyncMode{ mIndex, "Video", "vsync mode" };
         SettingValue<float> mFramerateLimit{ mIndex, "Video", "framerate limit", makeMaxSanitizerFloat(0) };
