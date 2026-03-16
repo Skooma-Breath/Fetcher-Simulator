@@ -227,8 +227,10 @@ void RemotePlayer::applyInterpolationToWorld()
     MWBase::World* world = MWBase::Environment::get().getWorld();
     if (!world) return;
 
-    // Check if still in same cell — despawn if not
-    if (!isInSameCellAsLocalPlayer())
+    // Check if still in same cell — despawn if not.
+    // Pass quiet=true to suppress the per-branch verbose log here;
+    // trySpawn() will log the mismatch reason on the next retry.
+    if (!isInSameCellAsLocalPlayer(true))
     {
         despawnFromWorld();
         return;
@@ -385,7 +387,7 @@ void RemotePlayer::updateInterpolation(float dt)
 // ---------------------------------------------------------------------------
 // Returns true if the remote player's last-known cell matches the local
 // player's current active cell.
-bool RemotePlayer::isInSameCellAsLocalPlayer() const
+bool RemotePlayer::isInSameCellAsLocalPlayer(bool quiet) const
 {
     MWBase::World* world = MWBase::Environment::get().getWorld();
     if (!world) return false;
@@ -404,9 +406,10 @@ bool RemotePlayer::isInSameCellAsLocalPlayer() const
     const bool localExt  = localCell->isExterior();
     if (remoteExt != localExt)
     {
-        Log(Debug::Verbose) << "[MP] isInSameCell(" << mName << ")=false:"
-                            << " exterior mismatch remote=" << remoteExt
-                            << " local=" << localExt;
+        if (!quiet)
+            Log(Debug::Verbose) << "[MP] isInSameCell(" << mName << ")=false:"
+                                << " exterior mismatch remote=" << remoteExt
+                                << " local=" << localExt;
         return false;
     }
 
@@ -414,7 +417,7 @@ bool RemotePlayer::isInSameCellAsLocalPlayer() const
     {
         const bool match = mState.cell.gridX == localCell->getGridX()
                         && mState.cell.gridY == localCell->getGridY();
-        if (!match)
+        if (!match && !quiet)
             Log(Debug::Verbose) << "[MP] isInSameCell(" << mName << ")=false:"
                                 << " grid mismatch remote=(" << mState.cell.gridX << ","
                                 << mState.cell.gridY << ") local=("
@@ -425,7 +428,7 @@ bool RemotePlayer::isInSameCellAsLocalPlayer() const
     // Both interior — compare name
     const std::string localName = std::string(localCell->getNameId());
     const bool match = (mState.cell.cellName == localName);
-    if (!match)
+    if (!match && !quiet)
         Log(Debug::Verbose) << "[MP] isInSameCell(" << mName << ")=false:"
                             << " name mismatch remote='" << mState.cell.cellName
                             << "' local='" << localName << "'";

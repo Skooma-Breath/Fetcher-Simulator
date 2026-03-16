@@ -62,7 +62,9 @@ namespace mwmp
         void updateInterpolation(float dt);
 
         // ---- cell helpers ----
-        bool isInSameCellAsLocalPlayer() const;
+        // quiet=true suppresses the verbose mismatch log (used from
+        // applyInterpolationToWorld to avoid double-logging with trySpawn).
+        bool isInSameCellAsLocalPlayer(bool quiet = false) const;
 
         uint32_t    mGuid;
         std::string mName;
