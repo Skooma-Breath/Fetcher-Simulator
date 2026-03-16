@@ -56,6 +56,7 @@
 #include "../mwworld/inventorystore.hpp"
 #include "../mwworld/localscripts.hpp"
 #include "../mwworld/ptr.hpp"
+#include <components/sceneutil/positionattitudetransform.hpp>
 #include "../mwworld/worldmodel.hpp"
 
 #include "../mwrender/npcanimation.hpp"
@@ -543,6 +544,16 @@ namespace MWClass
 
     std::string_view Npc::getName(const MWWorld::ConstPtr& ptr) const
     {
+        // If this NPC is a multiplayer remote player its base node carries
+        // a "mp_player_name" user value set by RemotePlayer::trySpawn().
+        // Use thread_local so we can safely return a string_view into it.
+        if (const auto* baseNode = ptr.getRefData().getBaseNode())
+        {
+            thread_local std::string mpName;
+            if (baseNode->getUserValue("mp_player_name", mpName))
+                return mpName;
+        }
+
         if (ptr.getRefData().getCustomData()
             && ptr.getRefData().getCustomData()->asNpcCustomData().mNpcStats.isWerewolf())
         {
