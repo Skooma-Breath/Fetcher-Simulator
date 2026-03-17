@@ -25,15 +25,19 @@ if not exist "%CLIENT_DIR%\openmw.cfg" (
     echo # Client 2 local overrides> "%CLIENT_DIR%\openmw.cfg"
 )
 
-(
-    echo [Video]
-    echo resolution x = 960
-    echo resolution y = 540
-    echo window mode = 2
-    echo window border = true
-    echo window x = %WIN_X%
-    echo window y = %WIN_Y%
-) > "%CLIENT_DIR%\settings.cfg"
+rem  Only write settings.cfg on first run. After that OpenMW owns it
+rem  and we must not overwrite it or window positions etc. are lost.
+if not exist "%CLIENT_DIR%\settings.cfg" (
+    (
+        echo [Video]
+        echo resolution x = 960
+        echo resolution y = 540
+        echo window mode = 2
+        echo window border = true
+        echo window x = %WIN_X%
+        echo window y = %WIN_Y%
+    ) > "%CLIENT_DIR%\settings.cfg"
+)
 
 "%OPENMW%" ^
     --config    "%REAL_USER_CFG%" ^

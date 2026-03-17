@@ -4,11 +4,6 @@ setlocal
 rem ============================================================
 rem  Client 1  —  main monitor, 2560x1440, position (0,0)
 rem  Player: test1
-rem
-rem  Script lives at openmw\tools\mp-test\
-rem  %ROOT% = this dir, so:
-rem    openmw.exe  = %ROOT%..\..\MSVC2022_64\RelWithDebInfo\openmw.exe
-rem    mp-clients\ = %ROOT%..\..\..\mp-clients\
 rem ============================================================
 
 set ROOT=%~dp0
@@ -22,15 +17,19 @@ if not exist "%CLIENT_DIR%\openmw.cfg" (
     echo # Client 1 local overrides> "%CLIENT_DIR%\openmw.cfg"
 )
 
-(
-    echo [Video]
-    echo resolution x = 2560
-    echo resolution y = 1440
-    echo window mode = 2
-    echo window border = true
-    echo window x = 0
-    echo window y = 0
-) > "%CLIENT_DIR%\settings.cfg"
+rem  Only write settings.cfg on first run. After that OpenMW owns it
+rem  and we must not overwrite it or window positions etc. are lost.
+if not exist "%CLIENT_DIR%\settings.cfg" (
+    (
+        echo [Video]
+        echo resolution x = 2560
+        echo resolution y = 1440
+        echo window mode = 2
+        echo window border = true
+        echo window x = 0
+        echo window y = 0
+    ) > "%CLIENT_DIR%\settings.cfg"
+)
 
 "%OPENMW%" ^
     --config    "%REAL_USER_CFG%" ^

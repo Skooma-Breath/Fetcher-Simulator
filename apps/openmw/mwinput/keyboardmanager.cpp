@@ -14,6 +14,7 @@
 #include "actions.hpp"
 #include "bindingsmanager.hpp"
 
+
 namespace MWInput
 {
     KeyboardManager::KeyboardManager(BindingsManager* bindingsManager)
@@ -55,6 +56,7 @@ namespace MWInput
             return;
 
         MWBase::InputManager* input = MWBase::Environment::get().getInputManager();
+
         if (!input->controlsDisabled() && !consumed)
             mBindingsManager->keyPressed(arg);
 
