@@ -14,6 +14,7 @@ namespace mwmp
     class CellSync;
     class ObjectSync;
     class WorldStateSync;
+    class ChatWindow;
 
     // -----------------------------------------------------------------------
     // Main — singleton that owns every multiplayer subsystem.
@@ -50,6 +51,8 @@ namespace mwmp
         CellSync&       getCellSync()       { return *mCellSync; }
         ObjectSync&     getObjectSync()     { return *mObjectSync; }
         WorldStateSync& getWorldStateSync() { return *mWorldStateSync; }
+        ChatWindow& getChatWindow() { return *mChatWindow; }
+        bool hasChatWindow() const { return mChatWindow != nullptr; }
 
     private:
         Main();
@@ -71,6 +74,7 @@ namespace mwmp
         std::unique_ptr<CellSync>       mCellSync;
         std::unique_ptr<ObjectSync>     mObjectSync;
         std::unique_ptr<WorldStateSync> mWorldStateSync;
+        std::unique_ptr<ChatWindow> mChatWindow;
 
         std::string mPlayerName;
         bool        mWorldReady = false;

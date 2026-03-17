@@ -19,6 +19,11 @@
 #include "../mwworld/player.hpp"
 
 #include "../mwmechanics/actorutil.hpp"
+
+#ifdef BUILD_MULTIPLAYER
+#include "../mwmp/Main.hpp"
+#include "../mwmp/gui/ChatWindow.hpp"
+#endif
 #include "../mwmechanics/npcstats.hpp"
 
 #include "actions.hpp"
@@ -72,6 +77,21 @@ namespace MWInput
             case A_Console:
                 toggleConsole();
                 break;
+#ifdef BUILD_MULTIPLAYER
+            case A_ChatOpen:
+                if (mwmp::Main::isInitialised()
+                    && !mwmp::Main::get().getChatWindow().isInputOpen())
+                    mwmp::Main::get().getChatWindow().openInput();
+                break;
+            case A_ChatMode:
+                if (mwmp::Main::isInitialised())
+                    mwmp::Main::get().getChatWindow().cycleDisplayMode();
+                break;
+            case A_ChatInput:
+                if (mwmp::Main::isInitialised())
+                    mwmp::Main::get().getChatWindow().openInput();
+                break;
+#endif
             case A_Activate:
                 inputManager->resetIdleTime();
                 activate();

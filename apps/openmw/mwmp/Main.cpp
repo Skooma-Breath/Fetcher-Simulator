@@ -21,6 +21,7 @@
 #include "sync/CellSync.hpp"
 #include "sync/ObjectSync.hpp"
 #include "sync/WorldStateSync.hpp"
+#include "gui/ChatWindow.hpp"
 
 namespace mwmp
 {
@@ -116,6 +117,7 @@ Main::Main()
     mCellSync      = std::make_unique<CellSync>(*mClient);
     mObjectSync    = std::make_unique<ObjectSync>(*mClient);
     mWorldStateSync= std::make_unique<WorldStateSync>(*mClient);
+    mChatWindow = std::make_unique<ChatWindow>(*mClient);
 }
 
 Main::~Main()
@@ -133,7 +135,8 @@ void Main::frame(float dt)
 
     if (!mClient->isConnected()) return;
 
-    mPlayerSync->update(dt);
+    mChatWindow->update(dt);
+        mPlayerSync->update(dt);
     mPlayerList->updateAll(dt);
     mActorSync->update(dt);
     mWorldStateSync->update(dt);
@@ -286,7 +289,19 @@ void Main::registerProtocolHandlers()
             }
         });
 
-    // --- World time ---
+    // --- Chat message ---
+    proto.registerHandler(PacketType::ChatMessage,
+        [this](const uint8_t* data, size_t size)
+        {
+            BasePlayer tmp;
+            PacketChatMessage pkt;
+            pkt.setPlayer(&tmp);
+            if (!pkt.decode(data, size)) return;
+            // Show message from any player including own echo from server
+            mChatWindow->addMessage(tmp.name, pkt.message);
+        });
+
+        // --- World time ---
     proto.registerHandler(PacketType::WorldTime,
         [this](const uint8_t* data, size_t size)
         {

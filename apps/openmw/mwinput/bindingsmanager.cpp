@@ -291,6 +291,11 @@ namespace MWInput
         defaultKeyBindings[A_QuickSave] = SDL_SCANCODE_F5;
         defaultKeyBindings[A_QuickLoad] = SDL_SCANCODE_F9;
         defaultKeyBindings[A_TogglePostProcessorHUD] = SDL_SCANCODE_F2;
+#ifdef BUILD_MULTIPLAYER
+        defaultKeyBindings[A_ChatOpen] = SDL_SCANCODE_Y;
+        defaultKeyBindings[A_ChatMode]     = SDL_SCANCODE_F6;
+        defaultKeyBindings[A_ChatInput] = SDL_SCANCODE_BACKSLASH;
+#endif
 
         std::map<int, int> defaultMouseButtonBindings;
         defaultMouseButtonBindings[A_Inventory] = SDL_BUTTON_RIGHT;

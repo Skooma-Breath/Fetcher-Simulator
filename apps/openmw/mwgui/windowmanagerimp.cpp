@@ -125,6 +125,11 @@
 #include "videowidget.hpp"
 #include "waitdialog.hpp"
 
+#ifdef BUILD_MULTIPLAYER
+#include "../mwmp/Main.hpp"
+#include "../mwmp/gui/ChatWindow.hpp"
+#endif
+
 namespace MWGui
 {
     namespace
@@ -654,6 +659,14 @@ namespace MWGui
         MWBase::Environment::get().getInputManager()->changeInputMode(!gameMode);
 
         mInputBlocker->setVisible(gameMode);
+
+#ifdef BUILD_MULTIPLAYER
+        // Show/hide the chat input row passively while any GUI is open.
+        if (mwmp::Main::isInitialised() && !loading)
+        {
+            mwmp::Main::get().getChatWindow().onGuiModeChanged(!gameMode);
+        }
+#endif
 
         if (loading)
             setCursorVisible(mMessageBoxManager && mMessageBoxManager->isInteractiveMessageBox());
@@ -1738,7 +1751,19 @@ namespace MWGui
 
     bool WindowManager::isConsoleMode() const
     {
-        return mConsole && mConsole->isVisible();
+        if (mConsole && mConsole->isVisible())
+            return true;
+#ifdef BUILD_MULTIPLAYER
+        // Treat the MP chat input as a console-like mode so the InputBlocker
+        // is hidden and MyGUI receives keyboard events while typing.
+        if (mwmp::Main::isInitialised())
+        {
+            auto& mp = mwmp::Main::get();
+            if (mp.getChatWindow().isInputOpen())
+                return true;
+        }
+#endif
+        return false;
     }
 
     bool WindowManager::isPostProcessorHudVisible() const

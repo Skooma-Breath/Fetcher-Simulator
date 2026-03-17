@@ -188,6 +188,7 @@ set(BUILTIN_DATA_FILES
     mygui/openmw_chargen_select_specialization.layout
     mygui/openmw_confirmation_dialog.layout
     mygui/openmw_console.layout
+    mygui/openmw_mp_chat.layout
     mygui/openmw_console.skin.xml
     mygui/openmw_container_window.layout
     mygui/openmw_controllerbuttons.layout

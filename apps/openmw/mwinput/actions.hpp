@@ -68,6 +68,12 @@ namespace MWInput
 
         A_TogglePostProcessorHUD = 50,
 
+#ifdef BUILD_MULTIPLAYER
+        A_ChatOpen = 51,        // Open MP chat input
+        A_ChatMode = 52,        // Cycle chat display mode (F6)
+        A_ChatInput = 53,       // Open chat input (backslash)
+#endif
+
         A_Last // Marker for the last item
     };
 }

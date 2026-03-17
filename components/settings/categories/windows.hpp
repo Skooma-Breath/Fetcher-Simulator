@@ -169,6 +169,13 @@ namespace Settings
         SettingValue<float> mDebugMaximizedW{ mIndex, "Windows", "debug maximized w" };
         SettingValue<float> mDebugMaximizedH{ mIndex, "Windows", "debug maximized h" };
         SettingValue<bool> mDebugMaximized{ mIndex, "Windows", "debug maximized" };
+
+        // MP Chat window position/size (fraction of screen, like all other windows)
+        SettingValue<float> mMpChatX{ mIndex, "Windows", "mp chat x" };
+        SettingValue<float> mMpChatY{ mIndex, "Windows", "mp chat y" };
+        SettingValue<float> mMpChatW{ mIndex, "Windows", "mp chat w" };
+        SettingValue<float> mMpChatH{ mIndex, "Windows", "mp chat h" };
+
     };
 }
 
