@@ -12,6 +12,10 @@
 #include "../network/Client.hpp"
 #include "../Main.hpp"
 #include "../sync/PlayerSync.hpp"
+#include "../sync/WorldStateSync.hpp"
+
+#include "../../mwbase/world.hpp"
+#include "../../mwworld/globals.hpp"
 
 namespace mwmp
 {
@@ -80,14 +84,33 @@ void ChatWindow::update(float dt)
 }
 
 // ---------------------------------------------------------------------------
+// Escape a plain string for MyGUI rich text: '#' must become '##' or MyGUI
+// will try to parse it as an inline colour code (#RRGGBB), consuming
+// characters and corrupting the displayed line.
+static std::string escapeMyGUI(const std::string& s)
+{
+    std::string out;
+    out.reserve(s.size());
+    for (char c : s)
+    {
+        if (c == '#') out += "##";
+        else          out += c;
+    }
+    return out;
+}
+
 void ChatWindow::addMessage(const std::string& sender,
                             const std::string& message)
 {
+    // Escape user-supplied strings — our own colour tags are intentional.
+    const std::string safeSender  = escapeMyGUI(sender);
+    const std::string safeMessage = escapeMyGUI(message);
+
     std::string line;
     if (!sender.empty())
-        line = "#FFCC44" + sender + ": #FFFFFF" + message;
+        line = "#FFCC44" + safeSender + ": #FFFFFF" + safeMessage;
     else
-        line = "#AAAAAA" + message;
+        line = "#AAAAAA" + safeMessage;
 
     mHistory->addText(line + "\n");
     scrollToBottom();
@@ -191,6 +214,18 @@ void ChatWindow::onInputAccept(MyGUI::EditBox* /*sender*/)
         return;
     }
 
+    // Handle slash-commands locally — don't send to server.
+    if (!text.empty() && text[0] == '/')
+    {
+        if (mInputHistory.empty() || mInputHistory.back() != text)
+            mInputHistory.push_back(text);
+        mHistoryCurrent = mInputHistory.end();
+        mEditString.clear();
+        handleCommand(text);
+        closeInput();
+        return;
+    }
+
     BasePlayer& local = Main::get().getPlayerSync().localPlayer();
     PacketChatMessage pkt;
     pkt.setPlayer(&local);
@@ -239,6 +274,87 @@ void ChatWindow::onInputKeyPress(MyGUI::Widget* /*sender*/,
         mInput->setTextCursor(mInput->getOnlyText().size());
         return;
     }
+}
+
+// ---------------------------------------------------------------------------
+bool ChatWindow::handleCommand(const std::string& text)
+{
+    // Tokenise: command word is everything up to the first space.
+    const std::string cmd = [&]() {
+        const size_t sp = text.find(' ');
+        return (sp == std::string::npos) ? text : text.substr(0, sp);
+    }();
+
+    // ---- /time ----
+    if (cmd == "/time")
+    {
+        MWBase::World* world = MWBase::Environment::get().getWorld();
+        if (!world)
+        {
+            addMessage("", "No world loaded.");
+            return true;
+        }
+
+        // --- World globals (what the game actually uses) ---
+        const float rawHour = world->getGlobalFloat(MWWorld::Globals::sGameHour);
+        const int   day     = world->getGlobalInt  (MWWorld::Globals::sDay);
+        const int   month   = world->getGlobalInt  (MWWorld::Globals::sMonth);
+        const int   year    = world->getGlobalInt  (MWWorld::Globals::sYear);
+
+        const int   hh      = static_cast<int>(rawHour) % 24;
+        const int   mm      = static_cast<int>((rawHour - static_cast<int>(rawHour)) * 60.f);
+        const char* ampm    = (hh < 12) ? "AM" : "PM";
+        const int   hour12  = (hh == 0) ? 12 : (hh > 12 ? hh - 12 : hh);
+
+        static const char* const MONTH_NAMES[12] = {
+            "Morning Star", "Sun's Dawn",  "First Seed",  "Rain's Hand",
+            "Second Seed",  "Midyear",     "Sun's Height","Last Seed",
+            "Hearthfire",   "Frostfall",   "Sun's Dusk",  "Evening Star"
+        };
+        const char* monthName = (month >= 0 && month < 12) ? MONTH_NAMES[month] : "Unknown";
+
+        char buf[128];
+        std::snprintf(buf, sizeof(buf), "%d:%02d %s  %d %s %d",
+            hour12, mm, ampm, day, monthName, year);
+        addMessage("", std::string("Local time : ") + buf);
+
+        // --- WorldStateSync diagnostic ---
+        const WorldStateSync& wss = Main::get().getWorldStateSync();
+        if (!wss.hasServerTime())
+        {
+            addMessage("", "Server time: not yet received");
+        }
+        else
+        {
+            const Time& st    = wss.lastServerTime();
+            const int   shh   = static_cast<int>(st.hour) % 24;
+            const int   smm   = static_cast<int>((st.hour - static_cast<int>(st.hour)) * 60.f);
+            const char* sampm = (shh < 12) ? "AM" : "PM";
+            const int   sh12  = (shh == 0) ? 12 : (shh > 12 ? shh - 12 : shh);
+            const char* stMonth = (st.month >= 0 && st.month < 12) ? MONTH_NAMES[st.month] : "Unknown";
+
+            char sbuf[128];
+            std::snprintf(sbuf, sizeof(sbuf), "%d:%02d %s  %d %s %d  (scale=%.1f)",
+                sh12, smm, sampm, st.day, stMonth, st.year, wss.lastTimeScale());
+            addMessage("", std::string("Server sent: ") + sbuf
+                + (wss.isTimeApplied() ? "  [applied]" : "  [NOT APPLIED]"));
+        }
+
+        return true;
+    }
+
+    // ---- /help ----
+    if (cmd == "/help")
+    {
+        addMessage("", "Available commands:");
+        addMessage("", "  /time  — show the current in-game date and time");
+        addMessage("", "  /help  — show this message");
+        return true;
+    }
+
+    // Unknown command
+    addMessage("", "Unknown command: " + cmd + "  (try /help)");
+    return true;
 }
 
 // ---------------------------------------------------------------------------

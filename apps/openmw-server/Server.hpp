@@ -99,13 +99,26 @@ private:
     uint16_t    mPort;
     std::atomic<bool> mRunning { false };
 
-    // Simple world state
+    // World state — server is the authoritative clock.
+    // Day/month/year are tracked so new joiners receive a complete Time packet.
+    // The calendar uses simplified 30-day months; full Morrowind calendar
+    // accuracy is a Phase 5 concern.
     struct WorldState
     {
-        float gameHour   = 8.f;
-        float timeScale  = 30.f;
+        float gameHour   = 8.f;   // 0..24
+        int   day        = 1;
+        int   month      = 0;     // 0-based (0=Morning Star)
+        int   year       = 427;
+        float timeScale  = 30.f;  // game-seconds per real-second
         int   weather    = 0;
+
+        // Periodic time-broadcast timer (seconds of real time)
+        float timeSyncTimer = 0.f;
+        static constexpr float TIME_SYNC_RATE = 60.f; // broadcast every 60 real-seconds
     } mWorld;
+
+    // Build an encoded WorldTime packet from current mWorld state.
+    std::vector<uint8_t> buildWorldTimePacket() const;
 
     // Server config (later: load from cfg file)
     static constexpr int         MAX_PLAYERS    = 32;

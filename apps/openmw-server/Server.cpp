@@ -117,9 +117,31 @@ void MPServer::shutdown()
 // ---------------------------------------------------------------------------
 void MPServer::tick(float dt)
 {
-    // Advance world time
+    // Advance world time — carry over into day/month/year when hour wraps.
+    // 30-day months, 12-month year (Morrowind calendar approximation).
     mWorld.gameHour += (dt * mWorld.timeScale) / 3600.f;
-    if (mWorld.gameHour >= 24.f) mWorld.gameHour -= 24.f;
+    while (mWorld.gameHour >= 24.f)
+    {
+        mWorld.gameHour -= 24.f;
+        if (++mWorld.day > 30)
+        {
+            mWorld.day = 1;
+            if (++mWorld.month > 11)
+            {
+                mWorld.month = 0;
+                ++mWorld.year;
+            }
+        }
+    }
+
+    // Periodic world-time broadcast so connected clients stay in sync.
+    mWorld.timeSyncTimer += dt;
+    if (mWorld.timeSyncTimer >= WorldState::TIME_SYNC_RATE)
+    {
+        mWorld.timeSyncTimer = 0.f;
+        if (!mClients.empty())
+            broadcastToAll(buildWorldTimePacket());
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -216,6 +238,19 @@ void MPServer::onClientMessage(ConnectedClient& client,
 }
 
 // ---------------------------------------------------------------------------
+std::vector<uint8_t> MPServer::buildWorldTimePacket() const
+{
+    PacketWorldTime pkt;
+    pkt.time.hour      = mWorld.gameHour;
+    pkt.time.day       = mWorld.day;
+    pkt.time.month     = mWorld.month;
+    pkt.time.year      = mWorld.year;
+    pkt.time.gameHour  = mWorld.gameHour;
+    pkt.timeScale      = mWorld.timeScale;
+    return pkt.encode();
+}
+
+// ---------------------------------------------------------------------------
 void MPServer::handleHandshake(ConnectedClient& c, const uint8_t* data, size_t size)
 {
     PacketHandshake hs;
@@ -286,6 +321,15 @@ void MPServer::handleHandshake(ConnectedClient& c, const uint8_t* data, size_t s
         Log(Debug::Info) << "[Server] Sent catch-up state for "
                          << existingClient.name << " to " << c.name;
     }
+
+    // Send authoritative world time so the new client's clock snaps to the
+    // server immediately rather than waiting for the next 60-second broadcast.
+    sendTo(c.conn, buildWorldTimePacket());
+    Log(Debug::Info) << "[Server] Sent world time to " << c.name
+                     << " (hour=" << mWorld.gameHour
+                     << " day=" << mWorld.day
+                     << " month=" << mWorld.month
+                     << " year=" << mWorld.year << ")";
 }
 
 // ---------------------------------------------------------------------------
@@ -360,7 +404,11 @@ void MPServer::handleChatMessage(ConnectedClient& c, const uint8_t* data, size_t
     pkt.setPlayer(&c.player);
     if (!pkt.decode(data, size)) return;
 
-    Log(Debug::Info) << "[Server] Chat [" << c.name << "]: " << pkt.message;
+    Log(Debug::Info) << "[Server] Chat [" << c.name << "] "
+                     << "(server time " << mWorld.gameHour << "h "
+                     << "day=" << mWorld.day << " mo=" << mWorld.month
+                     << " yr=" << mWorld.year << "): "
+                     << pkt.message;
     // Relay to everyone including sender (so they see their own message)
     broadcastToAll(std::vector<uint8_t>(data, data + size));
 }
