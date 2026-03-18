@@ -80,6 +80,7 @@ private:
     void handlePlayerStatsDynamic(ConnectedClient& c, const uint8_t* data, size_t size);
     void handleChatMessage   (ConnectedClient& c, const uint8_t* data, size_t size);
     void handleDoorState     (ConnectedClient& c, const uint8_t* data, size_t size);
+    void handleWeather       (ConnectedClient& c, const uint8_t* data, size_t size);
 
     // Broadcast helpers
     void broadcastToAll      (const std::vector<uint8_t>& data,
@@ -122,7 +123,17 @@ private:
         // Authoritative door states: cellId → list of door entries.
         // Populated when clients activate doors; sent to new joiners as catch-up.
         std::map<std::string, std::vector<mwmp::DoorEntry>> doorStates;
+
+        // Weather — reported by the host (guid 1) and relayed to others.
+        bool        hasWeather      = false;
+        uint32_t    hostGuid        = 0;     // guid of first connected player
+        int         weatherCurrent  = 0;
+        int         weatherNext     = -1;
+        float       weatherTransition = 0.f;
+        std::string weatherRegion;           // serialised ESM::RefId
     } mWorld;
+
+    std::vector<uint8_t> buildWorldWeatherPacket() const;
 
     // Build an encoded WorldTime packet from current mWorld state.
     std::vector<uint8_t> buildWorldTimePacket() const;

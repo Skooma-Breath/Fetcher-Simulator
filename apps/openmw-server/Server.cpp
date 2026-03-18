@@ -16,6 +16,7 @@
 #include <components/openmw-mp/Packets/Player/PacketPlayerStatsDynamic.hpp>
 #include <components/openmw-mp/Packets/Player/PacketChatMessage.hpp>
 #include <components/openmw-mp/Packets/Worldstate/PacketWorldTime.hpp>
+// PacketWorldWeather is defined in PacketWorldTime.hpp
 
 namespace mwmp
 {
@@ -232,6 +233,7 @@ void MPServer::onClientMessage(ConnectedClient& client,
         case PacketType::PlayerStatsDynamic: handlePlayerStatsDynamic(client, data, size); break;
         case PacketType::ChatMessage:      handleChatMessage(client, data, size);        break;
         case PacketType::DoorState:        handleDoorState(client, data, size);          break;
+        case PacketType::WorldWeather:     handleWeather(client, data, size);            break;
         default:
             Log(Debug::Verbose) << "[Server] Unhandled packet type " << hdr.type;
             break;
@@ -279,6 +281,10 @@ void MPServer::handleHandshake(ConnectedClient& c, const uint8_t* data, size_t s
     c.player.guid             = c.guid;
     c.player.name             = hs.playerName;
     c.handshakeComplete       = true;
+
+    // First player to complete handshake becomes the weather host.
+    if (mWorld.hostGuid == 0)
+        mWorld.hostGuid = c.guid;
 
     PacketHandshakeResponse rsp;
     rsp.accepted       = true;
@@ -349,6 +355,14 @@ void MPServer::handleHandshake(ConnectedClient& c, const uint8_t* data, size_t s
     if (doorCount > 0)
         Log(Debug::Info) << "[Server] Sent " << doorCount
                          << " door state(s) to " << c.name;
+
+    // Send current weather so new joiner sees the same sky immediately.
+    if (mWorld.hasWeather)
+    {
+        sendTo(c.conn, buildWorldWeatherPacket());
+        Log(Debug::Info) << "[Server] Sent weather=" << mWorld.weatherCurrent
+                         << " to " << c.name;
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -413,6 +427,45 @@ void MPServer::handlePlayerStatsDynamic(ConnectedClient& c, const uint8_t* data,
     PacketPlayerStatsDynamic pkt;
     pkt.setPlayer(&c.player);
     if (!pkt.decode(data, size)) return;
+    broadcastToAll(std::vector<uint8_t>(data, data + size), c.conn);
+}
+
+// ---------------------------------------------------------------------------
+std::vector<uint8_t> MPServer::buildWorldWeatherPacket() const
+{
+    PacketWorldWeather pkt;
+    pkt.currentWeather   = mWorld.weatherCurrent;
+    pkt.nextWeather      = mWorld.weatherNext;
+    pkt.transitionFactor = mWorld.weatherTransition;
+    pkt.regionName       = mWorld.weatherRegion;
+    return pkt.encode();
+}
+
+// ---------------------------------------------------------------------------
+void MPServer::handleWeather(ConnectedClient& c, const uint8_t* data, size_t size)
+{
+    // Only the host is trusted to report weather.
+    // Ignore packets from any other client — they should not be sending these.
+    if (c.guid != mWorld.hostGuid)
+    {
+        Log(Debug::Verbose) << "[Server] Ignoring weather from non-host " << c.name;
+        return;
+    }
+
+    PacketWorldWeather pkt;
+    if (!pkt.decode(data, size)) return;
+
+    mWorld.weatherCurrent    = pkt.currentWeather;
+    mWorld.weatherNext       = pkt.nextWeather;
+    mWorld.weatherTransition = pkt.transitionFactor;
+    mWorld.weatherRegion     = pkt.regionName;
+    mWorld.hasWeather        = true;
+
+    Log(Debug::Verbose) << "[Server] Weather from host " << c.name
+                        << ": current=" << pkt.currentWeather
+                        << " region=" << pkt.regionName;
+
+    // Relay to all non-host clients.
     broadcastToAll(std::vector<uint8_t>(data, data + size), c.conn);
 }
 

@@ -319,7 +319,8 @@ void Main::registerProtocolHandlers()
             PacketWorldWeather pkt;
             if (!pkt.decode(data, size)) return;
             mWorldStateSync->onServerWeatherUpdate(
-                pkt.currentWeather, pkt.nextWeather, pkt.transitionFactor);
+                pkt.currentWeather, pkt.nextWeather,
+                pkt.transitionFactor, pkt.regionName);
         });
 
     // --- Door state ---
