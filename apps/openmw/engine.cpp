@@ -242,6 +242,19 @@ bool OMW::Engine::frame(unsigned frameNumber, float frametime)
 
         bool paused = mWorld->getTimeManager()->isPaused();
 
+#ifdef BUILD_MULTIPLAYER
+        // In multiplayer the server is the authoritative simulation clock and
+        // every client must keep their local world running regardless of which
+        // GUI menus are open.  Pausing unilaterally would desync NPC positions,
+        // physics, time, and mechanics from all other connected clients.
+        //
+        // The State_NoGame guard is intentional: we must not suppress the pause
+        // that fires before any save is loaded (title screen / loading screen).
+        if (mwmp::Main::isInitialised()
+            && mStateManager->getState() != MWBase::StateManager::State_NoGame)
+            paused = false;
+#endif
+
         {
             ScopedProfile<UserStatsType::Script> profile(frameStart, frameNumber, *timer, *stats);
 
