@@ -2,6 +2,7 @@
 #define OPENMW_SERVER_SERVER_HPP
 
 #include <cstdint>
+#include <map>
 #include <string>
 #include <unordered_map>
 #include <memory>
@@ -14,6 +15,7 @@
 
 #include <components/openmw-mp/Base/BasePlayer.hpp>
 #include <components/openmw-mp/NetworkMessages.hpp>
+#include <components/openmw-mp/Packets/Object/PacketDoorState.hpp>
 
 namespace mwmp
 {
@@ -77,6 +79,7 @@ private:
     void handlePlayerEquipment(ConnectedClient& c, const uint8_t* data, size_t size);
     void handlePlayerStatsDynamic(ConnectedClient& c, const uint8_t* data, size_t size);
     void handleChatMessage   (ConnectedClient& c, const uint8_t* data, size_t size);
+    void handleDoorState     (ConnectedClient& c, const uint8_t* data, size_t size);
 
     // Broadcast helpers
     void broadcastToAll      (const std::vector<uint8_t>& data,
@@ -115,6 +118,10 @@ private:
         // Periodic time-broadcast timer (seconds of real time)
         float timeSyncTimer = 0.f;
         static constexpr float TIME_SYNC_RATE = 60.f; // broadcast every 60 real-seconds
+
+        // Authoritative door states: cellId → list of door entries.
+        // Populated when clients activate doors; sent to new joiners as catch-up.
+        std::map<std::string, std::vector<mwmp::DoorEntry>> doorStates;
     } mWorld;
 
     // Build an encoded WorldTime packet from current mWorld state.

@@ -65,6 +65,11 @@
 #include "../mwbase/statemanager.hpp"
 #include "../mwbase/windowmanager.hpp"
 
+#ifdef BUILD_MULTIPLAYER
+#include "../mwmp/Main.hpp"
+#include "../mwmp/sync/ObjectSync.hpp"
+#endif
+
 #include "../mwmechanics/actorutil.hpp"
 #include "../mwmechanics/aiavoiddoor.hpp" //Used to tell actors to avoid doors
 #include "../mwmechanics/combat.hpp"
@@ -2394,6 +2399,34 @@ namespace MWWorld
         }
         door.getClass().setDoorState(door, state);
         mDoorStates[door] = state;
+
+#ifdef BUILD_MULTIPLAYER
+        // Notify the MP layer that a door was activated locally.
+        // Only hook the TOGGLE overload — the 2-arg overload is called when
+        // we receive a network packet and must NOT feed back into ObjectSync
+        // or we create a send loop.
+        if (mwmp::Main::isInitialised())
+        {
+            const MWWorld::Cell* cell = door.getCell()->getCell();
+            std::string cellId;
+            if (cell->isExterior())
+            {
+                char buf[32];
+                std::snprintf(buf, sizeof(buf), "EXT:%d,%d",
+                    cell->getGridX(), cell->getGridY());
+                cellId = buf;
+            }
+            else
+                cellId = std::string(cell->getNameId());
+
+            mwmp::Main::get().getObjectSync().onDoorStateChanged(
+                cellId,
+                door.getCellRef().getRefId().toString(),
+                door.getCellRef().getRefNum().mIndex,
+                state == MWWorld::DoorState::Opening,
+                /*locked=*/false, /*lockLevel=*/0);
+        }
+#endif
     }
 
     void World::activateDoor(const Ptr& door, MWWorld::DoorState state)

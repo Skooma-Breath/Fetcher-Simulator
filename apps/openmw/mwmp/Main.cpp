@@ -12,6 +12,7 @@
 #include <components/openmw-mp/Packets/Player/PacketPlayerDeath.hpp>
 #include <components/openmw-mp/Packets/System/PacketHandshake.hpp>
 #include <components/openmw-mp/Packets/Worldstate/PacketWorldTime.hpp>
+#include <components/openmw-mp/Packets/Object/PacketDoorState.hpp>
 
 #include "network/Client.hpp"
 #include "network/Protocol.hpp"
@@ -139,6 +140,7 @@ void Main::frame(float dt)
         mPlayerSync->update(dt);
     mPlayerList->updateAll(dt);
     mActorSync->update(dt);
+    mObjectSync->update(dt);
     mWorldStateSync->update(dt);
 }
 
@@ -318,6 +320,18 @@ void Main::registerProtocolHandlers()
             if (!pkt.decode(data, size)) return;
             mWorldStateSync->onServerWeatherUpdate(
                 pkt.currentWeather, pkt.nextWeather, pkt.transitionFactor);
+        });
+
+    // --- Door state ---
+    proto.registerHandler(PacketType::DoorState,
+        [this](const uint8_t* data, size_t size)
+        {
+            PacketDoorState pkt;
+            if (!pkt.decode(data, size)) return;
+            // Ignore echo of our own packets (server rebroadcasts to all)
+            if (pkt.authorGuid == mPlayerSync->localPlayer().guid) return;
+            for (const auto& d : pkt.doors)
+                mObjectSync->onServerDoorState(d.cellId, d.refId, d.refNum, d.isOpen);
         });
 
     Log(Debug::Info) << "[MP] Protocol handlers registered";

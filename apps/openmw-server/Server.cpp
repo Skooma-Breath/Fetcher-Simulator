@@ -231,6 +231,7 @@ void MPServer::onClientMessage(ConnectedClient& client,
         case PacketType::PlayerEquipment:  handlePlayerEquipment(client, data, size);    break;
         case PacketType::PlayerStatsDynamic: handlePlayerStatsDynamic(client, data, size); break;
         case PacketType::ChatMessage:      handleChatMessage(client, data, size);        break;
+        case PacketType::DoorState:        handleDoorState(client, data, size);          break;
         default:
             Log(Debug::Verbose) << "[Server] Unhandled packet type " << hdr.type;
             break;
@@ -330,6 +331,24 @@ void MPServer::handleHandshake(ConnectedClient& c, const uint8_t* data, size_t s
                      << " day=" << mWorld.day
                      << " month=" << mWorld.month
                      << " year=" << mWorld.year << ")";
+
+    // Send all known door states so the new joiner sees doors that were
+    // opened/closed before they connected.
+    int doorCount = 0;
+    for (const auto& [cellId, entries] : mWorld.doorStates)
+    {
+        if (entries.empty()) continue;
+
+        PacketDoorState pkt;
+        pkt.authorGuid = 0;   // 0 = server authority, not a player
+        pkt.cellId     = cellId;
+        pkt.doors      = entries;
+        sendTo(c.conn, pkt.encode());
+        doorCount += static_cast<int>(entries.size());
+    }
+    if (doorCount > 0)
+        Log(Debug::Info) << "[Server] Sent " << doorCount
+                         << " door state(s) to " << c.name;
 }
 
 // ---------------------------------------------------------------------------
@@ -394,6 +413,42 @@ void MPServer::handlePlayerStatsDynamic(ConnectedClient& c, const uint8_t* data,
     PacketPlayerStatsDynamic pkt;
     pkt.setPlayer(&c.player);
     if (!pkt.decode(data, size)) return;
+    broadcastToAll(std::vector<uint8_t>(data, data + size), c.conn);
+}
+
+// ---------------------------------------------------------------------------
+void MPServer::handleDoorState(ConnectedClient& c, const uint8_t* data, size_t size)
+{
+    PacketDoorState pkt;
+    if (!pkt.decode(data, size)) return;
+
+    Log(Debug::Verbose) << "[Server] DoorState from " << c.name
+                        << " cell=" << pkt.cellId
+                        << " doors=" << pkt.doors.size();
+
+    // Store each entry as authoritative state, keyed by cellId.
+    // Last write wins — the server is the authority.
+    for (const auto& entry : pkt.doors)
+    {
+        auto& cellDoors = mWorld.doorStates[entry.cellId];
+
+        // Update existing entry for this refId/refNum, or append.
+        bool found = false;
+        for (auto& existing : cellDoors)
+        {
+            if (existing.refId == entry.refId
+                && (entry.refNum == 0 || existing.refNum == entry.refNum))
+            {
+                existing = entry;
+                found = true;
+                break;
+            }
+        }
+        if (!found)
+            cellDoors.push_back(entry);
+    }
+
+    // Relay to all other clients so they apply the state immediately.
     broadcastToAll(std::vector<uint8_t>(data, data + size), c.conn);
 }
 
