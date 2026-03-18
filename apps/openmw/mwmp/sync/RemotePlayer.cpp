@@ -100,7 +100,7 @@ void RemotePlayer::trySpawn()
         return;
     }
 
-    if (!isInSameCellAsLocalPlayer())
+    if (!isInSameCellAsLocalPlayer(/*quiet=*/true))
     {
         Log(Debug::Verbose) << "[MP] trySpawn(" << mName << "): not in same cell (remote='"
                             << mState.cell.cellName << "' ext=" << mState.cell.isExterior << ")";
