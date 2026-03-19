@@ -5,6 +5,7 @@
 
 #include <components/debug/debuglog.hpp>
 #include <components/esm/refid.hpp>
+#include <components/misc/constants.hpp>
 
 #include "../../mwbase/environment.hpp"
 #include "../../mwbase/world.hpp"
@@ -61,6 +62,21 @@ void RemotePlayer::update(float dt)
     if (mIsSpawned)
     {
         applyInterpolationToWorld();
+
+        // The OSG base node is attached to the scene graph one frame after
+        // placeObject() returns, so the first trySpawn() attempt always misses
+        // it. Retry attachment every frame until it appears — this is cheap
+        // (one pointer check) and self-limiting once the nameplate is created.
+        if (!mNameplate && !mNpcPtr.isEmpty())
+        {
+            if (auto* baseNode = mNpcPtr.getRefData().getBaseNode())
+            {
+                baseNode->setUserValue("mp_player_name", mName);
+                mNameplate = std::make_unique<Nameplate>(baseNode, mName);
+                Log(Debug::Info) << "[MP] RemotePlayer " << mName
+                                 << ": nameplate attached (deferred)";
+            }
+        }
     }
     else
     {
@@ -242,8 +258,19 @@ void RemotePlayer::applyInterpolationToWorld()
         // movePhysics=false: don't run physics simulation, just teleport.
         // moveToActive=false: don't force the cell to stay active.
         osg::Vec3f newPos(mInterp.cx, mInterp.cy, mInterp.cz);
-        MWWorld::Ptr moved = world->moveObject(mNpcPtr, newPos, /*movePhysics=*/false,
-                                               /*moveToActive=*/false);
+        // Don't attempt to move until the OSG base node is attached (it arrives
+        // one frame after placeObject returns). More critically: movePhysics=true
+        // is required — the physics task scheduler runs UpdatePosition every frame
+        // and resets the actor's scene node to frameData.mPosition (the physics sim
+        // result). Without updating the physics actor position on every move, the
+        // scheduler overwrites our setPosition call and the NPC appears frozen at
+        // the spawn point. Rotation is unaffected because it lives on a separate
+        // attitude node that the physics system never touches.
+        if (!mNpcPtr.getRefData().getBaseNode())
+            return;
+
+        MWWorld::Ptr moved = world->moveObject(mNpcPtr, newPos, /*movePhysics=*/true,
+                                               /*moveToActive=*/true);
         // moveObject returns an updated Ptr when the cell changes; keep it if valid
         if (!moved.isEmpty())
             mNpcPtr = moved;
@@ -345,7 +372,23 @@ void RemotePlayer::onCellChange(const BasePlayer& state)
     {
         Log(Debug::Info) << "[MP] RemotePlayer " << mName
                          << " cell: " << oldCell << " -> " << state.cell.cellName;
-        despawnFromWorld(); // will respawn in new cell via trySpawn()
+
+        // For adjacent exterior grid crossings, skip the despawn/respawn cycle.
+        // Both cells are already loaded by OpenMW, so we can just leave the NPC
+        // in the world and let the interpolator walk it across the border naturally.
+        // Only despawn for: interior<->exterior transitions, or grid jumps > 1
+        // (which indicate a teleport rather than a normal border crossing).
+        bool skipDespawn = false;
+        if (!exteriorChanged && mState.cell.isExterior && state.cell.isExterior)
+        {
+            const int dx = std::abs(state.cell.gridX - mState.cell.gridX);
+            const int dy = std::abs(state.cell.gridY - mState.cell.gridY);
+            if (dx <= Constants::CellGridRadius && dy <= Constants::CellGridRadius)
+                skipDespawn = true;
+        }
+
+        if (!skipDespawn)
+            despawnFromWorld(); // will respawn in new cell via trySpawn()
     }
 }
 
@@ -415,13 +458,19 @@ bool RemotePlayer::isInSameCellAsLocalPlayer(bool quiet) const
 
     if (remoteExt)
     {
-        const bool match = mState.cell.gridX == localCell->getGridX()
-                        && mState.cell.gridY == localCell->getGridY();
+        // Keep remote NPCs visible as long as their cell is within OpenMW's
+        // active grid. CellGridRadius is the engine's own half-size (default 1
+        // = 3x3 grid), so this automatically tracks whatever is actually loaded.
+        const int dx = std::abs(mState.cell.gridX - localCell->getGridX());
+        const int dy = std::abs(mState.cell.gridY - localCell->getGridY());
+        const int r  = Constants::CellGridRadius;
+        const bool match = (dx <= r && dy <= r);
         if (!match && !quiet)
             Log(Debug::Verbose) << "[MP] isInSameCell(" << mName << ")=false:"
-                                << " grid mismatch remote=(" << mState.cell.gridX << ","
+                                << " grid too far remote=(" << mState.cell.gridX << ","
                                 << mState.cell.gridY << ") local=("
-                                << localCell->getGridX() << "," << localCell->getGridY() << ")";
+                                << localCell->getGridX() << "," << localCell->getGridY()
+                                << ") dx=" << dx << " dy=" << dy << " r=" << r;
         return match;
     }
 

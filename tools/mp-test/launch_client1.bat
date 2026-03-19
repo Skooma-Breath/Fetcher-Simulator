@@ -28,6 +28,9 @@ if not exist "%CLIENT_DIR%\settings.cfg" (
         echo window border = true
         echo window x = 0
         echo window y = 0
+        echo minimize on focus loss = false
+        echo framerate limit = 60
+        echo vsync mode = 0
     ) > "%CLIENT_DIR%\settings.cfg"
 )
 

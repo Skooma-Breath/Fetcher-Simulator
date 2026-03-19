@@ -207,6 +207,15 @@ bool OMW::Engine::frame(unsigned frameNumber, float frametime)
             mInputManager->update(frametime, false);
         }
 
+        // Keep the MP network tick alive even when the window is not visible.
+        // The GNS connection must keep polling regardless of window focus/minimize
+        // state, otherwise position updates stop and other players see us freeze.
+        // This runs before the visibility bail-out intentionally.
+#ifdef BUILD_MULTIPLAYER
+        if (mwmp::Main::isInitialised())
+            mwmp::Main::get().frame(frametime);
+#endif
+
         // When the window is minimized, pause the game. Currently this *has* to be here to work around a MyGUI bug.
         // If we are not currently rendering, then RenderItems will not be reused resulting in a memory leak upon
         // changing widget textures (fixed in MyGUI 3.3.2), and destroyed widgets will not be deleted (not fixed yet,
@@ -326,11 +335,6 @@ bool OMW::Engine::frame(unsigned frameNumber, float frametime)
             mWindowManager->update(frametime);
         }
 
-#ifdef BUILD_MULTIPLAYER
-        // update multiplayer
-        if (mwmp::Main::isInitialised())
-            mwmp::Main::get().frame(frametime);
-#endif
     }
     catch (const std::exception& e)
     {
@@ -1087,6 +1091,18 @@ void OMW::Engine::go()
             timeManager.setSimulationTime(timeManager.getSimulationTime() + dt);
             timeManager.setRenderingSimulationTime(timeManager.getRenderingSimulationTime() + dt);
         }
+#ifdef BUILD_MULTIPLAYER
+        else if (mwmp::Main::isInitialised())
+        {
+            // In multiplayer the rendering simulation clock must keep advancing
+            // even when the game is paused (menus open, chat window, etc.).
+            // mViewer->advance() feeds OSG's internal particle simulation from
+            // getRenderingSimulationTime() — if it stops, rain/snow/particles
+            // freeze visually. Game simulation time stays paused as normal so
+            // scripts and mechanics don't advance while menus are open.
+            timeManager.setRenderingSimulationTime(timeManager.getRenderingSimulationTime() + dt);
+        }
+#endif
 
         if (stats)
         {
