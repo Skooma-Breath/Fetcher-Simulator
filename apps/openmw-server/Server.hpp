@@ -1,7 +1,10 @@
 #ifndef OPENMW_SERVER_SERVER_HPP
 #define OPENMW_SERVER_SERVER_HPP
 
+#include <chrono>
+#include <cmath>
 #include <cstdint>
+#include <functional>
 #include <map>
 #include <string>
 #include <unordered_map>
@@ -17,6 +20,8 @@
 #include <components/openmw-mp/NetworkMessages.hpp>
 #include <components/openmw-mp/Packets/Object/PacketDoorState.hpp>
 
+#include "ScriptEngine.hpp"
+
 namespace mwmp
 {
 
@@ -30,6 +35,9 @@ struct ConnectedClient
     std::string         name;
     BasePlayer          player;
     bool                handshakeComplete = false;
+
+    // Per-player key/value store — set/get from Lua scripts via player:setData/getData().
+    std::unordered_map<std::string, std::string> scriptData;
 };
 
 // ---------------------------------------------------------------------------
@@ -54,59 +62,100 @@ public:
     void requestStop() { mRunning = false; }
     void shutdown();
 
+    // ── Script-facing public API ──────────────────────────────────────────
+
+    // Seconds of real time since server start.
+    double getUptime() const;
+
+    // Send a chat message from the "Server" sender to all or one player.
+    void broadcastServerMessage(const std::string& text);
+    void sendServerMessage(uint32_t guid, const std::string& text);
+
+    // Disconnect a player by guid with a reason string.
+    void kickClient(uint32_t guid, const std::string& reason);
+
+    // World time accessors.
+    float getWorldHour() const  { return mWorld.gameHour; }
+    void  setWorldHour(float h)
+    {
+        mWorld.gameHour = std::fmod(h, 24.f);
+        if (mWorld.gameHour < 0.f) mWorld.gameHour += 24.f;
+    }
+
+    // Look up a live client by guid. Returns nullptr if not found / disconnected.
+    ConnectedClient* findClientByGuid(uint32_t guid);
+
+    // Iterate all fully-connected (post-handshake) players.
+    // Used by script bindings to build the mp.getPlayers() table.
+    template<typename Fn>
+    void forEachPlayer(Fn&& fn)
+    {
+        for (auto& [conn, client] : mClients)
+            if (client.handshakeComplete)
+                fn(client);
+    }
+
+    // Number of fully-connected players.
+    int getPlayerCount() const;
+
 private:
-    // GNS callbacks
+    // ── GNS callbacks ─────────────────────────────────────────────────────
     static MPServer* sInstance;
     static void staticConnectionStatusChanged(SteamNetConnectionStatusChangedCallback_t* info);
     void onConnectionStatusChanged(SteamNetConnectionStatusChangedCallback_t* info);
 
-    // Per-frame update
+    // ── Per-frame update ──────────────────────────────────────────────────
     void tick(float dt);
     void processIncomingMessages();
 
-    // Client management
+    // ── Client management ─────────────────────────────────────────────────
     void onClientConnected   (HSteamNetConnection conn);
     void onClientDisconnected(HSteamNetConnection conn, const std::string& reason);
 
-    // Packet dispatch
+    // ── Packet dispatch ───────────────────────────────────────────────────
     void onClientMessage(ConnectedClient& client, const uint8_t* data, size_t size);
 
-    // Packet handlers
-    void handleHandshake     (ConnectedClient& c, const uint8_t* data, size_t size);
-    void handlePlayerBaseInfo(ConnectedClient& c, const uint8_t* data, size_t size);
-    void handlePlayerPosition(ConnectedClient& c, const uint8_t* data, size_t size);
-    void handlePlayerCellChange(ConnectedClient& c, const uint8_t* data, size_t size);
-    void handlePlayerEquipment(ConnectedClient& c, const uint8_t* data, size_t size);
+    // ── Packet handlers ───────────────────────────────────────────────────
+    void handleHandshake        (ConnectedClient& c, const uint8_t* data, size_t size);
+    void handlePlayerBaseInfo   (ConnectedClient& c, const uint8_t* data, size_t size);
+    void handlePlayerPosition   (ConnectedClient& c, const uint8_t* data, size_t size);
+    void handlePlayerCellChange (ConnectedClient& c, const uint8_t* data, size_t size);
+    void handlePlayerEquipment  (ConnectedClient& c, const uint8_t* data, size_t size);
     void handlePlayerStatsDynamic(ConnectedClient& c, const uint8_t* data, size_t size);
-    void handleChatMessage   (ConnectedClient& c, const uint8_t* data, size_t size);
-    void handleDoorState     (ConnectedClient& c, const uint8_t* data, size_t size);
-    void handleWeather       (ConnectedClient& c, const uint8_t* data, size_t size);
+    void handleChatMessage      (ConnectedClient& c, const uint8_t* data, size_t size);
+    void handleDoorState        (ConnectedClient& c, const uint8_t* data, size_t size);
+    void handleWeather          (ConnectedClient& c, const uint8_t* data, size_t size);
 
-    // Broadcast helpers
-    void broadcastToAll      (const std::vector<uint8_t>& data,
-                              HSteamNetConnection except = k_HSteamNetConnection_Invalid,
-                              bool reliable = true);
-    void sendTo              (HSteamNetConnection conn,
-                              const std::vector<uint8_t>& data,
-                              bool reliable = true);
+    // ── Broadcast helpers ─────────────────────────────────────────────────
+    void broadcastToAll(const std::vector<uint8_t>& data,
+                        HSteamNetConnection except = k_HSteamNetConnection_Invalid,
+                        bool reliable = true);
+    void sendTo        (HSteamNetConnection conn,
+                        const std::vector<uint8_t>& data,
+                        bool reliable = true);
 
-    // Validation
+    // ── Validation ────────────────────────────────────────────────────────
     bool validateMovement(const ConnectedClient& c, const BasePlayer& proposed) const;
 
-    // State
+    // ── Packet builders ───────────────────────────────────────────────────
+    std::vector<uint8_t> buildWorldTimePacket()    const;
+    std::vector<uint8_t> buildWorldWeatherPacket() const;
+
+    // ── State ─────────────────────────────────────────────────────────────
     ISteamNetworkingSockets* mInterface    = nullptr;
     HSteamListenSocket       mListenSocket = k_HSteamListenSocket_Invalid;
     HSteamNetPollGroup       mPollGroup    = k_HSteamNetPollGroup_Invalid;
 
     std::unordered_map<HSteamNetConnection, ConnectedClient> mClients;
-    uint32_t    mNextGuid = 1;
+    uint32_t    mNextGuid  = 1;
     uint16_t    mPort;
     std::atomic<bool> mRunning { false };
+    std::chrono::steady_clock::time_point mStartTime;
 
-    // World state — server is the authoritative clock.
-    // Day/month/year are tracked so new joiners receive a complete Time packet.
-    // The calendar uses simplified 30-day months; full Morrowind calendar
-    // accuracy is a Phase 5 concern.
+    // ── World state ───────────────────────────────────────────────────────
+    // Server is the authoritative clock. Day/month/year are tracked so new
+    // joiners receive a complete Time packet. The calendar uses simplified
+    // 30-day months; full Morrowind calendar accuracy is a later concern.
     struct WorldState
     {
         float gameHour   = 8.f;   // 0..24
@@ -118,29 +167,26 @@ private:
 
         // Periodic time-broadcast timer (seconds of real time)
         float timeSyncTimer = 0.f;
-        static constexpr float TIME_SYNC_RATE = 60.f; // broadcast every 60 real-seconds
+        static constexpr float TIME_SYNC_RATE = 60.f;
 
         // Authoritative door states: cellId → list of door entries.
-        // Populated when clients activate doors; sent to new joiners as catch-up.
         std::map<std::string, std::vector<mwmp::DoorEntry>> doorStates;
 
         // Weather — reported by the host (guid 1) and relayed to others.
-        bool        hasWeather      = false;
-        uint32_t    hostGuid        = 0;     // guid of first connected player
-        int         weatherCurrent  = 0;
-        int         weatherNext     = -1;
+        bool        hasWeather        = false;
+        uint32_t    hostGuid          = 0;
+        int         weatherCurrent    = 0;
+        int         weatherNext       = -1;
         float       weatherTransition = 0.f;
-        std::string weatherRegion;           // serialised ESM::RefId
+        std::string weatherRegion;
     } mWorld;
 
-    std::vector<uint8_t> buildWorldWeatherPacket() const;
+    // ── Scripting ─────────────────────────────────────────────────────────
+    ScriptEngine mScript { this };
 
-    // Build an encoded WorldTime packet from current mWorld state.
-    std::vector<uint8_t> buildWorldTimePacket() const;
-
-    // Server config (later: load from cfg file)
+    // ── Config ────────────────────────────────────────────────────────────
     static constexpr int         MAX_PLAYERS    = 32;
-    static constexpr float       MAX_MOVE_SPEED = 600.f; // units/sec anti-cheat cap
+    static constexpr float       MAX_MOVE_SPEED = 600.f;
     static constexpr const char* SERVER_VERSION = "0.1.0";
 };
 

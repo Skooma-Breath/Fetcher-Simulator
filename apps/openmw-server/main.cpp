@@ -1,6 +1,9 @@
 #include "Server.hpp"
 
 #include <algorithm>
+#ifdef _WIN32
+#  include <windows.h>
+#endif
 #include <chrono>
 #include <csignal>
 #include <cstdlib>
@@ -134,6 +137,13 @@ static void signalHandler(int /*sig*/)
 
 int main(int argc, char* argv[])
 {
+#ifdef _WIN32
+    // Set the console to UTF-8 so Unicode characters (box-drawing, arrows, etc.)
+    // render correctly instead of appearing as garbled Windows-1252 sequences.
+    SetConsoleOutputCP(CP_UTF8);
+    // Also set the input codepage for completeness (affects piped input).
+    SetConsoleCP(CP_UTF8);
+#endif
     uint16_t port = 25565;
     std::filesystem::path logDir = std::filesystem::path(argv[0]).parent_path() / "logs";
 

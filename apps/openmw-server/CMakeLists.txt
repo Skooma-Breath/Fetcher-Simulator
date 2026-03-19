@@ -1,10 +1,16 @@
 set(OPENMW_SERVER_SOURCES
     main.cpp
     Server.cpp
+    ScriptEngine.cpp
+    bindings/PlayerBindings.cpp
+    bindings/ServerBindings.cpp
 )
 
 set(OPENMW_SERVER_HEADERS
     Server.hpp
+    ScriptEngine.hpp
+    bindings/PlayerBindings.hpp
+    bindings/ServerBindings.hpp
 )
 
 source_group("apps\\openmw-server" FILES
@@ -17,13 +23,16 @@ add_executable(openmw-server
 )
 
 target_include_directories(openmw-server PRIVATE
-    ${CMAKE_SOURCE_DIR}          # so <components/...> includes resolve
+    ${CMAKE_SOURCE_DIR}                  # so <components/...> includes resolve
     ${GNS_INCLUDE_DIR}
+    ${CMAKE_SOURCE_DIR}/extern/sol3      # sol/sol.hpp
+    ${LUA_INCLUDE_DIR}
 )
 
 target_link_libraries(openmw-server
     components
     GameNetworkingSockets::GameNetworkingSockets
+    ${LUA_LIBRARIES}
 )
 
 target_compile_features(openmw-server PRIVATE cxx_std_20)

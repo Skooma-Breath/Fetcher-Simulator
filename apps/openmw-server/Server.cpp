@@ -1,4 +1,5 @@
 #include "Server.hpp"
+#include "bindings/PlayerBindings.hpp"
 
 #include <chrono>
 #include <cmath>
@@ -24,6 +25,46 @@ namespace mwmp
 MPServer* MPServer::sInstance = nullptr;
 
 // ---------------------------------------------------------------------------
+double MPServer::getUptime() const
+{
+    using namespace std::chrono;
+    return duration<double>(steady_clock::now() - mStartTime).count();
+}
+
+// ---------------------------------------------------------------------------
+void MPServer::broadcastServerMessage(const std::string& text)
+{
+    PacketChatMessage pkt;
+    BasePlayer serverPlayer;
+    serverPlayer.guid = 0;
+    serverPlayer.name = "Server";
+    pkt.setPlayer(&serverPlayer);
+    pkt.message = text;
+    pkt.channel = "";
+    broadcastToAll(pkt.encode());
+}
+
+// ---------------------------------------------------------------------------
+void MPServer::sendServerMessage(uint32_t guid, const std::string& text)
+{
+    for (auto& [conn, client] : mClients)
+    {
+        if (client.guid == guid && client.handshakeComplete)
+        {
+            PacketChatMessage pkt;
+            BasePlayer serverPlayer;
+            serverPlayer.guid = 0;
+            serverPlayer.name = "Server";
+            pkt.setPlayer(&serverPlayer);
+            pkt.message = text;
+            pkt.channel = "";
+            sendTo(conn, pkt.encode());
+            return;
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 MPServer::MPServer(uint16_t port) : mPort(port)
 {
     if (sInstance)
@@ -37,7 +78,8 @@ MPServer::MPServer(uint16_t port) : mPort(port)
     if (!mInterface)
         throw std::runtime_error("MPServer: failed to get ISteamNetworkingSockets");
 
-    sInstance = this;
+    sInstance  = this;
+    mStartTime = std::chrono::steady_clock::now();
     Log(Debug::Info) << "[Server] Initialised";
 }
 
@@ -72,6 +114,10 @@ void MPServer::run()
         throw std::runtime_error("MPServer: CreatePollGroup failed");
 
     Log(Debug::Info) << "[Server] Listening on port " << mPort;
+
+    // Load server scripts and fire OnServerInit before entering the loop.
+    mScript.loadScriptsFrom("scripts");
+    mScript.call("OnServerInit");
 
     mRunning = true;
     using Clock = std::chrono::steady_clock;
@@ -143,6 +189,8 @@ void MPServer::tick(float dt)
         if (!mClients.empty())
             broadcastToAll(buildWorldTimePacket());
     }
+
+    mScript.call("OnServerTick", dt);
 }
 
 // ---------------------------------------------------------------------------
@@ -182,6 +230,9 @@ void MPServer::onClientConnected(HSteamNetConnection conn)
     Log(Debug::Info) << "[Server] Client connected, conn=" << conn;
 }
 
+// Note: OnPlayerConnect fires after handshake completes (in handleHandshake),
+// not here — the client has no name yet at this point.
+
 // ---------------------------------------------------------------------------
 void MPServer::onClientDisconnected(HSteamNetConnection conn, const std::string& reason)
 {
@@ -194,6 +245,9 @@ void MPServer::onClientDisconnected(HSteamNetConnection conn, const std::string&
 
     if (client.handshakeComplete)
     {
+        mScript.call("OnPlayerDisconnect",
+                     ScriptPlayer{ client.guid, this }, reason);
+
         // Notify all others
         PacketDisconnect pkt;
         pkt.guid   = client.guid;
@@ -363,6 +417,10 @@ void MPServer::handleHandshake(ConnectedClient& c, const uint8_t* data, size_t s
         Log(Debug::Info) << "[Server] Sent weather=" << mWorld.weatherCurrent
                          << " to " << c.name;
     }
+
+    // Fire OnPlayerConnect now that the client is fully initialised and has
+    // received all catch-up state.
+    mScript.call("OnPlayerConnect", ScriptPlayer{ c.guid, this });
 }
 
 // ---------------------------------------------------------------------------
@@ -403,12 +461,17 @@ void MPServer::handlePlayerPosition(ConnectedClient& c, const uint8_t* data, siz
 // ---------------------------------------------------------------------------
 void MPServer::handlePlayerCellChange(ConnectedClient& c, const uint8_t* data, size_t size)
 {
+    std::string oldCell = c.player.cell.cellName;
     PacketPlayerCellChange pkt;
     pkt.setPlayer(&c.player);
     if (!pkt.decode(data, size)) return;
 
-    Log(Debug::Info) << "[Server] " << c.name << " → cell: "
-                     << c.player.cell.cellName;
+    const std::string& newCell = c.player.cell.cellName;
+    Log(Debug::Info) << "[Server] " << c.name << " → cell: " << newCell;
+
+    mScript.call("OnPlayerCellChange",
+                 ScriptPlayer{ c.guid, this }, newCell, oldCell);
+
     broadcastToAll(std::vector<uint8_t>(data, data + size), c.conn);
 }
 
@@ -467,6 +530,12 @@ void MPServer::handleWeather(ConnectedClient& c, const uint8_t* data, size_t siz
 
     // Relay to all non-host clients.
     broadcastToAll(std::vector<uint8_t>(data, data + size), c.conn);
+
+    mScript.call("OnWorldWeather",
+                 mWorld.weatherRegion,
+                 mWorld.weatherCurrent,
+                 mWorld.weatherNext,
+                 mWorld.weatherTransition);
 }
 
 // ---------------------------------------------------------------------------
@@ -503,6 +572,10 @@ void MPServer::handleDoorState(ConnectedClient& c, const uint8_t* data, size_t s
 
     // Relay to all other clients so they apply the state immediately.
     broadcastToAll(std::vector<uint8_t>(data, data + size), c.conn);
+
+    // Notify scripts — fire once per door entry.
+    for (const auto& entry : pkt.doors)
+        mScript.call("OnDoorState", pkt.cellId, entry.refId, entry.isOpen);
 }
 
 // ---------------------------------------------------------------------------
@@ -517,8 +590,16 @@ void MPServer::handleChatMessage(ConnectedClient& c, const uint8_t* data, size_t
                      << "day=" << mWorld.day << " mo=" << mWorld.month
                      << " yr=" << mWorld.year << "): "
                      << pkt.message;
-    // Relay to everyone including sender (so they see their own message)
-    broadcastToAll(std::vector<uint8_t>(data, data + size));
+
+    // OnPlayerSendMessage can return false to suppress relay.
+    bool relay = true;
+    mScript.callWithReturn("OnPlayerSendMessage",
+                           relay,
+                           ScriptPlayer{ c.guid, this },
+                           pkt.message);
+
+    if (relay)
+        broadcastToAll(std::vector<uint8_t>(data, data + size));
 }
 
 // ---------------------------------------------------------------------------
@@ -529,6 +610,36 @@ bool MPServer::validateMovement(const ConnectedClient& /*c*/,
     // The per-tick distance check was causing false positives during
     // load transitions and initial position sync.
     return true;
+}
+
+// ---------------------------------------------------------------------------
+void MPServer::kickClient(uint32_t guid, const std::string& reason)
+{
+    for (auto& [conn, client] : mClients)
+    {
+        if (client.guid == guid)
+        {
+            mInterface->CloseConnection(conn, 0, reason.c_str(), true);
+            return;
+        }
+    }
+}
+
+ConnectedClient* MPServer::findClientByGuid(uint32_t guid)
+{
+    for (auto& [conn, client] : mClients)
+        if (client.guid == guid)
+            return &client;
+    return nullptr;
+}
+
+int MPServer::getPlayerCount() const
+{
+    int count = 0;
+    for (const auto& [conn, client] : mClients)
+        if (client.handshakeComplete)
+            ++count;
+    return count;
 }
 
 // ---------------------------------------------------------------------------
