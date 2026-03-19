@@ -177,6 +177,7 @@ void RemotePlayer::trySpawn()
         // Disable collision so remote players don't physically block the local player
         world->setActorCollisionMode(mNpcPtr, false, false);
 
+
         mIsSpawned = true;
 
         // Attach world-space nameplate above the NPC's head.
@@ -274,6 +275,8 @@ void RemotePlayer::applyInterpolationToWorld()
         // moveObject returns an updated Ptr when the cell changes; keep it if valid
         if (!moved.isEmpty())
             mNpcPtr = moved;
+
+
 
         // Apply rotation (Z = yaw is the important one for humanoids)
         world->rotateObject(mNpcPtr,
@@ -458,19 +461,15 @@ bool RemotePlayer::isInSameCellAsLocalPlayer(bool quiet) const
 
     if (remoteExt)
     {
-        // Keep remote NPCs visible as long as their cell is within OpenMW's
-        // active grid. CellGridRadius is the engine's own half-size (default 1
-        // = 3x3 grid), so this automatically tracks whatever is actually loaded.
-        const int dx = std::abs(mState.cell.gridX - localCell->getGridX());
-        const int dy = std::abs(mState.cell.gridY - localCell->getGridY());
-        const int r  = Constants::CellGridRadius;
-        const bool match = (dx <= r && dy <= r);
+        // Despawn only when the remote player's cell is no longer loaded by the engine.
+        // This is the maximum safe visibility distance — rendering an NPC in an
+        // unloaded cell would crash. Grid-offset checks (CellGridRadius) were too
+        // conservative; isCellActive is the correct predicate.
+        const bool match = world->isExteriorCellActive(mState.cell.gridX, mState.cell.gridY);
         if (!match && !quiet)
             Log(Debug::Verbose) << "[MP] isInSameCell(" << mName << ")=false:"
-                                << " grid too far remote=(" << mState.cell.gridX << ","
-                                << mState.cell.gridY << ") local=("
-                                << localCell->getGridX() << "," << localCell->getGridY()
-                                << ") dx=" << dx << " dy=" << dy << " r=" << r;
+                                << " remote cell (" << mState.cell.gridX << ","
+                                << mState.cell.gridY << ") is no longer active";
         return match;
     }
 

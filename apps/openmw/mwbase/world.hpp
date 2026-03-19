@@ -357,6 +357,10 @@ namespace MWBase
         /// Is the head of the creature underwater?
         virtual bool isSubmerged(const MWWorld::ConstPtr& object) const = 0;
         virtual bool isUnderwater(const MWWorld::CellStore* cell, const osg::Vec3f& pos) const = 0;
+
+        /// Returns true if the exterior cell at (gridX, gridY) is currently active (loaded).
+        /// Used by the multiplayer system to determine remote player NPC visibility range.
+        virtual bool isExteriorCellActive(int gridX, int gridY) const = 0;
         virtual bool isUnderwater(const MWWorld::ConstPtr& object, const float heightRatio) const = 0;
         virtual bool isWaterWalkingCastableOnTarget(const MWWorld::ConstPtr& target) const = 0;
         virtual bool isOnGround(const MWWorld::Ptr& ptr) const = 0;

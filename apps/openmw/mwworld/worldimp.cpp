@@ -2184,6 +2184,13 @@ namespace MWWorld
         return isUnderwater(currCell, pos);
     }
 
+    bool World::isExteriorCellActive(int gridX, int gridY) const
+    {
+        const ESM::ExteriorCellLocation loc(gridX, gridY, ESM::Cell::sDefaultWorldspaceId);
+        const MWWorld::CellStore& cell = mWorldModel.getExterior(loc, /*forceLoad=*/false);
+        return mWorldScene->isCellActive(cell);
+    }
+
     bool World::isUnderwater(const MWWorld::CellStore* cell, const osg::Vec3f& pos) const
     {
         if (!cell)

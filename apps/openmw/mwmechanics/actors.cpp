@@ -1223,6 +1223,20 @@ namespace MWMechanics
         if (ptr == player)
             return;
 
+        // Remote multiplayer players are managed by the MP system and must
+        // remain visible across the full loaded cell grid regardless of
+        // actorsProcessingRange. Skip culling for any actor tagged with
+        // "mp_player_name" on its base node (set in RemotePlayer::trySpawn).
+#ifdef BUILD_MULTIPLAYER
+        {
+            auto* baseNode = ptr.getRefData().getBaseNode();
+            std::string mpName;
+            if (baseNode && baseNode->getUserValue("mp_player_name", mpName))
+                return;
+        }
+#endif
+
+
         const float dist
             = (player.getRefData().getPosition().asVec3() - ptr.getRefData().getPosition().asVec3()).length();
         const int actorsProcessingRange = Settings::game().mActorsProcessingRange;
@@ -1679,10 +1693,21 @@ namespace MWMechanics
 
                 if (!inRange)
                 {
+#ifdef BUILD_MULTIPLAYER
+                    {
+                        auto* baseNode = actor.getPtr().getRefData().getBaseNode();
+                        std::string mpName;
+                        if (baseNode && baseNode->getUserValue("mp_player_name", mpName))
+                            goto mp_actor_continue; // remote MP player — skip culling
+                    }
+#endif
                     actor.getPtr().getRefData().getBaseNode()->setNodeMask(0);
                     world->setActorActive(actor.getPtr(), false);
                     continue;
                 }
+#ifdef BUILD_MULTIPLAYER
+                mp_actor_continue:;
+#endif
 
                 world->setActorActive(actor.getPtr(), true);
 

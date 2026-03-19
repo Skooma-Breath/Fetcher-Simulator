@@ -442,6 +442,7 @@ namespace MWWorld
         /// Is the head of the creature underwater?
         bool isSubmerged(const MWWorld::ConstPtr& object) const override;
         bool isSwimming(const MWWorld::ConstPtr& object) const override;
+        bool isExteriorCellActive(int gridX, int gridY) const override;
         bool isUnderwater(const MWWorld::CellStore* cell, const osg::Vec3f& pos) const override;
         bool isUnderwater(const MWWorld::ConstPtr& object, const float heightRatio) const override;
         bool isWading(const MWWorld::ConstPtr& object) const override;
