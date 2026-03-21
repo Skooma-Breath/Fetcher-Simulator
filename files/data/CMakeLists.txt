@@ -11,6 +11,12 @@ set(BUILTIN_DATA_FILES
     textures/omw_menu_scroll_center_h.dds
     textures/omw_menu_scroll_center_v.dds
     textures/omw_menu_icon_active.dds
+    textures/menu_directconnect.dds
+    textures/menu_directconnect_over.dds
+    textures/menu_directconnect_pressed.dds
+    textures/menu_serverbrowser.dds
+    textures/menu_serverbrowser_over.dds
+    textures/menu_serverbrowser_pressed.dds
     textures/omw_psx_button_circle.dds
     textures/omw_psx_button_dpad.dds
     textures/omw_psx_button_square.dds
@@ -189,6 +195,10 @@ set(BUILTIN_DATA_FILES
     mygui/openmw_confirmation_dialog.layout
     mygui/openmw_console.layout
     mygui/openmw_mp_chat.layout
+    mygui/openmw_mp_server_address.layout
+    mygui/openmw_mp_server_browser.layout
+    mygui/openmw_mp_account.layout
+    mygui/openmw_mp_char_select.layout
     mygui/openmw_console.skin.xml
     mygui/openmw_container_window.layout
     mygui/openmw_controllerbuttons.layout

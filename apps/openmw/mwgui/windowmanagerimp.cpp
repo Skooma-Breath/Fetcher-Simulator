@@ -570,6 +570,18 @@ namespace MWGui
         mStatsWatcher->forceUpdate();
     }
 
+    void WindowManager::startCharGen()
+    {
+        if (mCharGen)
+            mCharGen->startCharGen();
+    }
+
+    void WindowManager::setCharGenCompleteCallback(std::function<void()> cb)
+    {
+        if (mCharGen)
+            mCharGen->setCharGenCompleteCallback(std::move(cb));
+    }
+
     WindowManager::~WindowManager()
     {
         try

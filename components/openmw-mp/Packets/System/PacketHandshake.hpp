@@ -70,12 +70,25 @@ namespace mwmp
     class PacketHandshakeResponse : public BasePacket
     {
     public:
-        bool        accepted      = false;
-        uint32_t    assignedGuid  = 0;
+        bool        accepted        = false;
+        uint32_t    assignedGuid    = 0;
         std::string serverVersion;
         std::string rejectReason;
+        bool        isNewCharacter  = true;  ///< true → client must run chargen
+        std::string spawnCell;               ///< cell to spawn in (empty = default)
 
-        // Plugin mismatch detail (mirrors TES3MP's preInit flow)
+        // Chargen restore — only meaningful when isNewCharacter=false
+        std::string race;
+        std::string headMesh;
+        std::string hairMesh;
+        bool        isMale     = true;
+        std::string classId;
+        std::string className;
+        std::string birthSign;
+        std::string classData; ///< CLDTstruct encoded as comma-separated ints
+        float spawnX = 0.f, spawnY = 0.f, spawnZ = 0.f;       ///< saved position (0 for new chars)
+        float spawnRotX = 0.f, spawnRotY = 0.f, spawnRotZ = 0.f; ///< saved rotation
+
         struct PluginMismatch
         {
             std::string filename;
@@ -92,6 +105,18 @@ namespace mwmp
             ws.write(assignedGuid);
             ws.writeString(serverVersion);
             ws.writeString(rejectReason);
+            ws.write(isNewCharacter);
+            ws.writeString(spawnCell);
+            ws.writeString(race);
+            ws.writeString(headMesh);
+            ws.writeString(hairMesh);
+            ws.write(isMale);
+            ws.writeString(classId);
+            ws.writeString(className);
+            ws.writeString(birthSign);
+            ws.writeString(classData);
+            ws.write(spawnX);    ws.write(spawnY);    ws.write(spawnZ);
+            ws.write(spawnRotX); ws.write(spawnRotY); ws.write(spawnRotZ);
 
             auto count = static_cast<uint32_t>(pluginMismatches.size());
             ws.write(count);
@@ -108,6 +133,18 @@ namespace mwmp
             rs.read(assignedGuid);
             serverVersion = rs.readString();
             rejectReason  = rs.readString();
+            rs.read(isNewCharacter);
+            spawnCell  = rs.readString();
+            race       = rs.readString();
+            headMesh   = rs.readString();
+            hairMesh   = rs.readString();
+            rs.read(isMale);
+            classId    = rs.readString();
+            className  = rs.readString();
+            birthSign  = rs.readString();
+            classData  = rs.readString();
+            rs.read(spawnX);    rs.read(spawnY);    rs.read(spawnZ);
+            rs.read(spawnRotX); rs.read(spawnRotY); rs.read(spawnRotZ);
 
             uint32_t count = 0;
             rs.read(count);

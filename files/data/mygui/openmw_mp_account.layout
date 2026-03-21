@@ -1,0 +1,66 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<MyGUI type="Layout">
+    <!--
+        Account dialog  ~360 x 230
+        Widgets consumed by AccountDialog.cpp:
+            Username      EditBox   - player name input
+            Password      EditBox   - password input (masked)
+            LoginButton   Button    - log in to existing account
+            RegisterButton Button   - create new account
+            CancelButton  Button    - dismiss
+            StatusLabel   TextBox   - shows "Connecting…" / error text
+    -->
+    <Widget type="Window" skin="MW_DialogNoTransp" layer="Modal"
+            position="0 0 360 230" align="Center" name="_Main">
+        <Property key="Visible"  value="false"/>
+        <Property key="Caption"  value="Multiplayer Login"/>
+
+        <!-- Username row -->
+        <Widget type="TextBox" skin="SandText"
+                position="16 16 328 18" name="UsernameLabel">
+            <Property key="Caption" value="Username:"/>
+        </Widget>
+        <Widget type="EditBox" skin="MW_TextEdit"
+                position="16 36 328 24" name="Username" align="Left Top HStretch">
+            <Property key="NeedKey"       value="true"/>
+            <Property key="MaxTextLength" value="32"/>
+        </Widget>
+
+        <!-- Password row -->
+        <Widget type="TextBox" skin="SandText"
+                position="16 72 328 18" name="PasswordLabel">
+            <Property key="Caption" value="Password:"/>
+        </Widget>
+        <Widget type="EditBox" skin="MW_TextEdit"
+                position="16 92 328 24" name="Password" align="Left Top HStretch">
+            <Property key="NeedKey"       value="true"/>
+            <Property key="Password"      value="true"/>
+            <Property key="MaxTextLength" value="128"/>
+        </Widget>
+
+        <!-- Status (hidden until connecting/error) -->
+        <Widget type="TextBox" skin="SandText"
+                position="16 128 328 18" name="StatusLabel" align="Left Top HStretch">
+            <Property key="Caption"   value=""/>
+            <Property key="TextAlign" value="Left VCenter"/>
+        </Widget>
+
+        <!-- Buttons — right-aligned at bottom -->
+        <Widget type="AutoSizedButton" skin="MW_Button"
+                position="24 192 88 24" name="RegisterButton" align="Left Bottom">
+            <Property key="Caption"         value="Register"/>
+            <Property key="ExpandDirection" value="Right"/>
+        </Widget>
+        <Widget type="AutoSizedButton" skin="MW_Button"
+                position="248 192 48 24" name="CancelButton" align="Right Bottom">
+            <Property key="Caption"         value="#{Interface:Cancel}"/>
+            <Property key="ExpandDirection" value="Left"/>
+        </Widget>
+        <Widget type="AutoSizedButton" skin="MW_Button"
+                position="304 192 40 24" name="LoginButton" align="Right Bottom">
+            <Property key="Caption"         value="Login"/>
+            <Property key="ExpandDirection" value="Left"/>
+        </Widget>
+
+    </Widget>
+</MyGUI>

@@ -1,9 +1,11 @@
 #include "Server.hpp"
+#include "MasterServerClient.hpp"
 #include "bindings/PlayerBindings.hpp"
 
 #include <chrono>
 #include <cmath>
 #include <iostream>
+#include <sstream>
 #include <stdexcept>
 #include <thread>
 
@@ -11,6 +13,7 @@
 #include <components/openmw-mp/Packets/BasePacket.hpp>
 #include <components/openmw-mp/Packets/System/PacketHandshake.hpp>
 #include <components/openmw-mp/Packets/Player/PacketPlayerBaseInfo.hpp>
+#include <components/openmw-mp/Packets/Player/PacketPlayerCharGen.hpp>
 #include <components/openmw-mp/Packets/Player/PacketPlayerPosition.hpp>
 #include <components/openmw-mp/Packets/Player/PacketPlayerCellChange.hpp>
 #include <components/openmw-mp/Packets/Player/PacketPlayerEquipment.hpp>
@@ -18,6 +21,36 @@
 #include <components/openmw-mp/Packets/Player/PacketChatMessage.hpp>
 #include <components/openmw-mp/Packets/Worldstate/PacketWorldTime.hpp>
 // PacketWorldWeather is defined in PacketWorldTime.hpp
+
+// Encode/decode ESM::Class::CLDTstruct as 15 comma-separated ints.
+// Format: specialization, attr[0], attr[1], skills[0..4][0..1], isPlayable, services
+namespace
+{
+    std::string encodeClassData(const ESM::Class::CLDTstruct& d)
+    {
+        std::ostringstream ss;
+        ss << d.mSpecialization
+           << ',' << d.mAttribute[0] << ',' << d.mAttribute[1];
+        for (const auto& row : d.mSkills)
+            for (auto v : row)
+                ss << ',' << v;
+        ss << ',' << d.mIsPlayable << ',' << d.mServices;
+        return ss.str();
+    }
+
+    void decodeClassData(const std::string& s, ESM::Class::CLDTstruct& d)
+    {
+        if (s.empty()) return;
+        std::istringstream ss(s);
+        char comma;
+        ss >> d.mSpecialization
+           >> comma >> d.mAttribute[0] >> comma >> d.mAttribute[1];
+        for (auto& row : d.mSkills)
+            for (auto& v : row)
+                ss >> comma >> v;
+        ss >> comma >> d.mIsPlayable >> comma >> d.mServices;
+    }
+}
 
 namespace mwmp
 {
@@ -115,9 +148,34 @@ void MPServer::run()
 
     Log(Debug::Info) << "[Server] Listening on port " << mPort;
 
+    // Open player database.
+    try
+    {
+        mPlayerDb.emplace(mDbPath);
+    }
+    catch (const std::exception& e)
+    {
+        Log(Debug::Error) << "[Server] PlayerDatabase failed to open: " << e.what();
+        // Non-fatal — server runs without persistence if DB unavailable.
+    }
+
     // Load server scripts and fire OnServerInit before entering the loop.
-    mScript.loadScriptsFrom("scripts");
+    mScript.loadScriptsFrom("server-scripts");
     mScript.call("OnServerInit");
+
+    // Register with the master server (async — does not block the tick loop).
+    if (!mMasterUrl.empty())
+    {
+        MasterServerClient::Config cfg;
+        cfg.masterUrl         = mMasterUrl;
+        cfg.serverName        = mServerName;
+        cfg.port              = mPort;
+        cfg.maxPlayers        = MAX_PLAYERS;
+        cfg.version           = SERVER_VERSION;
+        cfg.gameMode          = mGameMode;
+        cfg.passwordProtected = mPasswordProtected;
+        mMasterClient.registerAsync(cfg);
+    }
 
     mRunning = true;
     using Clock = std::chrono::steady_clock;
@@ -143,6 +201,9 @@ void MPServer::run()
 // ---------------------------------------------------------------------------
 void MPServer::shutdown()
 {
+    // Tell the master server we are gone immediately (synchronous, best-effort).
+    mMasterClient.unregister();
+
     if (mListenSocket != k_HSteamListenSocket_Invalid)
     {
         // Close all client connections gracefully
@@ -191,6 +252,9 @@ void MPServer::tick(float dt)
     }
 
     mScript.call("OnServerTick", dt);
+
+    // Send a heartbeat to the master server at most once every 30 seconds.
+    mMasterClient.tickHeartbeat(dt, getPlayerCount());
 }
 
 // ---------------------------------------------------------------------------
@@ -243,6 +307,26 @@ void MPServer::onClientDisconnected(HSteamNetConnection conn, const std::string&
     Log(Debug::Info) << "[Server] Client disconnected: "
                      << client.name << " (" << reason << ")";
 
+    // Persist last known position before removing the client.
+    if (mPlayerDb && client.dbCharacterId != 0 && client.handshakeComplete)
+    {
+        const auto& pos = client.player.position;
+        try
+        {
+            Log(Debug::Info) << "[PlayerDB] savePosition: charId=" << client.dbCharacterId
+                             << " cell='" << client.player.cell.cellName
+                             << "' pos=(" << pos.pos[0] << "," << pos.pos[1] << "," << pos.pos[2] << ")";
+            mPlayerDb->savePosition(client.dbCharacterId,
+                                    client.player.cell.cellName,
+                                    pos.pos[0], pos.pos[1], pos.pos[2],
+                                    pos.rot[0], pos.rot[1], pos.rot[2]);
+        }
+        catch (const std::exception& e)
+        {
+            Log(Debug::Warning) << "[PlayerDB] savePosition error: " << e.what();
+        }
+    }
+
     if (client.handshakeComplete)
     {
         mScript.call("OnPlayerDisconnect",
@@ -280,6 +364,7 @@ void MPServer::onClientMessage(ConnectedClient& client,
     switch (type)
     {
         case PacketType::Handshake:        handleHandshake(client, data, size);          break;
+        case PacketType::PlayerCharGen:    handlePlayerCharGen(client, data, size);      break;
         case PacketType::PlayerBaseInfo:   handlePlayerBaseInfo(client, data, size);     break;
         case PacketType::PlayerPosition:   handlePlayerPosition(client, data, size);     break;
         case PacketType::PlayerCellChange: handlePlayerCellChange(client, data, size);   break;
@@ -330,20 +415,64 @@ void MPServer::handleHandshake(ConnectedClient& c, const uint8_t* data, size_t s
         return;
     }
 
-    // Accept
+    // Accept — look up or create the player record.
     c.name                    = hs.playerName;
     c.player.guid             = c.guid;
     c.player.name             = hs.playerName;
     c.handshakeComplete       = true;
+
+    bool        isNewCharacter = true;
+    std::string spawnCell;
+    PlayerRecord dbRec;
+
+    if (mPlayerDb)
+    {
+        try
+        {
+            const int64_t accountId = mPlayerDb->lookupOrCreateAccount(hs.playerName);
+            dbRec            = mPlayerDb->lookupOrCreateCharacter(accountId, hs.playerName);
+            c.dbCharacterId  = dbRec.characterId;
+            isNewCharacter   = dbRec.isNew;
+            spawnCell        = dbRec.cell;
+        }
+        catch (const std::exception& e)
+        {
+            Log(Debug::Warning) << "[PlayerDB] handshake lookup error: " << e.what();
+            // Fail open: treat as new character.
+        }
+    }
 
     // First player to complete handshake becomes the weather host.
     if (mWorld.hostGuid == 0)
         mWorld.hostGuid = c.guid;
 
     PacketHandshakeResponse rsp;
-    rsp.accepted       = true;
-    rsp.assignedGuid   = c.guid;
-    rsp.serverVersion  = SERVER_VERSION;
+    rsp.accepted        = true;
+    rsp.assignedGuid    = c.guid;
+    rsp.serverVersion   = SERVER_VERSION;
+    rsp.isNewCharacter  = isNewCharacter;
+    rsp.spawnCell       = spawnCell;
+
+    // For returning players, send their saved chargen data so the client
+    // can restore race/class/birthsign without running chargen again.
+    if (!isNewCharacter)
+    {
+        rsp.race      = dbRec.race;
+        rsp.headMesh  = dbRec.headMesh;
+        rsp.hairMesh  = dbRec.hairMesh;
+        rsp.isMale    = dbRec.isMale;
+        rsp.classId   = dbRec.classId;
+        rsp.className = dbRec.className;
+        rsp.birthSign = dbRec.birthSign;
+        rsp.classData = dbRec.classData;
+        rsp.spawnX    = dbRec.posX;
+        rsp.spawnY    = dbRec.posY;
+        rsp.spawnZ    = dbRec.posZ;
+        rsp.spawnRotX = dbRec.rotX;
+        rsp.spawnRotY = dbRec.rotY;
+        rsp.spawnRotZ = dbRec.rotZ;
+    }
+
     sendTo(c.conn, rsp.encode());
 
     Log(Debug::Info) << "[Server] Handshake accepted: " << c.name
@@ -421,6 +550,43 @@ void MPServer::handleHandshake(ConnectedClient& c, const uint8_t* data, size_t s
     // Fire OnPlayerConnect now that the client is fully initialised and has
     // received all catch-up state.
     mScript.call("OnPlayerConnect", ScriptPlayer{ c.guid, this });
+}
+
+// ---------------------------------------------------------------------------
+// ---------------------------------------------------------------------------
+void MPServer::handlePlayerCharGen(ConnectedClient& c, const uint8_t* data, size_t size)
+{
+    // Decode the packet — it now carries the full chargen result.
+    PacketPlayerCharGen pkt;
+    pkt.setPlayer(&c.player);
+    if (!pkt.decode(data, size)) return;
+
+    if (mPlayerDb && c.dbCharacterId != 0)
+    {
+        try
+        {
+            // Persist race/class/birthsign so they can be restored on next login.
+            mPlayerDb->saveChargenData(c.dbCharacterId,
+                c.player.race,
+                c.player.headMesh,
+                c.player.hairMesh,
+                c.player.isMale,
+                c.player.charClass.mId.serializeText(),
+                c.player.charClass.mName,
+                c.player.birthSign,
+                encodeClassData(c.player.charClass.mData));
+
+            mPlayerDb->markChargenComplete(c.dbCharacterId);
+            Log(Debug::Info) << "[Server] Chargen complete for " << c.name
+                             << " race=" << c.player.race
+                             << " class=" << c.player.charClass.mId.toString()
+                             << " birthSign=" << c.player.birthSign;
+        }
+        catch (const std::exception& e)
+        {
+            Log(Debug::Warning) << "[PlayerDB] chargen save error: " << e.what();
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------

@@ -1,0 +1,41 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<MyGUI type="Layout">
+    <!--
+        Character Select dialog  ~420 x 320
+        Widgets consumed by CharacterSelectDialog.cpp:
+            ConnectedLabel  TextBox  - "Connected as <name> on <host>"
+            CharacterList   ListBox  - populated Phase 8 (stub: one entry)
+            EnterWorldButton Button  - confirm selection and enter world
+            CancelButton     Button  - disconnect and return to main menu
+    -->
+    <Widget type="Window" skin="MW_DialogNoTransp" layer="Modal"
+            position="0 0 420 320" align="Center" name="_Main">
+        <Property key="Visible"  value="false"/>
+        <Property key="Caption"  value="Select Character"/>
+
+        <!-- Connected status line -->
+        <Widget type="TextBox" skin="SandText"
+                position="16 16 388 18" name="ConnectedLabel" align="Left Top HStretch">
+            <Property key="Caption"   value=""/>
+            <Property key="TextAlign" value="Left VCenter"/>
+        </Widget>
+
+        <!-- Character list (stub for Phase 6 — single placeholder row) -->
+        <Widget type="ListBox" skin="MW_ListBox"
+                position="16 42 388 210" name="CharacterList" align="Left Top HStretch VStretch">
+        </Widget>
+
+        <!-- Buttons -->
+        <Widget type="AutoSizedButton" skin="MW_Button"
+                position="16 278 80 24" name="CancelButton" align="Left Bottom">
+            <Property key="Caption"         value="#{Interface:Cancel}"/>
+            <Property key="ExpandDirection" value="Right"/>
+        </Widget>
+        <Widget type="AutoSizedButton" skin="MW_Button"
+                position="308 278 96 24" name="EnterWorldButton" align="Right Bottom">
+            <Property key="Caption"         value="Enter World"/>
+            <Property key="ExpandDirection" value="Left"/>
+        </Widget>
+
+    </Widget>
+</MyGUI>

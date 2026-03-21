@@ -3,6 +3,7 @@
 
 #include <components/esm3/loadclas.hpp>
 
+#include <functional>
 #include <map>
 #include <memory>
 #include <vector>
@@ -44,6 +45,14 @@ namespace MWGui
 
         // Show a dialog
         void spawnDialog(const GuiMode id);
+
+        // MP: prime stage so Race→Class→Birth→Review self-advances without script hooks.
+        // Call immediately after setNewGame(true), before pushing the first dialog mode.
+        void startCharGen();
+
+        // MP: register a callback that fires once when the Review dialog "Done" is clicked.
+        // Used to arm the chargen-complete watcher only after the player finishes Review.
+        void setCharGenCompleteCallback(std::function<void()> cb);
 
         void setAttribute(ESM::RefId id, const MWMechanics::AttributeValue& value) override;
         void setValue(std::string_view id, const MWMechanics::DynamicStat<float>& value) override;
@@ -129,6 +138,8 @@ namespace MWGui
         };
 
         CSE mCreationStage; // Which state the character creating is in, controls back/next/ok buttons
+
+        std::function<void()> mCharGenCompleteCallback; // MP: fires when Review "Done" is clicked
 
         void handleDialogDone(CSE currentStage, int nextMode);
     };

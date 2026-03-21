@@ -11,6 +11,9 @@
 
 #include "engine.hpp"
 #include "options.hpp"
+#ifdef BUILD_MULTIPLAYER
+#include "mwmp/sha256.hpp"
+#endif
 
 #include <boost/program_options/variables_map.hpp>
 
@@ -180,7 +183,12 @@ bool parseOptions(int argc, char** argv, OMW::Engine& engine, Files::Configurati
             }
             const std::string playerName  = variables["mp-name"].as<std::string>();
             const std::string passwordRaw = variables["mp-password"].as<std::string>();
-            engine.setMultiplayer(host, port, playerName, passwordRaw);
+            // Hash password the same way AccountDialog does so CLI and GUI paths
+            // always send the same credential format to the server.
+            const std::string passwordHash = passwordRaw.empty()
+                ? std::string{}
+                : mwmp::crypto::sha256hex(passwordRaw);
+            engine.setMultiplayer(host, port, playerName, passwordHash);
         }
     }
 #endif

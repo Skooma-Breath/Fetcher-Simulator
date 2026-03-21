@@ -21,6 +21,14 @@
 #include "backgroundimage.hpp"
 #include "confirmationdialog.hpp"
 #include "savegamedialog.hpp"
+
+#ifdef BUILD_MULTIPLAYER
+#include "../mwmp/gui/ServerAddressDialog.hpp"
+#include "../mwmp/gui/ServerBrowserDialog.hpp"
+#include "../mwmp/gui/AccountDialog.hpp"
+#include "../mwmp/gui/CharacterSelectDialog.hpp"
+#include "../mwmp/Main.hpp"
+#endif
 #include "settingswindow.hpp"
 #include "videowidget.hpp"
 
@@ -201,6 +209,61 @@ namespace MWGui
             mSaveGameDialog->setLoadOrSave(name == "loadgame");
             mSaveGameDialog->setVisible(true);
         }
+#ifdef BUILD_MULTIPLAYER
+        else if (name == "directconnect")
+        {
+            if (!mServerAddressDialog)
+            {
+                mServerAddressDialog = std::make_unique<mwmp::ServerAddressDialog>();
+                mServerAddressDialog->setConnectCallback(
+                    [this](const std::string& addr, uint16_t port)
+                    {
+                        if (!mAccountDialog)
+                        {
+                            mAccountDialog = std::make_unique<mwmp::AccountDialog>();
+                            mAccountDialog->setWorldReadyCallback(
+                                [this](const std::string& playerName, const std::string& host)
+                                {
+                                    if (!mCharSelectDialog)
+                                        mCharSelectDialog = std::make_unique<mwmp::CharacterSelectDialog>();
+                                    mCharSelectDialog->setConnectedInfo(playerName, host);
+                                    mCharSelectDialog->setVisible(true);
+                                });
+                        }
+                        mAccountDialog->setServer(addr, port);
+                        mAccountDialog->setVisible(true);
+                    });
+            }
+            mServerAddressDialog->setVisible(true);
+        }
+        else if (name == "serverbrowser")
+        {
+            if (!mServerBrowserDialog)
+            {
+                mServerBrowserDialog = std::make_unique<mwmp::ServerBrowserDialog>();
+                mServerBrowserDialog->setConnectCallback(
+                    [this](const std::string& addr, uint16_t port)
+                    {
+                        if (!mAccountDialog)
+                        {
+                            mAccountDialog = std::make_unique<mwmp::AccountDialog>();
+                            mAccountDialog->setWorldReadyCallback(
+                                [this](const std::string& playerName, const std::string& host)
+                                {
+                                    if (!mCharSelectDialog)
+                                        mCharSelectDialog = std::make_unique<mwmp::CharacterSelectDialog>();
+                                    mCharSelectDialog->setConnectedInfo(playerName, host);
+                                    mCharSelectDialog->setVisible(true);
+                                });
+                        }
+                        mAccountDialog->setServer(addr, port);
+                        mAccountDialog->setVisible(true);
+                    });
+            }
+            mServerBrowserDialog->refresh();
+            mServerBrowserDialog->setVisible(true);
+        }
+#endif
 
         if (winMgr->isSettingsWindowVisible() || name == "options")
         {
@@ -314,6 +377,12 @@ namespace MWGui
             != MWBase::Environment::get().getStateManager()->characterEnd())
             buttons.emplace_back("loadgame");
 
+        if (state == MWBase::StateManager::State_NoGame)
+        {
+            buttons.emplace_back("directconnect");
+            buttons.emplace_back("serverbrowser");
+        }
+
         buttons.emplace_back("options");
 
         if (state == MWBase::StateManager::State_NoGame)
@@ -322,7 +391,9 @@ namespace MWGui
         buttons.emplace_back("exitgame");
 
         // Create new buttons if needed
-        for (std::string_view id : { "return", "newgame", "savegame", "loadgame", "options", "credits", "exitgame" })
+        for (std::string_view id : { "return", "newgame", "savegame", "loadgame",
+                                        "directconnect", "serverbrowser",
+                                        "options", "credits", "exitgame" })
         {
             if (mButtons.find(id) == mButtons.end())
             {

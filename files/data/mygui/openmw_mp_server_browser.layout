@@ -1,0 +1,97 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<MyGUI type="Layout">
+    <!--
+        Server Browser dialog  ~720 x 520
+        Widgets consumed by ServerBrowserDialog.cpp:
+            SearchBox     EditBox   - live name filter
+            ColLock       TextBox   - "🔒" column header
+            ColName       TextBox   - "Server Name" column header
+            ColPlayers    TextBox   - "Players" column header
+            ColPing       TextBox   - "Ping" column header
+            ColVersion    TextBox   - "Version" column header
+            ColMode       TextBox   - "Mode" column header
+            ColCountry    TextBox   - "CC" column header
+            ServerList    ListBox   - scrollable rows (one per server)
+            StatusLabel   TextBox   - "Loading…" / "N servers" / error text
+            RefreshButton Button    - re-fetch the list
+            ConnectButton Button    - connect to selected row
+            CancelButton  Button    - close the dialog
+    -->
+    <Widget type="Window" skin="MW_DialogNoTransp" layer="Modal"
+            position="0 0 720 520" align="Center" name="_Main">
+        <Property key="Visible"  value="false"/>
+        <Property key="Caption"  value="Server Browser"/>
+
+        <!-- Search bar -->
+        <Widget type="TextBox" skin="SandText"
+                position="16 16 60 18" name="SearchLabel">
+            <Property key="Caption" value="Filter:"/>
+        </Widget>
+        <Widget type="EditBox" skin="MW_TextEdit"
+                position="72 14 632 22" name="SearchBox" align="Left Top HStretch">
+            <Property key="NeedKey"       value="true"/>
+            <Property key="MaxTextLength" value="128"/>
+        </Widget>
+
+        <!-- Column headers — x positions mirror ServerList column widths:
+             lock(28) | name(flex≈280) | players(76) | ping(56) | version(72) | mode(76) | country(48)
+             Total inner width = 28+280+76+56+72+76+48 = 636, with 6 gaps of 2px = 648 → fits in 704 usable. -->
+        <Widget type="TextBox" skin="SandText"
+                position="16 44 28 18" name="ColLock">
+            <Property key="Caption" value=""/>
+        </Widget>
+        <Widget type="TextBox" skin="SandText"
+                position="46 44 282 18" name="ColName">
+            <Property key="Caption" value="Server Name"/>
+        </Widget>
+        <Widget type="TextBox" skin="SandText"
+                position="330 44 76 18" name="ColPlayers">
+            <Property key="Caption" value="Players"/>
+        </Widget>
+        <Widget type="TextBox" skin="SandText"
+                position="408 44 56 18" name="ColPing">
+            <Property key="Caption" value="Ping"/>
+        </Widget>
+        <Widget type="TextBox" skin="SandText"
+                position="466 44 72 18" name="ColVersion">
+            <Property key="Caption" value="Version"/>
+        </Widget>
+        <Widget type="TextBox" skin="SandText"
+                position="540 44 76 18" name="ColMode">
+            <Property key="Caption" value="Mode"/>
+        </Widget>
+        <Widget type="TextBox" skin="SandText"
+                position="618 44 48 18" name="ColCountry">
+            <Property key="Caption" value="CC"/>
+        </Widget>
+
+        <!-- Server list — fills the bulk of the dialog -->
+        <Widget type="ListBox" skin="MW_ListBox"
+                position="16 64 688 386" name="ServerList" align="Left Top HStretch VStretch">
+        </Widget>
+
+        <!-- Status bar -->
+        <Widget type="TextBox" skin="SandText"
+                position="16 458 440 18" name="StatusLabel" align="Left Bottom HStretch">
+            <Property key="Caption" value=""/>
+        </Widget>
+
+        <!-- Action buttons — right-aligned at bottom -->
+        <Widget type="AutoSizedButton" skin="MW_Button"
+                position="460 454 80 24" name="RefreshButton" align="Right Bottom">
+            <Property key="Caption"         value="Refresh"/>
+            <Property key="ExpandDirection" value="Left"/>
+        </Widget>
+        <Widget type="AutoSizedButton" skin="MW_Button"
+                position="548 454 80 24" name="ConnectButton" align="Right Bottom">
+            <Property key="Caption"         value="Connect"/>
+            <Property key="ExpandDirection" value="Left"/>
+        </Widget>
+        <Widget type="AutoSizedButton" skin="MW_Button"
+                position="636 454 80 24" name="CancelButton" align="Right Bottom">
+            <Property key="Caption"         value="#{Interface:Cancel}"/>
+            <Property key="ExpandDirection" value="Left"/>
+        </Widget>
+
+    </Widget>
+</MyGUI>

@@ -47,6 +47,7 @@ namespace mwmp
         float       scale      = 1.f;
 
         ESM::Class  charClass;
+        std::string birthSign;
 
         // 8 attributes
         static constexpr int NUM_ATTRIBUTES = 8;

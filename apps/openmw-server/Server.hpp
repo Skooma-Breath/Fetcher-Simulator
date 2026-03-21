@@ -21,6 +21,9 @@
 #include <components/openmw-mp/Packets/Object/PacketDoorState.hpp>
 
 #include "ScriptEngine.hpp"
+#include "MasterServerClient.hpp"
+#include "PlayerDatabase.hpp"
+#include <optional>
 
 namespace mwmp
 {
@@ -35,6 +38,7 @@ struct ConnectedClient
     std::string         name;
     BasePlayer          player;
     bool                handshakeComplete = false;
+    int64_t             dbCharacterId     = 0;   ///< PlayerDatabase characters.id, 0 if not set
 
     // Per-player key/value store — set/get from Lua scripts via player:setData/getData().
     std::unordered_map<std::string, std::string> scriptData;
@@ -98,6 +102,13 @@ public:
     // Number of fully-connected players.
     int getPlayerCount() const;
 
+    // ── Master server configuration (call before run()) ───────────────────
+    void setServerName   (const std::string& name) { mServerName    = name; }
+    void setMasterUrl    (const std::string& url)  { mMasterUrl     = url;  }
+    void setGameMode     (const std::string& mode) { mGameMode      = mode; }
+    void setPasswordProtected(bool v)              { mPasswordProtected = v; }
+    void setDbPath           (const std::string& p){ mDbPath            = p; }
+
 private:
     // ── GNS callbacks ─────────────────────────────────────────────────────
     static MPServer* sInstance;
@@ -117,6 +128,7 @@ private:
 
     // ── Packet handlers ───────────────────────────────────────────────────
     void handleHandshake        (ConnectedClient& c, const uint8_t* data, size_t size);
+    void handlePlayerCharGen    (ConnectedClient& c, const uint8_t* data, size_t size);
     void handlePlayerBaseInfo   (ConnectedClient& c, const uint8_t* data, size_t size);
     void handlePlayerPosition   (ConnectedClient& c, const uint8_t* data, size_t size);
     void handlePlayerCellChange (ConnectedClient& c, const uint8_t* data, size_t size);
@@ -183,6 +195,17 @@ private:
 
     // ── Scripting ─────────────────────────────────────────────────────────
     ScriptEngine mScript { this };
+
+    // ── Master server ──────────────────────────────────────────────────────
+    // Populated from server.cfg / command-line before run() is called.
+    MasterServerClient mMasterClient;
+    std::string        mServerName   = "OpenMW Multiplayer Server";
+    std::string        mMasterUrl;   ///< empty → do not register
+    std::string        mGameMode     = "Co-op";
+    bool               mPasswordProtected = false;
+
+    std::optional<PlayerDatabase> mPlayerDb;
+    std::string                   mDbPath = "playerdata.db";
 
     // ── Config ────────────────────────────────────────────────────────────
     static constexpr int         MAX_PLAYERS    = 32;

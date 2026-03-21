@@ -24,6 +24,16 @@
 #include "sync/WorldStateSync.hpp"
 #include "gui/ChatWindow.hpp"
 
+#include <components/openmw-mp/Packets/Player/PacketPlayerCharGen.hpp>
+#include "../mwbase/environment.hpp"
+#include "../mwbase/mechanicsmanager.hpp"
+#include "../mwbase/world.hpp"
+#include "../mwworld/player.hpp"
+#include "../mwworld/esmstore.hpp"
+#include <sstream>
+#include <components/esm/position.hpp>
+#include <components/esm/refid.hpp>
+
 namespace mwmp
 {
 
@@ -57,6 +67,7 @@ bool Main::init(const std::string& host, uint16_t port,
     {
         sInstance = new Main();
         sInstance->mPlayerName = playerName;
+        sInstance->mPasswordHash = passwordHash;
         sInstance->mPlayerSync->localPlayer().name = playerName;
 
         // Attempt connection
@@ -137,11 +148,80 @@ void Main::frame(float dt)
     if (!mClient->isConnected()) return;
 
     mChatWindow->update(dt);
-        mPlayerSync->update(dt);
+    mPlayerSync->update(dt);
     mPlayerList->updateAll(dt);
     mActorSync->update(dt);
     mObjectSync->update(dt);
     mWorldStateSync->update(dt);
+
+    // ── Chargen completion watcher ──────────────────────────────────────────
+    // Fires once when the player is in a cell after chargen dialogs are shown.
+    if (mCharGenWatching && mIsNewCharacter)
+    {
+        try
+        {
+            // Cell-presence is robust: fires regardless of how chargen ends.
+            // bypass=true already set sCharGenState=-1 so we can't use that.
+            const bool inCell = MWBase::Environment::get()
+                                    .getWorld()->getPlayerPtr().isInCell();
+            if (inCell)
+            {
+                mCharGenWatching = false;
+                mIsNewCharacter  = false;
+
+                Log(Debug::Info) << "[MP] Chargen complete — notifying server";
+
+                // Read the player's chosen race/class/birthsign from the world
+                // so the server can persist them for future logins.
+                try
+                {
+                    MWBase::World* world = MWBase::Environment::get().getWorld();
+                    MWWorld::Ptr playerPtr = world->getPlayerPtr();
+                    const ESM::NPC* npc = playerPtr.get<ESM::NPC>()->mBase;
+                    const MWWorld::Player& player = world->getPlayer();
+                    const ESM::RefId& birthSign = player.getBirthSign();
+
+                    BasePlayer& local = mPlayerSync->localPlayer();
+                    // Use serializeText() so index-based RefIds (e.g. built-in
+                    // classes like "0xb") round-trip correctly through DB and wire.
+                    local.race     = npc->mRace.serializeText();
+                    local.headMesh = npc->mHead.serializeText();
+                    local.hairMesh = npc->mHair.serializeText();
+                    local.isMale   = npc->isMale();
+
+                    // Class
+                    const ESM::Class* cls = world->getStore()
+                        .get<ESM::Class>().search(npc->mClass);
+                    if (cls)
+                    {
+                        local.charClass     = *cls;
+                        local.charClass.mId = npc->mClass;
+                    }
+                    local.birthSign = birthSign.serializeText();
+
+                    Log(Debug::Info) << "[MP] Chargen data: race=" << local.race
+                                     << " class=" << local.charClass.mId.toString()
+                                     << " birthSign=" << local.birthSign;
+                }
+                catch (const std::exception& e)
+                {
+                    Log(Debug::Warning) << "[MP] Could not read chargen data: " << e.what();
+                }
+
+                // Tell server: chargen complete + send all data
+                PacketPlayerCharGen pkt;
+                pkt.setPlayer(&mPlayerSync->localPlayer());
+                mClient->sendReliable(pkt.encode());
+
+            }
+
+        }
+        catch (const std::exception& e)
+        {
+            Log(Debug::Warning) << "[MP] chargen watcher error: " << e.what();
+            mCharGenWatching = false;
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -153,7 +233,7 @@ void Main::onConnected()
     PacketHandshake hs;
     hs.clientVersion = "0.1.0";
     hs.playerName    = mPlayerName;
-    // passwordHash set by caller via init() — stored in BasePlayer on response
+    hs.passwordHash  = mPasswordHash;
     mClient->sendReliable(hs.encode());
 }
 
@@ -163,6 +243,12 @@ void Main::onDisconnected()
     Log(Debug::Warning) << "[MP] Disconnected from server";
     mWorldReady = false;
     // Phase 3: show reconnect dialog
+}
+
+// ---------------------------------------------------------------------------
+bool Main::isNetworkDisconnected() const
+{
+    return mClient->getState() == ConnectionState::Disconnected;
 }
 
 // ---------------------------------------------------------------------------
@@ -180,16 +266,55 @@ void Main::registerProtocolHandlers()
 
             if (!rsp.accepted)
             {
-                Log(Debug::Error) << "[MP] Server rejected handshake: "
-                                  << rsp.rejectReason;
-                mClient->disconnect("Rejected: " + rsp.rejectReason);
+                mRejectReason = rsp.rejectReason;
+                Log(Debug::Error) << "[MP] Server rejected handshake: " << mRejectReason;
+                mClient->disconnect("Rejected: " + mRejectReason);
                 return;
             }
 
             mPlayerSync->localPlayer().guid = rsp.assignedGuid;
+            mIsNewCharacter = rsp.isNewCharacter;
+            mSpawnCell      = rsp.spawnCell;
+            mSpawnPos[0] = rsp.spawnX;
+            mSpawnPos[1] = rsp.spawnY;
+            mSpawnPos[2] = rsp.spawnZ;
+            mSpawnRot[0] = rsp.spawnRotX;
+            mSpawnRot[1] = rsp.spawnRotY;
+            mSpawnRot[2] = rsp.spawnRotZ;
+
+            // Store restored chargen data for returning players.
+            // CharacterSelectDialog will apply these after newGame(true).
+            mRestoredRace      = rsp.race;
+            mRestoredHeadMesh  = rsp.headMesh;
+            mRestoredHairMesh  = rsp.hairMesh;
+            mRestoredIsMale    = rsp.isMale;
+            mRestoredClassId   = rsp.classId;
+            mRestoredClassName = rsp.className;
+            mRestoredBirthSign = rsp.birthSign;
+            mRestoredClassData = rsp.classData;
+
+            // Decode class data directly into localPlayer so CharacterSelectDialog
+            // can construct a full ESM::Class and call setPlayerClass(cls).
+            if (!rsp.classData.empty())
+            {
+                std::istringstream ss(rsp.classData);
+                char sep;
+                auto& d = mPlayerSync->localPlayer().charClass.mData;
+                ss >> d.mSpecialization;
+                for (auto& v : d.mAttribute)  { ss >> sep >> v; }
+                for (auto& row : d.mSkills)   for (auto& v : row) { ss >> sep >> v; }
+                ss >> sep >> d.mIsPlayable;
+                ss >> sep >> d.mServices;
+                mPlayerSync->localPlayer().charClass.mName = rsp.className;
+            }
+
+            Log(Debug::Info) << "[MP] Restored chargen: race=" << mRestoredRace
+                             << " class=" << mRestoredClassName
+                             << " birthSign=" << mRestoredBirthSign;
             Log(Debug::Info) << "[MP] Handshake accepted, guid="
                              << rsp.assignedGuid
-                             << " server=" << rsp.serverVersion;
+                             << " server=" << rsp.serverVersion
+                             << " newChar=" << (mIsNewCharacter ? "yes" : "no");
 
             // Now send our base info so other players can render us
             mWorldReady = true;

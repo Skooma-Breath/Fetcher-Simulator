@@ -26,6 +26,7 @@
 #include "categories/video.hpp"
 #include "categories/water.hpp"
 #include "categories/windows.hpp"
+#include "categories/multiplayer.hpp"
 #include "settingvalue.hpp"
 
 #include <cassert>
@@ -63,6 +64,7 @@ namespace Settings
         StereoCategory mStereo{ mIndex };
         StereoViewCategory mStereoView{ mIndex };
         PostProcessingCategory mPostProcessing{ mIndex };
+        MultiplayerCategory mMultiplayer{ mIndex };
     };
 
     class StaticValues
@@ -172,6 +174,11 @@ namespace Settings
     inline WindowsCategory& windows()
     {
         return values().mWindows;
+    }
+
+    inline MultiplayerCategory& multiplayer()
+    {
+        return values().mMultiplayer;
     }
 
     inline NavigatorCategory& navigator()

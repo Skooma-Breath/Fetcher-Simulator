@@ -302,10 +302,31 @@ namespace MWGui
         }
     }
 
+    void CharacterCreation::startCharGen()
+    {
+        // Prime the stage so every dialog (Race→Class→Birth→Review) sees
+        // mCreationStage >= its own threshold and self-advances without needing
+        // vanilla script hooks like EnableRaceMenu / EnableClassMenu.
+        mCreationStage = CSE_BirthSignChosen;
+    }
+
+    void CharacterCreation::setCharGenCompleteCallback(std::function<void()> cb)
+    {
+        mCharGenCompleteCallback = std::move(cb);
+    }
+
     void CharacterCreation::onReviewDialogDone(WindowBase* parWindow)
     {
         MWBase::Environment::get().getWindowManager()->removeDialog(std::move(mReviewDialog));
         MWBase::Environment::get().getWindowManager()->popGuiMode();
+
+        // MP: notify listener (e.g. chargen-complete watcher) now that the player
+        // has finished all dialogs and confirmed their character.
+        if (mCharGenCompleteCallback)
+        {
+            mCharGenCompleteCallback();
+            mCharGenCompleteCallback = nullptr; // fire once
+        }
     }
 
     void CharacterCreation::onReviewDialogBack()

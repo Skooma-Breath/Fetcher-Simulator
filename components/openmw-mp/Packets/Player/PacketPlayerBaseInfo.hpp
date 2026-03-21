@@ -24,7 +24,7 @@ namespace mwmp
             ws.write(mPlayer->isMale);
             ws.write(mPlayer->scale);
             // Class
-            ws.writeString(mPlayer->charClass.mId.toString());
+            ws.writeString(mPlayer->charClass.mId.serializeText());
             ws.writeString(mPlayer->charClass.mName);
         }
 
@@ -37,7 +37,7 @@ namespace mwmp
             mPlayer->hairMesh = rs.readString();
             rs.read(mPlayer->isMale);
             rs.read(mPlayer->scale);
-            mPlayer->charClass.mId = ESM::RefId::stringRefId(rs.readString());
+            mPlayer->charClass.mId = ESM::RefId::deserializeText(rs.readString());
             mPlayer->charClass.mName = rs.readString();
         }
     };

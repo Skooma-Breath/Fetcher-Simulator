@@ -54,6 +54,32 @@ namespace mwmp
         ChatWindow& getChatWindow() { return *mChatWindow; }
         bool hasChatWindow() const { return mChatWindow != nullptr; }
 
+        // Connection state queries (used by AccountDialog to poll results)
+        bool               isWorldReady()          const { return mWorldReady; }
+        const std::string& getRejectReason()        const { return mRejectReason; }
+        const std::string& getPlayerName()          const { return mPlayerName; }
+        bool               isNewCharacter()         const { return mIsNewCharacter; }
+        const std::string& getSpawnCell()            const { return mSpawnCell; }
+        float              getSpawnX()    const { return mSpawnPos[0]; }
+        float              getSpawnY()    const { return mSpawnPos[1]; }
+        float              getSpawnZ()    const { return mSpawnPos[2]; }
+        float              getSpawnRotX() const { return mSpawnRot[0]; }
+        float              getSpawnRotY() const { return mSpawnRot[1]; }
+        float              getSpawnRotZ() const { return mSpawnRot[2]; }
+        /// Called by CharacterSelectDialog to arm the chargen-completion watcher.
+        void               startWatchingCharGen()          { mCharGenWatching = true; }
+        bool               isNetworkDisconnected()  const;
+
+        // Restored chargen data — populated from HandshakeResponse when isNewCharacter=false
+        const std::string& getRestoredRace()      const { return mRestoredRace; }
+        const std::string& getRestoredHeadMesh()  const { return mRestoredHeadMesh; }
+        const std::string& getRestoredHairMesh()  const { return mRestoredHairMesh; }
+        bool               getRestoredIsMale()    const { return mRestoredIsMale; }
+        const std::string& getRestoredClassId()   const { return mRestoredClassId; }
+        const std::string& getRestoredClassName() const { return mRestoredClassName; }
+        const std::string& getRestoredClassData() const { return mRestoredClassData; }
+        const std::string& getRestoredBirthSign() const { return mRestoredBirthSign; }
+
     private:
         Main();
         ~Main();
@@ -77,7 +103,24 @@ namespace mwmp
         std::unique_ptr<ChatWindow> mChatWindow;
 
         std::string mPlayerName;
-        bool        mWorldReady = false;
+        bool        mWorldReady       = false;
+        bool        mIsNewCharacter   = true;
+        bool        mCharGenWatching  = false;
+        std::string mSpawnCell;
+        float       mSpawnPos[3] = {0.f, 0.f, 0.f};
+        float       mSpawnRot[3] = {0.f, 0.f, 0.f};
+        std::string mPasswordHash;
+        std::string mRejectReason;
+
+        // Chargen restore data (returning players)
+        std::string mRestoredRace;
+        std::string mRestoredHeadMesh;
+        std::string mRestoredHairMesh;
+        bool        mRestoredIsMale    = true;
+        std::string mRestoredClassId;
+        std::string mRestoredClassName;
+        std::string mRestoredBirthSign;
+        std::string mRestoredClassData;
     };
 
 } // namespace mwmp

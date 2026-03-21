@@ -3,6 +3,7 @@
 
 #include <cstdint>
 #include <filesystem>
+#include <functional>
 #include <map>
 #include <memory>
 #include <set>
@@ -119,6 +120,11 @@ namespace MWBase
         virtual void playVideo(std::string_view name, bool allowSkipping, bool overrideSounds = true) = 0;
 
         virtual void setNewGame(bool newgame) = 0;
+
+        // MP: prime chargen stage so dialogs self-advance (call after setNewGame(true))
+        virtual void startCharGen() = 0;
+        // MP: callback fires once when Review "Done" is clicked
+        virtual void setCharGenCompleteCallback(std::function<void()> cb) = 0;
 
         virtual void pushGuiMode(MWGui::GuiMode mode, const MWWorld::Ptr& arg) = 0;
         virtual void pushGuiMode(MWGui::GuiMode mode) = 0;

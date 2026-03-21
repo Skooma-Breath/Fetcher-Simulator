@@ -2,6 +2,8 @@ set(OPENMW_SERVER_SOURCES
     main.cpp
     Server.cpp
     ScriptEngine.cpp
+    MasterServerClient.cpp
+    PlayerDatabase.cpp
     bindings/PlayerBindings.cpp
     bindings/ServerBindings.cpp
 )
@@ -9,6 +11,8 @@ set(OPENMW_SERVER_SOURCES
 set(OPENMW_SERVER_HEADERS
     Server.hpp
     ScriptEngine.hpp
+    MasterServerClient.hpp
+    PlayerDatabase.hpp
     bindings/PlayerBindings.hpp
     bindings/ServerBindings.hpp
 )
@@ -26,12 +30,14 @@ target_include_directories(openmw-server PRIVATE
     ${CMAKE_SOURCE_DIR}                  # so <components/...> includes resolve
     ${GNS_INCLUDE_DIR}
     ${CMAKE_SOURCE_DIR}/extern/sol3      # sol/sol.hpp
+    ${CMAKE_SOURCE_DIR}/extern/httplib   # httplib.h
     ${LUA_INCLUDE_DIR}
 )
 
 target_link_libraries(openmw-server
     components
     GameNetworkingSockets::GameNetworkingSockets
+    SQLite::SQLite3
     ${LUA_LIBRARIES}
 )
 

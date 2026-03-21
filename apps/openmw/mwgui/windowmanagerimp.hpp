@@ -149,6 +149,8 @@ namespace MWGui
         void setKeyFocusWidget(MyGUI::Widget* widget) override;
 
         void setNewGame(bool newgame) override;
+        void startCharGen() override;
+        void setCharGenCompleteCallback(std::function<void()> cb) override;
 
         void pushGuiMode(GuiMode mode, const MWWorld::Ptr& arg) override;
         void pushGuiMode(GuiMode mode) override;

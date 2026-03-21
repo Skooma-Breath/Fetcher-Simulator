@@ -125,6 +125,8 @@ if (BUILD_MULTIPLAYER)
     )
     add_openmw_dir (mwmp/gui
         ChatWindow LoginDialog PlayerListWindow ServerBrowser
+        ServerAddressDialog ServerBrowserDialog
+        AccountDialog CharacterSelectDialog
     )
     add_openmw_dir (mwmp
         Main
@@ -208,8 +210,13 @@ target_link_libraries(openmw-lib
 )
 
 if (BUILD_MULTIPLAYER)
-    target_link_libraries(openmw-lib GameNetworkingSockets::GameNetworkingSockets)
-    target_include_directories(openmw-lib PRIVATE ${GNS_INCLUDE_DIR})
+    target_link_libraries(openmw-lib
+        GameNetworkingSockets::GameNetworkingSockets
+    )
+    target_include_directories(openmw-lib PRIVATE
+        ${GNS_INCLUDE_DIR}
+        ${CMAKE_SOURCE_DIR}/extern/httplib   # httplib.h for ServerBrowserDialog
+    )
 endif()
 
 if (MSVC AND PRECOMPILE_HEADERS_WITH_MSVC)

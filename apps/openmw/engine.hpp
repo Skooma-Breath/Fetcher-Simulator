@@ -276,6 +276,8 @@ namespace OMW
 
 #ifdef BUILD_MULTIPLAYER
         /// Configure multiplayer connection (called from main.cpp after CLI parsing).
+        /// passwordHash must be the SHA-256 hex digest of the raw password,
+        /// or empty for password-less servers.
         void setMultiplayer(const std::string& address, uint16_t port,
                             const std::string& playerName, const std::string& passwordHash)
         {
