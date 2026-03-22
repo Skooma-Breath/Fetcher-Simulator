@@ -79,7 +79,7 @@ void AccountDialog::onFrame(float dt)
 
     Main& mp = Main::get();
 
-    // Success: handshake accepted.
+    // Success: handshake accepted and CharacterList received.
     // Set mState BEFORE firing the callback so that even if onFrame is called
     // again before setVisible takes full effect, the early-return guard fires.
     if (mp.isWorldReady())

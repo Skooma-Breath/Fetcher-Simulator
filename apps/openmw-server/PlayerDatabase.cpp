@@ -49,6 +49,18 @@ CREATE TABLE IF NOT EXISTS characters (
 );
 
 CREATE INDEX IF NOT EXISTS idx_chars_account ON characters(account_id);
+
+-- Ed25519 keypairs — one account may have many registered public keys.
+-- Authentication via keypair is an alternative to password auth.
+CREATE TABLE IF NOT EXISTS account_keypairs (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    account_id  INTEGER NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+    public_key  TEXT    NOT NULL UNIQUE,   -- base64-encoded Ed25519 public key (32 bytes)
+    label       TEXT    NOT NULL DEFAULT '', -- e.g. "home PC", "laptop"
+    created_at  INTEGER NOT NULL DEFAULT 0
+);
+
+CREATE INDEX IF NOT EXISTS idx_keypairs_account ON account_keypairs(account_id);
 )SQL";
 
 // Migration: add chargen columns to databases created before they existed.
@@ -63,6 +75,16 @@ static const char* kMigrations[] = {
     "ALTER TABLE characters ADD COLUMN class_data TEXT NOT NULL DEFAULT ''",
     // accounts table migrations
     "ALTER TABLE accounts ADD COLUMN password_hash TEXT NOT NULL DEFAULT ''",
+    // unique character name per account (safe on existing single-char DBs)
+    "CREATE UNIQUE INDEX IF NOT EXISTS idx_chars_unique_name ON characters(account_id, name)",
+    // Ed25519 keypairs table
+    "CREATE TABLE IF NOT EXISTS account_keypairs ("
+    "  id INTEGER PRIMARY KEY AUTOINCREMENT,"
+    "  account_id INTEGER NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,"
+    "  public_key TEXT NOT NULL UNIQUE,"
+    "  label TEXT NOT NULL DEFAULT '',"
+    "  created_at INTEGER NOT NULL DEFAULT 0)",
+    "CREATE INDEX IF NOT EXISTS idx_keypairs_account ON account_keypairs(account_id)",
 };
 
 // ============================================================================
@@ -198,72 +220,84 @@ void PlayerDatabase::setPasswordHash(int64_t accountId, std::string_view hash)
     sqlite3_finalize(s);
 }
 
-PlayerRecord PlayerDatabase::lookupOrCreateCharacter(int64_t accountId,
-                                                      std::string_view username)
+std::optional<PlayerRecord> PlayerDatabase::lookupCharacter(int64_t accountId,
+                                                              std::string_view charName)
 {
-    // Try lookup
-    {
-        sqlite3_stmt* s = prepare(
-            "SELECT id, name, cell, pos_x, pos_y, pos_z, rot_x, rot_y, rot_z, is_new,"
-            " race, head_mesh, hair_mesh, is_male, class_id, class_name, birth_sign, class_data"
-            " FROM characters WHERE account_id = ?1 ORDER BY id LIMIT 1");
-        sqlite3_bind_int64(s, 1, accountId);
-        const int rc = sqlite3_step(s);
-        if (rc == SQLITE_ROW)
-        {
-            PlayerRecord rec;
-            rec.accountId   = accountId;
-            rec.characterId = sqlite3_column_int64(s, 0);
-            const char* nm  = reinterpret_cast<const char*>(sqlite3_column_text(s, 1));
-            rec.playerName  = nm ? nm : std::string(username);
-            const char* cl  = reinterpret_cast<const char*>(sqlite3_column_text(s, 2));
-            rec.cell        = cl ? cl : "";
-            rec.posX = static_cast<float>(sqlite3_column_double(s, 3));
-            rec.posY = static_cast<float>(sqlite3_column_double(s, 4));
-            rec.posZ = static_cast<float>(sqlite3_column_double(s, 5));
-            rec.rotX = static_cast<float>(sqlite3_column_double(s, 6));
-            rec.rotY = static_cast<float>(sqlite3_column_double(s, 7));
-            rec.rotZ = static_cast<float>(sqlite3_column_double(s, 8));
-            rec.isNew = sqlite3_column_int(s, 9) != 0;
-            auto col = [&](int i) -> std::string {
-                const char* t = reinterpret_cast<const char*>(sqlite3_column_text(s, i));
-                return t ? t : "";
-            };
-            rec.race      = col(10);
-            rec.headMesh  = col(11);
-            rec.hairMesh  = col(12);
-            rec.isMale    = sqlite3_column_int(s, 13) != 0;
-            rec.classId   = col(14);
-            rec.className = col(15);
-            rec.birthSign = col(16);
-            rec.classData = col(17);
-            rec.classData = col(17);
-            sqlite3_finalize(s);
-            return rec;
-        }
-        sqlite3_finalize(s);
-    }
+    sqlite3_stmt* s = prepare(
+        "SELECT id, name, cell, pos_x, pos_y, pos_z, rot_x, rot_y, rot_z, is_new,"
+        " race, head_mesh, hair_mesh, is_male, class_id, class_name, birth_sign, class_data"
+        " FROM characters WHERE account_id = ?1 AND name = ?2 LIMIT 1");
+    sqlite3_bind_int64(s, 1, accountId);
+    sqlite3_bind_text (s, 2, charName.data(), static_cast<int>(charName.size()), SQLITE_STATIC);
+    const int rc = sqlite3_step(s);
+    if (rc != SQLITE_ROW) { sqlite3_finalize(s); return std::nullopt; }
 
-    // Create new character record
-    {
-        sqlite3_stmt* s = prepare(
-            "INSERT INTO characters(account_id, name, is_new, last_seen)"
-            " VALUES(?1, ?2, 1, ?3)");
-        sqlite3_bind_int64(s, 1, accountId);
-        sqlite3_bind_text(s, 2, username.data(), static_cast<int>(username.size()), SQLITE_STATIC);
-        sqlite3_bind_int64(s, 3, static_cast<int64_t>(std::time(nullptr)));
-        checkSqlite(sqlite3_step(s), mDb, "insert character");
-        sqlite3_finalize(s);
+    PlayerRecord rec;
+    rec.accountId   = accountId;
+    rec.characterId = sqlite3_column_int64(s, 0);
+    auto col = [&](int i) -> std::string {
+        const char* t = reinterpret_cast<const char*>(sqlite3_column_text(s, i));
+        return t ? t : "";
+    };
+    rec.playerName = col(1);
+    rec.cell       = col(2);
+    rec.posX = static_cast<float>(sqlite3_column_double(s, 3));
+    rec.posY = static_cast<float>(sqlite3_column_double(s, 4));
+    rec.posZ = static_cast<float>(sqlite3_column_double(s, 5));
+    rec.rotX = static_cast<float>(sqlite3_column_double(s, 6));
+    rec.rotY = static_cast<float>(sqlite3_column_double(s, 7));
+    rec.rotZ = static_cast<float>(sqlite3_column_double(s, 8));
+    rec.isNew     = sqlite3_column_int(s, 9) != 0;
+    rec.race      = col(10);
+    rec.headMesh  = col(11);
+    rec.hairMesh  = col(12);
+    rec.isMale    = sqlite3_column_int(s, 13) != 0;
+    rec.classId   = col(14);
+    rec.className = col(15);
+    rec.birthSign = col(16);
+    rec.classData = col(17);
+    sqlite3_finalize(s);
+    return rec;
+}
 
-        PlayerRecord rec;
-        rec.accountId   = accountId;
-        rec.characterId = sqlite3_last_insert_rowid(mDb);
-        rec.playerName  = std::string(username);
-        rec.isNew       = true;
-        Log(Debug::Info) << "[PlayerDB] new character: '" << username
-                          << "' id=" << rec.characterId;
-        return rec;
-    }
+PlayerRecord PlayerDatabase::createCharacter(int64_t accountId,
+                                              std::string_view charName)
+{
+    sqlite3_stmt* s = prepare(
+        "INSERT INTO characters(account_id, name, is_new, last_seen) VALUES(?1, ?2, 1, ?3)");
+    sqlite3_bind_int64(s, 1, accountId);
+    sqlite3_bind_text (s, 2, charName.data(), static_cast<int>(charName.size()), SQLITE_STATIC);
+    sqlite3_bind_int64(s, 3, static_cast<int64_t>(std::time(nullptr)));
+    checkSqlite(sqlite3_step(s), mDb, "insert character");
+    sqlite3_finalize(s);
+
+    PlayerRecord rec;
+    rec.accountId   = accountId;
+    rec.characterId = sqlite3_last_insert_rowid(mDb);
+    rec.playerName  = std::string(charName);
+    rec.isNew       = true;
+    Log(Debug::Info) << "[PlayerDB] new character: '" << charName
+                     << "' id=" << rec.characterId
+                     << " account=" << accountId;
+    return rec;
+}
+
+bool PlayerDatabase::characterNameTaken(int64_t accountId, std::string_view charName)
+{
+    sqlite3_stmt* s = prepare(
+        "SELECT 1 FROM characters WHERE account_id = ?1 AND name = ?2 LIMIT 1");
+    sqlite3_bind_int64(s, 1, accountId);
+    sqlite3_bind_text (s, 2, charName.data(), static_cast<int>(charName.size()), SQLITE_STATIC);
+    const bool found = sqlite3_step(s) == SQLITE_ROW;
+    sqlite3_finalize(s);
+    return found;
+}
+
+PlayerRecord PlayerDatabase::lookupOrCreateCharacter(int64_t accountId,
+                                                      std::string_view charName)
+{
+    auto existing = lookupCharacter(accountId, charName);
+    return existing ? *existing : createCharacter(accountId, charName);
 }
 
 void PlayerDatabase::savePosition(int64_t characterId,
@@ -335,6 +369,86 @@ void PlayerDatabase::touch(int64_t characterId)
     sqlite3_bind_int64(s, 2, characterId);
     checkSqlite(sqlite3_step(s), mDb, "touch");
     sqlite3_finalize(s);
+}
+
+int64_t PlayerDatabase::addKeypair(int64_t accountId,
+                                    std::string_view publicKey,
+                                    std::string_view label)
+{
+    sqlite3_stmt* s = prepare(
+        "INSERT INTO account_keypairs(account_id, public_key, label, created_at)"
+        " VALUES(?1, ?2, ?3, ?4)");
+    sqlite3_bind_int64(s, 1, accountId);
+    sqlite3_bind_text (s, 2, publicKey.data(), static_cast<int>(publicKey.size()), SQLITE_STATIC);
+    sqlite3_bind_text (s, 3, label.data(),     static_cast<int>(label.size()),     SQLITE_STATIC);
+    sqlite3_bind_int64(s, 4, static_cast<int64_t>(std::time(nullptr)));
+    checkSqlite(sqlite3_step(s), mDb, "insert keypair");
+    sqlite3_finalize(s);
+    const int64_t id = sqlite3_last_insert_rowid(mDb);
+    Log(Debug::Info) << "[PlayerDB] keypair registered for account=" << accountId
+                     << " label='" << label << "'";
+    return id;
+}
+
+std::vector<PlayerDatabase::KeypairEntry>
+PlayerDatabase::listKeypairs(int64_t accountId)
+{
+    std::vector<KeypairEntry> results;
+    sqlite3_stmt* s = prepare(
+        "SELECT id, public_key, label FROM account_keypairs WHERE account_id=?1");
+    sqlite3_bind_int64(s, 1, accountId);
+    while (sqlite3_step(s) == SQLITE_ROW)
+    {
+        KeypairEntry e;
+        e.id = sqlite3_column_int64(s, 0);
+        auto col = [&](int i) -> std::string {
+            const char* t = reinterpret_cast<const char*>(sqlite3_column_text(s, i));
+            return t ? t : "";
+        };
+        e.publicKey = col(1);
+        e.label     = col(2);
+        results.push_back(std::move(e));
+    }
+    sqlite3_finalize(s);
+    return results;
+}
+
+int64_t PlayerDatabase::lookupAccountByKeypair(std::string_view publicKey)
+{
+    sqlite3_stmt* s = prepare(
+        "SELECT account_id FROM account_keypairs WHERE public_key=?1 LIMIT 1");
+    sqlite3_bind_text(s, 1, publicKey.data(), static_cast<int>(publicKey.size()), SQLITE_STATIC);
+    const int rc = sqlite3_step(s);
+    const int64_t id = (rc == SQLITE_ROW) ? sqlite3_column_int64(s, 0) : -1;
+    sqlite3_finalize(s);
+    return id;
+}
+
+std::vector<PlayerDatabase::CharacterSummary>
+PlayerDatabase::listCharacters(int64_t accountId)
+{
+    std::vector<CharacterSummary> results;
+    sqlite3_stmt* s = prepare(
+        "SELECT name, race, class_name, last_seen, is_new "
+        "FROM characters WHERE account_id=?1 ORDER BY last_seen DESC");
+    sqlite3_bind_int64(s, 1, accountId);
+    while (sqlite3_step(s) == SQLITE_ROW)
+    {
+        CharacterSummary cs;
+        auto col = [&](int i) -> std::string {
+            const char* t = reinterpret_cast<const char*>(sqlite3_column_text(s, i));
+            return t ? t : "";
+        };
+        cs.name      = col(0);
+        cs.race      = col(1);
+        cs.className = col(2);
+        int64_t ts   = sqlite3_column_int64(s, 3);
+        cs.lastSeen  = ts ? std::to_string(ts) : "";
+        cs.isNew     = sqlite3_column_int(s, 4) != 0;
+        results.push_back(std::move(cs));
+    }
+    sqlite3_finalize(s);
+    return results;
 }
 
 } // namespace mwmp

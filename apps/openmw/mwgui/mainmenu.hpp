@@ -22,7 +22,6 @@ namespace mwmp
 {
     class ServerAddressDialog;
     class ServerBrowserDialog;
-    class AccountDialog;
     class CharacterSelectDialog;
 }
 
@@ -86,7 +85,6 @@ namespace MWGui
         std::unique_ptr<SaveGameDialog>           mSaveGameDialog;
         std::unique_ptr<mwmp::ServerAddressDialog>   mServerAddressDialog;
         std::unique_ptr<mwmp::ServerBrowserDialog>   mServerBrowserDialog;
-        std::unique_ptr<mwmp::AccountDialog>         mAccountDialog;
         std::unique_ptr<mwmp::CharacterSelectDialog> mCharSelectDialog;
     };
 

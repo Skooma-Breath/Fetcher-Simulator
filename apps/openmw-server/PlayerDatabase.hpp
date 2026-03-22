@@ -24,6 +24,7 @@
 #include <optional>
 #include <string>
 #include <string_view>
+#include <vector>
 
 struct sqlite3;
 struct sqlite3_stmt;
@@ -80,10 +81,19 @@ namespace mwmp
         /// Set (or update) the bcrypt password hash for an account.
         void setPasswordHash(int64_t accountId, std::string_view hash);
 
-        /// Look up or create the character record for accountId.
-        /// Returns a filled PlayerRecord.
+        /// Look up a character by account + name. Returns nullopt if not found.
+        std::optional<PlayerRecord> lookupCharacter(int64_t accountId,
+                                                    std::string_view charName);
+
+        /// Create a new character slot. Caller must check characterNameTaken first.
+        PlayerRecord createCharacter(int64_t accountId, std::string_view charName);
+
+        /// Returns true if (accountId, charName) already exists.
+        bool characterNameTaken(int64_t accountId, std::string_view charName);
+
+        /// Legacy convenience — lookup then create if absent. Prefer the above for new code.
         PlayerRecord lookupOrCreateCharacter(int64_t accountId,
-                                             std::string_view username);
+                                             std::string_view charName);
 
         /// Persist the player's last known position/cell.
         void savePosition(int64_t characterId,
@@ -107,6 +117,39 @@ namespace mwmp
 
         /// Update last_seen timestamp.
         void touch(int64_t characterId);
+
+        /// Lightweight summary used to build PacketCharacterList.
+        struct CharacterSummary
+        {
+            std::string name;
+            std::string race;
+            std::string className;
+            std::string lastSeen; ///< epoch seconds as string, or ""
+            bool        isNew = true;
+        };
+
+        /// Return all characters for an account (may be empty for brand-new accounts).
+        std::vector<CharacterSummary> listCharacters(int64_t accountId);
+
+        // ── Ed25519 keypair management ────────────────────────────────────
+        struct KeypairEntry
+        {
+            int64_t     id         = 0;
+            std::string publicKey; ///< base64-encoded Ed25519 public key
+            std::string label;
+        };
+
+        /// Register a new public key for an account. Returns the new row id.
+        /// Throws if the public key is already registered (globally unique).
+        int64_t addKeypair(int64_t accountId,
+                           std::string_view publicKey,
+                           std::string_view label = "");
+
+        /// Returns all keypairs registered for an account.
+        std::vector<KeypairEntry> listKeypairs(int64_t accountId);
+
+        /// Look up which account owns a given public key. Returns -1 if not found.
+        int64_t lookupAccountByKeypair(std::string_view publicKey);
 
     private:
         void exec(const char* sql);

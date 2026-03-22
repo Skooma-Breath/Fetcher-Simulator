@@ -110,7 +110,7 @@ void PlayerSync::update(float dt)
     if (player.isEmpty()) return;
 
     // Don't send anything until we have a valid server-assigned guid.
-    // forceFullSync() is called by Main.cpp from the HandshakeResponse handler
+    // forceFullSync() is called by Main.cpp from the CharacterData handler
     // once mLocal.guid is properly set.
     if (mLocal.guid == 0)
         return;

@@ -25,7 +25,6 @@
 #ifdef BUILD_MULTIPLAYER
 #include "../mwmp/gui/ServerAddressDialog.hpp"
 #include "../mwmp/gui/ServerBrowserDialog.hpp"
-#include "../mwmp/gui/AccountDialog.hpp"
 #include "../mwmp/gui/CharacterSelectDialog.hpp"
 #include "../mwmp/Main.hpp"
 #endif
@@ -218,20 +217,10 @@ namespace MWGui
                 mServerAddressDialog->setConnectCallback(
                     [this](const std::string& addr, uint16_t port)
                     {
-                        if (!mAccountDialog)
-                        {
-                            mAccountDialog = std::make_unique<mwmp::AccountDialog>();
-                            mAccountDialog->setWorldReadyCallback(
-                                [this](const std::string& playerName, const std::string& host)
-                                {
-                                    if (!mCharSelectDialog)
-                                        mCharSelectDialog = std::make_unique<mwmp::CharacterSelectDialog>();
-                                    mCharSelectDialog->setConnectedInfo(playerName, host);
-                                    mCharSelectDialog->setVisible(true);
-                                });
-                        }
-                        mAccountDialog->setServer(addr, port);
-                        mAccountDialog->setVisible(true);
+                        if (!mCharSelectDialog)
+                            mCharSelectDialog = std::make_unique<mwmp::CharacterSelectDialog>();
+                        mCharSelectDialog->setServer(addr, port);
+                        mCharSelectDialog->setVisible(true);
                     });
             }
             mServerAddressDialog->setVisible(true);
@@ -244,20 +233,10 @@ namespace MWGui
                 mServerBrowserDialog->setConnectCallback(
                     [this](const std::string& addr, uint16_t port)
                     {
-                        if (!mAccountDialog)
-                        {
-                            mAccountDialog = std::make_unique<mwmp::AccountDialog>();
-                            mAccountDialog->setWorldReadyCallback(
-                                [this](const std::string& playerName, const std::string& host)
-                                {
-                                    if (!mCharSelectDialog)
-                                        mCharSelectDialog = std::make_unique<mwmp::CharacterSelectDialog>();
-                                    mCharSelectDialog->setConnectedInfo(playerName, host);
-                                    mCharSelectDialog->setVisible(true);
-                                });
-                        }
-                        mAccountDialog->setServer(addr, port);
-                        mAccountDialog->setVisible(true);
+                        if (!mCharSelectDialog)
+                            mCharSelectDialog = std::make_unique<mwmp::CharacterSelectDialog>();
+                        mCharSelectDialog->setServer(addr, port);
+                        mCharSelectDialog->setVisible(true);
                     });
             }
             mServerBrowserDialog->refresh();

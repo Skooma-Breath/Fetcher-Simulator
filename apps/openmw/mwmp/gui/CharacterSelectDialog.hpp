@@ -1,48 +1,116 @@
 #pragma once
 
+#include <cstdint>
 #include <string>
+#include <vector>
 
 #include <MyGUI_Button.h>
+#include <MyGUI_Window.h>
+#include <MyGUI_EditBox.h>
+#include <MyGUI_KeyCode.h>
 #include <MyGUI_ListBox.h>
 #include <MyGUI_TextBox.h>
 #include <MyGUI_Widget.h>
 
 #include "../../mwgui/windowbase.hpp"
+#include <components/openmw-mp/Packets/System/PacketHandshake.hpp>
 
 namespace mwmp
 {
     /**
-     * CharacterSelectDialog  (Phase 6 stub)
+     * CharacterSelectDialog
      *
-     * Shown after a successful handshake.  In Phase 8 the character list will
-     * be populated from a server-sent CharacterList packet.  For Phase 6 the
-     * dialog shows the connected player name and a single "Enter World" button
-     * that drops the player straight into the game world.
+     * Single dialog that handles the full connect-to-play flow.
+     * Opens immediately after the player enters the server address.
      *
-     * Usage:
-     *   dlg->setConnectedInfo("Alice", "myserver.example.com");
-     *   dlg->setVisible(true);
+     * State machine:
+     *
+     *   Login ──Login/Register──> Connecting ──CharacterList──> CharSelect
+     *          └──rejected──> Login (error)                          │
+     *                                                     New Char   │  Enter World
+     *                                                        ▼       ▼
+     *                                                    Naming   WaitingForData
+     *                                                      │  └──error──> CharSelect
+     *                                                      └──confirm──> WaitingForData
+     *                                                                        │
+     *                                                                  [enterWorld]
      */
     class CharacterSelectDialog : public MWGui::WindowModal
     {
     public:
         CharacterSelectDialog();
 
-        /// Populate the status line before showing.
-        void setConnectedInfo(const std::string& playerName,
-                              const std::string& host);
+        /// Set the target server before calling setVisible(true).
+        void setServer(const std::string& host, uint16_t port);
 
         // WindowModal
-        void onOpen() override;
+        void onOpen()  override;
+        void onFrame(float dt) override;
 
     private:
-        void onEnterWorldClicked(MyGUI::Widget* sender);
-        void onCancelClicked    (MyGUI::Widget* sender);
+        enum class State
+        {
+            Login,           ///< showing credentials form
+            Connecting,      ///< waiting for CharacterList to arrive
+            CharSelect,      ///< showing character list, name row hidden
+            Naming,          ///< name row visible, player typing new char name
+            WaitingForData,  ///< PacketCharacterSelect sent, waiting for response
+        };
 
-        MyGUI::TextBox* mLabel       = nullptr;
-        MyGUI::ListBox* mList        = nullptr;
-        MyGUI::Button*  mEnterBtn    = nullptr;
-        MyGUI::Button*  mCancelBtn   = nullptr;
+        // ── Login panel handlers ──────────────────────────────────────────
+        void onLoginClicked      (MyGUI::Widget* sender);
+        void onRegisterClicked   (MyGUI::Widget* sender);
+        void onLoginCancelClicked(MyGUI::Widget* sender);
+        void onLoginKeyPress(MyGUI::Widget* sender, MyGUI::KeyCode key, MyGUI::Char ch);
+        void doConnect(bool isRegister);
+
+        // ── CharSelect panel handlers ─────────────────────────────────────
+        void onEnterWorldClicked   (MyGUI::Widget* sender);
+        void onNewCharClicked      (MyGUI::Widget* sender);
+        void onNewCharNameConfirm  (MyGUI::Widget* sender);
+        void onNewCharNameKeyPress (MyGUI::Widget* sender, MyGUI::KeyCode key, MyGUI::Char ch);
+        void onCharCancelClicked   (MyGUI::Widget* sender);
+
+        // ── Shared helpers ────────────────────────────────────────────────
+        void showLoginPanel();
+        void showCharPanel(bool resetNamingRow = true);
+        void setLoginStatus(const std::string& msg);
+        void setCharStatus (const std::string& msg);
+        void populate(const std::vector<CharacterEntry>& characters);
+        void sendCharacterSelect(const std::string& charName, bool isNew);
+        void setCharPanelBusy(bool busy);
+        void enterWorld();
+
+        static std::string sha256hex(const std::string& input);
+
+        // ── Login group widgets ───────────────────────────────────────────
+        MyGUI::Widget*  mUsernameLabel   = nullptr;
+        MyGUI::EditBox* mUsername        = nullptr;
+        MyGUI::Widget*  mPasswordLabel   = nullptr;
+        MyGUI::EditBox* mPassword        = nullptr;
+        MyGUI::TextBox* mStatusLabel     = nullptr;
+        MyGUI::Button*  mLoginBtn        = nullptr;
+        MyGUI::Button*  mRegBtn          = nullptr;
+        MyGUI::Button*  mLoginCancelBtn  = nullptr;
+
+        // ── CharSelect group widgets ──────────────────────────────────────
+        MyGUI::TextBox* mConnectedLabel  = nullptr;
+        MyGUI::TextBox* mCharSelectHint  = nullptr;
+        MyGUI::ListBox* mList               = nullptr;
+        MyGUI::Widget*  mNewCharNameRow     = nullptr;   ///< hidden container
+        MyGUI::EditBox* mNewCharNameEdit    = nullptr;
+        MyGUI::Button*  mNewCharNameConfirm = nullptr;
+        MyGUI::Button*  mEnterBtn           = nullptr;
+        MyGUI::Button*  mNewCharBtn         = nullptr;
+        MyGUI::Button*  mCharCancelBtn      = nullptr;
+
+        // ── State ─────────────────────────────────────────────────────────
+        State       mState  = State::Login;
+        float       mTimer  = 0.f;
+        std::string mHost;
+        uint16_t    mPort   = 25565;
+
+        std::vector<CharacterEntry> mCharacters;
     };
 
 } // namespace mwmp

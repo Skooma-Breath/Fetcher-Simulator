@@ -3,9 +3,12 @@
 
 #include <memory>
 #include <string>
+#include <vector>
 
 namespace mwmp
 {
+    // Forward declarations — full definitions in PacketHandshake.hpp
+    struct CharacterEntry;
     class NetworkClient;
     class Protocol;
     class PlayerSync;
@@ -60,18 +63,25 @@ namespace mwmp
         const std::string& getRejectReason()        const { return mRejectReason; }
         const std::string& getPlayerName()          const { return mPlayerName; }
         bool               isNewCharacter()         const { return mIsNewCharacter; }
+        bool               isCharacterDataReady()   const { return mCharacterDataReady; }
+        const std::string& getCharSelectError()      const { return mCharSelectError; }
+        void               clearCharSelectError()          { mCharSelectError.clear(); }
         const std::string& getSpawnCell()            const { return mSpawnCell; }
+        const std::string& getCharacterName()        const { return mCharacterName; }
         float              getSpawnX()    const { return mSpawnPos[0]; }
         float              getSpawnY()    const { return mSpawnPos[1]; }
         float              getSpawnZ()    const { return mSpawnPos[2]; }
         float              getSpawnRotX() const { return mSpawnRot[0]; }
         float              getSpawnRotY() const { return mSpawnRot[1]; }
         float              getSpawnRotZ() const { return mSpawnRot[2]; }
+
+        // Character list received after handshake — used to populate CharacterSelectDialog.
+        const std::vector<CharacterEntry>& getCharacterList() const { return mCharacterList; }
         /// Called by CharacterSelectDialog to arm the chargen-completion watcher.
         void               startWatchingCharGen()          { mCharGenWatching = true; }
         bool               isNetworkDisconnected()  const;
 
-        // Restored chargen data — populated from HandshakeResponse when isNewCharacter=false
+        // Restored chargen data — populated from PacketCharacterData after character selection
         const std::string& getRestoredRace()      const { return mRestoredRace; }
         const std::string& getRestoredHeadMesh()  const { return mRestoredHeadMesh; }
         const std::string& getRestoredHairMesh()  const { return mRestoredHairMesh; }
@@ -104,8 +114,12 @@ namespace mwmp
         std::unique_ptr<ChatWindow> mChatWindow;
 
         std::string mPlayerName;
-        bool        mWorldReady       = false;
-        bool        mIsNewCharacter   = true;
+        bool        mWorldReady           = false;
+        bool        mIsNewCharacter       = true;
+        std::string mCharacterName;       ///< selected character slot name (may differ from login name)
+        bool        mCharacterDataReady   = false;
+        std::string mCharSelectError;
+        std::vector<CharacterEntry> mCharacterList;
         bool        mCharGenWatching  = false;
         std::string mSpawnCell;
         float       mSpawnPos[3] = {0.f, 0.f, 0.f};

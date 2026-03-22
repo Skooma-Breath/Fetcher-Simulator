@@ -35,10 +35,13 @@ struct ConnectedClient
 {
     HSteamNetConnection conn   = k_HSteamNetConnection_Invalid;
     uint32_t            guid   = 0;
-    std::string         name;
+    std::string         loginName; ///< account username — used for auth and duplicate-session checks
+    std::string         name;      ///< display name — character name after charselect, login name before
     BasePlayer          player;
-    bool                handshakeComplete = false;
-    int64_t             dbCharacterId     = 0;   ///< PlayerDatabase characters.id, 0 if not set
+    bool                handshakeComplete    = false; ///< auth passed, CharacterList sent
+    bool                charSelectComplete   = false; ///< player chose a character, in-world
+    int64_t             dbAccountId          = 0;   ///< PlayerDatabase accounts.id
+    int64_t             dbCharacterId        = 0;   ///< PlayerDatabase characters.id, 0 if not set
 
     // Per-player key/value store — set/get from Lua scripts via player:setData/getData().
     std::unordered_map<std::string, std::string> scriptData;
@@ -130,6 +133,7 @@ private:
 
     // ── Packet handlers ───────────────────────────────────────────────────
     void handleHandshake        (ConnectedClient& c, const uint8_t* data, size_t size);
+    void handleCharacterSelect  (ConnectedClient& c, const uint8_t* data, size_t size);
     void handlePlayerCharGen    (ConnectedClient& c, const uint8_t* data, size_t size);
     void handlePlayerBaseInfo   (ConnectedClient& c, const uint8_t* data, size_t size);
     void handlePlayerPosition   (ConnectedClient& c, const uint8_t* data, size_t size);

@@ -24,6 +24,10 @@ namespace mwmp
         Loaded              = 3,   // Client finished loading world, ready to play
         GameSettings        = 4,   // Server pushes server-side settings to client
         GUIMessageBox       = 5,   // Server requests a GUI messagebox on the client
+        CharacterList       = 6,   // Server → client: list of characters for this account
+        CharacterSelect     = 7,   // Client → server: which character to play (or "" = new)
+        CharacterData       = 8,   // Server → client: full chargen/position for selected char
+        CharacterSelectError= 9,   // Server → client: character select rejected (reason string)
 
         // --- Player ---
         PlayerBaseInfo      = 10,

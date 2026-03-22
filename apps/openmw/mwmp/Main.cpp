@@ -244,7 +244,11 @@ void Main::onConnected()
 void Main::onDisconnected()
 {
     Log(Debug::Warning) << "[MP] Disconnected from server";
-    mWorldReady = false;
+    mWorldReady         = false;
+    mCharacterDataReady = false;
+    mCharSelectError.clear();
+    mCharacterName.clear();
+    mCharacterList.clear();
     // Phase 3: show reconnect dialog
 }
 
@@ -264,7 +268,6 @@ void Main::registerProtocolHandlers()
         [this](const uint8_t* data, size_t size)
         {
             PacketHandshakeResponse rsp;
-            // HandshakeResponse has no player pointer; decode directly
             if (!rsp.decode(data, size)) return;
 
             if (!rsp.accepted)
@@ -276,31 +279,72 @@ void Main::registerProtocolHandlers()
             }
 
             mPlayerSync->localPlayer().guid = rsp.assignedGuid;
-            mIsNewCharacter = rsp.isNewCharacter;
-            mSpawnCell      = rsp.spawnCell;
-            mSpawnPos[0] = rsp.spawnX;
-            mSpawnPos[1] = rsp.spawnY;
-            mSpawnPos[2] = rsp.spawnZ;
-            mSpawnRot[0] = rsp.spawnRotX;
-            mSpawnRot[1] = rsp.spawnRotY;
-            mSpawnRot[2] = rsp.spawnRotZ;
 
-            // Store restored chargen data for returning players.
-            // CharacterSelectDialog will apply these after newGame(true).
-            mRestoredRace      = rsp.race;
-            mRestoredHeadMesh  = rsp.headMesh;
-            mRestoredHairMesh  = rsp.hairMesh;
-            mRestoredIsMale    = rsp.isMale;
-            mRestoredClassId   = rsp.classId;
-            mRestoredClassName = rsp.className;
-            mRestoredBirthSign = rsp.birthSign;
-            mRestoredClassData = rsp.classData;
+            Log(Debug::Info) << "[MP] Handshake accepted, guid=" << rsp.assignedGuid
+                             << " server=" << rsp.serverVersion;
+            // mWorldReady is set when PacketCharacterList arrives.
+        });
 
-            // Decode class data directly into localPlayer so CharacterSelectDialog
-            // can construct a full ESM::Class and call setPlayerClass(cls).
-            if (!rsp.classData.empty())
+    // --- Character list — arrives immediately after accepted handshake ---
+    proto.registerHandler(PacketType::CharacterList,
+        [this](const uint8_t* data, size_t size)
+        {
+            PacketCharacterList pkt;
+            if (!pkt.decode(data, size)) return;
+
+            mCharacterList = pkt.characters;
+            Log(Debug::Info) << "[MP] Received character list: "
+                             << mCharacterList.size() << " character(s)";
+
+            // Signal AccountDialog that the connection is ready so it can
+            // open CharacterSelectDialog.
+            mWorldReady = true;
+        });
+
+    // --- Character select error — server rejected the CharacterSelect request ---
+    proto.registerHandler(PacketType::CharacterSelectError,
+        [this](const uint8_t* data, size_t size)
+        {
+            PacketCharacterSelectError err;
+            if (!err.decode(data, size)) return;
+            mCharSelectError = err.reason;
+            Log(Debug::Warning) << "[MP] CharacterSelect rejected: " << mCharSelectError;
+        });
+
+    // --- Character data — arrives after client sends PacketCharacterSelect ---
+    proto.registerHandler(PacketType::CharacterData,
+        [this](const uint8_t* data, size_t size)
+        {
+            PacketCharacterData cd;
+            if (!cd.decode(data, size)) return;
+
+            mIsNewCharacter = cd.isNewCharacter;
+            mCharacterName  = cd.characterName;
+            // Update the sync layer name to the character slot name so
+            // PacketPlayerBaseInfo (sent via forceFullSync below) broadcasts
+            // the correct name to other players. Falls back to login name.
+            if (!cd.characterName.empty())
+                mPlayerSync->localPlayer().name = cd.characterName;
+            mSpawnCell      = cd.spawnCell;
+            mSpawnPos[0] = cd.spawnX;
+            mSpawnPos[1] = cd.spawnY;
+            mSpawnPos[2] = cd.spawnZ;
+            mSpawnRot[0] = cd.spawnRotX;
+            mSpawnRot[1] = cd.spawnRotY;
+            mSpawnRot[2] = cd.spawnRotZ;
+
+            mRestoredRace      = cd.race;
+            mRestoredHeadMesh  = cd.headMesh;
+            mRestoredHairMesh  = cd.hairMesh;
+            mRestoredIsMale    = cd.isMale;
+            mRestoredClassId   = cd.classId;
+            mRestoredClassName = cd.className;
+            mRestoredBirthSign = cd.birthSign;
+            mRestoredClassData = cd.classData;
+
+            if (!cd.classData.empty())
             {
-                std::istringstream ss(rsp.classData);
+                std::istringstream ss(cd.classData);
                 char sep;
                 auto& d = mPlayerSync->localPlayer().charClass.mData;
                 ss >> d.mSpecialization;
@@ -308,20 +352,22 @@ void Main::registerProtocolHandlers()
                 for (auto& row : d.mSkills)   for (auto& v : row) { ss >> sep >> v; }
                 ss >> sep >> d.mIsPlayable;
                 ss >> sep >> d.mServices;
-                mPlayerSync->localPlayer().charClass.mName = rsp.className;
+                mPlayerSync->localPlayer().charClass.mName = cd.className;
             }
 
-            Log(Debug::Info) << "[MP] Restored chargen: race=" << mRestoredRace
-                             << " class=" << mRestoredClassName
-                             << " birthSign=" << mRestoredBirthSign;
-            Log(Debug::Info) << "[MP] Handshake accepted, guid="
-                             << rsp.assignedGuid
-                             << " server=" << rsp.serverVersion
-                             << " newChar=" << (mIsNewCharacter ? "yes" : "no");
+            Log(Debug::Info) << "[MP] CharacterData received: newChar="
+                             << (mIsNewCharacter ? "yes" : "no")
+                             << " charName=" << mCharacterName
+                             << " cell=" << mSpawnCell
+                             << " race=" << mRestoredRace
+                             << " class=" << mRestoredClassName;
 
-            // Now send our base info so other players can render us
-            mWorldReady = true;
-            mPlayerSync->forceFullSync();
+            mCharacterDataReady = true;
+            // For returning players, push base info immediately so other
+            // clients can render us. New characters must wait until chargen
+            // completes and the watcher fires.
+            if (!cd.isNewCharacter)
+                mPlayerSync->forceFullSync();
         });
 
     // --- Remote player position ---

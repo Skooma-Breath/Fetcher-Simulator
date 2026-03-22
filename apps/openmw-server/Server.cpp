@@ -333,7 +333,7 @@ void MPServer::onClientDisconnected(HSteamNetConnection conn, const std::string&
                      << client.name << " (" << reason << ")";
 
     // Persist last known position before removing the client.
-    if (mPlayerDb && client.dbCharacterId != 0 && client.handshakeComplete)
+    if (mPlayerDb && client.dbCharacterId != 0 && client.charSelectComplete)
     {
         const auto& pos = client.player.position;
         try
@@ -352,7 +352,7 @@ void MPServer::onClientDisconnected(HSteamNetConnection conn, const std::string&
         }
     }
 
-    if (client.handshakeComplete)
+    if (client.charSelectComplete)
     {
         mScript.call("OnPlayerDisconnect",
                      ScriptPlayer{ client.guid, this }, reason);
@@ -378,7 +378,7 @@ void MPServer::onClientMessage(ConnectedClient& client,
 
     auto type = static_cast<PacketType>(hdr.type);
 
-    // Must complete handshake before any other packet is processed
+    // Must complete handshake before any other packet is processed.
     if (!client.handshakeComplete && type != PacketType::Handshake)
     {
         Log(Debug::Warning) << "[Server] Pre-handshake packet from conn="
@@ -386,9 +386,22 @@ void MPServer::onClientMessage(ConnectedClient& client,
         return;
     }
 
+    // Must select a character before any world/gameplay packets are processed.
+    // CharacterSelect and PlayerCharGen are the only exceptions.
+    if (client.handshakeComplete && !client.charSelectComplete
+        && type != PacketType::CharacterSelect
+        && type != PacketType::PlayerCharGen
+        && type != PacketType::Handshake)
+    {
+        Log(Debug::Verbose) << "[Server] Pre-charselect packet type=" << (int)type
+                            << " from " << client.name << ", ignoring";
+        return;
+    }
+
     switch (type)
     {
         case PacketType::Handshake:        handleHandshake(client, data, size);          break;
+        case PacketType::CharacterSelect:  handleCharacterSelect(client, data, size);    break;
         case PacketType::PlayerCharGen:    handlePlayerCharGen(client, data, size);      break;
         case PacketType::PlayerBaseInfo:   handlePlayerBaseInfo(client, data, size);     break;
         case PacketType::PlayerPosition:   handlePlayerPosition(client, data, size);     break;
@@ -506,7 +519,7 @@ void MPServer::handleHandshake(ConnectedClient& c, const uint8_t* data, size_t s
     {
         if (existingConn != c.conn
             && existingClient.handshakeComplete
-            && existingClient.name == hs.playerName)
+            && existingClient.loginName == hs.playerName)
         {
             PacketHandshakeResponse rsp;
             rsp.accepted     = false;
@@ -520,30 +533,19 @@ void MPServer::handleHandshake(ConnectedClient& c, const uint8_t* data, size_t s
     }
 
     // ── Accept — look up or create the player's character record ─────────────
-    c.name                    = hs.playerName;
-    c.player.guid             = c.guid;
-    c.player.name             = hs.playerName;
-    c.handshakeComplete       = true;
+    c.loginName         = hs.playerName;
+    c.name              = hs.playerName;  // overwritten to charName after charselect
+    c.player.guid       = c.guid;
+    c.player.name       = hs.playerName;
+    c.handshakeComplete = true;
 
-    bool        isNewCharacter = true;
-    std::string spawnCell;
-    PlayerRecord dbRec;
-
+    // Resolve account id — needed for CharacterList and later for CharacterSelect.
     if (mPlayerDb)
     {
-        try
-        {
-            const int64_t accountId = mPlayerDb->lookupOrCreateAccount(hs.playerName);
-            dbRec            = mPlayerDb->lookupOrCreateCharacter(accountId, hs.playerName);
-            c.dbCharacterId  = dbRec.characterId;
-            isNewCharacter   = dbRec.isNew;
-            // For returning players use saved cell; for new chars use configured default.
-            spawnCell = dbRec.cell.empty() ? mDefaultSpawnCell : dbRec.cell;
-        }
+        try { c.dbAccountId = mPlayerDb->lookupOrCreateAccount(hs.playerName); }
         catch (const std::exception& e)
         {
-            Log(Debug::Warning) << "[PlayerDB] handshake lookup error: " << e.what();
-            spawnCell = mDefaultSpawnCell;
+            Log(Debug::Warning) << "[PlayerDB] account lookup error: " << e.what();
         }
     }
 
@@ -551,43 +553,171 @@ void MPServer::handleHandshake(ConnectedClient& c, const uint8_t* data, size_t s
     if (mWorld.hostGuid == 0)
         mWorld.hostGuid = c.guid;
 
+    // Send the minimal handshake acceptance (no chargen data — that comes
+    // via PacketCharacterData after the player picks a character).
     PacketHandshakeResponse rsp;
-    rsp.accepted        = true;
-    rsp.assignedGuid    = c.guid;
-    rsp.serverVersion   = SERVER_VERSION;
-    rsp.isNewCharacter  = isNewCharacter;
-    rsp.spawnCell       = spawnCell;
-
-    // For returning players, send their saved chargen data so the client
-    // can restore race/class/birthsign without running chargen again.
-    if (!isNewCharacter)
-    {
-        rsp.race      = dbRec.race;
-        rsp.headMesh  = dbRec.headMesh;
-        rsp.hairMesh  = dbRec.hairMesh;
-        rsp.isMale    = dbRec.isMale;
-        rsp.classId   = dbRec.classId;
-        rsp.className = dbRec.className;
-        rsp.birthSign = dbRec.birthSign;
-        rsp.classData = dbRec.classData;
-        rsp.spawnX    = dbRec.posX;
-        rsp.spawnY    = dbRec.posY;
-        rsp.spawnZ    = dbRec.posZ;
-        rsp.spawnRotX = dbRec.rotX;
-        rsp.spawnRotY = dbRec.rotY;
-        rsp.spawnRotZ = dbRec.rotZ;
-    }
-
+    rsp.accepted      = true;
+    rsp.assignedGuid  = c.guid;
+    rsp.serverVersion = SERVER_VERSION;
     sendTo(c.conn, rsp.encode());
 
     Log(Debug::Info) << "[Server] Handshake accepted: " << c.name
                      << " guid=" << c.guid;
 
-    // Send all existing clients' current state to the new joiner so they
-    // see players who connected before them (late-join catch-up).
+    // Build and send the character list so the client can show the
+    // CharacterSelectDialog with one row per character.
+    PacketCharacterList charListPkt;
+    if (mPlayerDb && c.dbAccountId > 0)
+    {
+        try
+        {
+            for (const auto& cs : mPlayerDb->listCharacters(c.dbAccountId))
+            {
+                CharacterEntry entry;
+                entry.name      = cs.name;
+                entry.race      = cs.race;
+                entry.className = cs.className;
+                entry.lastSeen  = cs.lastSeen;
+                entry.isNew     = cs.isNew;
+                charListPkt.characters.push_back(std::move(entry));
+            }
+        }
+        catch (const std::exception& e)
+        {
+            Log(Debug::Warning) << "[PlayerDB] listCharacters error: " << e.what();
+        }
+    }
+    sendTo(c.conn, charListPkt.encode());
+    Log(Debug::Info) << "[Server] Sent " << charListPkt.characters.size()
+                     << " character(s) to " << c.name;
+}
+
+// ---------------------------------------------------------------------------
+void MPServer::handleCharacterSelect(ConnectedClient& c, const uint8_t* data, size_t size)
+{
+    if (!c.handshakeComplete)
+        return;
+
+    PacketCharacterSelect sel;
+    if (!sel.decode(data, size)) return;
+
+    // Reject empty names — the old "" = new shorthand is gone.
+    if (sel.charName.empty())
+    {
+        PacketCharacterSelectError err;
+        err.reason = "Character name cannot be empty.";
+        sendTo(c.conn, err.encode());
+        return;
+    }
+
+    // Basic name validation: 2–24 printable ASCII characters.
+    if (sel.charName.size() < 2 || sel.charName.size() > 24
+        || sel.charName.find_first_not_of(
+               "abcdefghijklmnopqrstuvwxyz"
+               "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+               "0123456789 '-") != std::string::npos)
+    {
+        PacketCharacterSelectError err;
+        err.reason = "Invalid character name. Use 2-24 letters, numbers, spaces, hyphens, or apostrophes.";
+        sendTo(c.conn, err.encode());
+        return;
+    }
+
+    PacketCharacterData cdPkt;
+    cdPkt.spawnCell = mDefaultSpawnCell;
+
+    if (mPlayerDb && c.dbAccountId > 0)
+    {
+        try
+        {
+            if (sel.isNew)
+            {
+                // New character slot — name must not already exist on this account.
+                if (mPlayerDb->characterNameTaken(c.dbAccountId, sel.charName))
+                {
+                    PacketCharacterSelectError err;
+                    err.reason = "You already have a character named '" + sel.charName + "'.";
+                    sendTo(c.conn, err.encode());
+                    return;
+                }
+                const PlayerRecord rec = mPlayerDb->createCharacter(c.dbAccountId, sel.charName);
+                c.dbCharacterId      = rec.characterId;
+                cdPkt.isNewCharacter = true;
+                cdPkt.spawnCell      = mDefaultSpawnCell;
+                cdPkt.characterName  = sel.charName;
+                Log(Debug::Info) << "[Server] New character slot '" << sel.charName
+                                 << "' created for " << c.name;
+            }
+            else
+            {
+                // Existing character — look it up by name.
+                auto rec = mPlayerDb->lookupCharacter(c.dbAccountId, sel.charName);
+                if (!rec)
+                {
+                    PacketCharacterSelectError err;
+                    err.reason = "Character '" + sel.charName + "' not found on this account.";
+                    sendTo(c.conn, err.encode());
+                    return;
+                }
+                c.dbCharacterId      = rec->characterId;
+                cdPkt.isNewCharacter = rec->isNew;
+                cdPkt.spawnCell      = rec->cell.empty() ? mDefaultSpawnCell : rec->cell;
+                if (!rec->isNew)
+                {
+                    cdPkt.race      = rec->race;
+                    cdPkt.headMesh  = rec->headMesh;
+                    cdPkt.hairMesh  = rec->hairMesh;
+                    cdPkt.isMale    = rec->isMale;
+                    cdPkt.classId   = rec->classId;
+                    cdPkt.className = rec->className;
+                    cdPkt.birthSign = rec->birthSign;
+                    cdPkt.classData = rec->classData;
+                    cdPkt.spawnX    = rec->posX;
+                    cdPkt.spawnY    = rec->posY;
+                    cdPkt.spawnZ    = rec->posZ;
+                    cdPkt.spawnRotX = rec->rotX;
+                    cdPkt.spawnRotY = rec->rotY;
+                    cdPkt.spawnRotZ = rec->rotZ;
+                }
+                cdPkt.characterName  = sel.charName;
+                Log(Debug::Info) << "[Server] Character '" << sel.charName
+                                 << "' selected for " << c.name
+                                 << " (new=" << rec->isNew << ")";
+            }
+            mPlayerDb->touch(c.dbCharacterId);
+        }
+        catch (const std::exception& e)
+        {
+            Log(Debug::Warning) << "[PlayerDB] CharacterSelect error: " << e.what();
+            PacketCharacterSelectError err;
+            err.reason = "Server error processing character selection.";
+            sendTo(c.conn, err.encode());
+            return;
+        }
+    }
+    else
+    {
+        // No DB — run as new character (dev/offline mode).
+        cdPkt.isNewCharacter  = true;
+        cdPkt.characterName   = sel.charName;
+    }
+
+    sendTo(c.conn, cdPkt.encode());
+    c.charSelectComplete = true;
+
+    // Update the display name to the character slot name now that it's known.
+    // c.name was set to the login username at handshake time; Lua scripts and
+    // server logs should use the character name from here on.
+    if (!cdPkt.characterName.empty())
+    {
+        c.name        = cdPkt.characterName;
+        c.player.name = cdPkt.characterName;
+    }
+
+    // Late-join catch-up: send state of all in-world players to the new joiner.
     for (auto& [existingConn, existingClient] : mClients)
     {
-        if (existingConn == c.conn || !existingClient.handshakeComplete)
+        if (existingConn == c.conn || !existingClient.charSelectComplete)
             continue;
 
         PacketPlayerBaseInfo baseInfo;
@@ -602,8 +732,6 @@ void MPServer::handleHandshake(ConnectedClient& c, const uint8_t* data, size_t s
         equipment.setPlayer(&existingClient.player);
         sendTo(c.conn, equipment.encode());
 
-        // Send last known position so the new joiner can spawn the NPC
-        // in the right place instead of at the world origin.
         if (existingClient.player.position.pos[0] != 0.f
             || existingClient.player.position.pos[1] != 0.f
             || existingClient.player.position.pos[2] != 0.f)
@@ -612,48 +740,23 @@ void MPServer::handleHandshake(ConnectedClient& c, const uint8_t* data, size_t s
             position.setPlayer(&existingClient.player);
             sendTo(c.conn, position.encode());
         }
-
-        Log(Debug::Info) << "[Server] Sent catch-up state for "
-                         << existingClient.name << " to " << c.name;
     }
 
-    // Send authoritative world time so the new client's clock snaps to the
-    // server immediately rather than waiting for the next 60-second broadcast.
     sendTo(c.conn, buildWorldTimePacket());
-    Log(Debug::Info) << "[Server] Sent world time to " << c.name
-                     << " (hour=" << mWorld.gameHour
-                     << " day=" << mWorld.day
-                     << " month=" << mWorld.month
-                     << " year=" << mWorld.year << ")";
 
-    // Send all known door states so the new joiner sees doors that were
-    // opened/closed before they connected.
-    int doorCount = 0;
     for (const auto& [cellId, entries] : mWorld.doorStates)
     {
         if (entries.empty()) continue;
-
         PacketDoorState pkt;
-        pkt.authorGuid = 0;   // 0 = server authority, not a player
+        pkt.authorGuid = 0;
         pkt.cellId     = cellId;
         pkt.doors      = entries;
         sendTo(c.conn, pkt.encode());
-        doorCount += static_cast<int>(entries.size());
     }
-    if (doorCount > 0)
-        Log(Debug::Info) << "[Server] Sent " << doorCount
-                         << " door state(s) to " << c.name;
 
-    // Send current weather so new joiner sees the same sky immediately.
     if (mWorld.hasWeather)
-    {
         sendTo(c.conn, buildWorldWeatherPacket());
-        Log(Debug::Info) << "[Server] Sent weather=" << mWorld.weatherCurrent
-                         << " to " << c.name;
-    }
 
-    // Fire OnPlayerConnect now that the client is fully initialised and has
-    // received all catch-up state.
     mScript.call("OnPlayerConnect", ScriptPlayer{ c.guid, this });
 }
 
@@ -908,7 +1011,7 @@ int MPServer::getPlayerCount() const
 {
     int count = 0;
     for (const auto& [conn, client] : mClients)
-        if (client.handshakeComplete)
+        if (client.charSelectComplete)
             ++count;
     return count;
 }
@@ -921,7 +1024,7 @@ void MPServer::broadcastToAll(const std::vector<uint8_t>& data,
                          : k_nSteamNetworkingSend_UnreliableNoDelay;
     for (auto& [conn, client] : mClients)
     {
-        if (conn == except || !client.handshakeComplete) continue;
+        if (conn == except || !client.charSelectComplete) continue;
         mInterface->SendMessageToConnection(
             conn, data.data(), static_cast<uint32_t>(data.size()), flags, nullptr);
     }

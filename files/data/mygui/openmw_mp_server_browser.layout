@@ -66,7 +66,7 @@
         </Widget>
 
         <!-- Server list — fills the bulk of the dialog -->
-        <Widget type="ListBox" skin="MW_ListBox"
+        <Widget type="ListBox" skin="MW_List"
                 position="16 64 688 386" name="ServerList" align="Left Top HStretch VStretch">
         </Widget>
 

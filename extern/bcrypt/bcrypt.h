@@ -149,15 +149,22 @@ namespace Bcrypt
 
 #if defined(BCRYPT_USE_OPENSSL)
 
-#include <openssl/rand.h>
-#include <openssl/evp.h>
+// Windows CNG random — forward-declare only what we need to avoid including
+// the Windows <bcrypt.h> CNG header (which would conflict with this file's name).
+#pragma comment(lib, "Bcrypt.lib")
+extern "C" {
+    // NTSTATUS BCryptGenRandom(BCRYPT_ALG_HANDLE, PUCHAR, ULONG, ULONG)
+    // We declare it with plain types to avoid pulling in <windows.h> here.
+    __declspec(dllimport) long __stdcall BCryptGenRandom(
+        void* hAlgorithm, unsigned char* pbBuffer,
+        unsigned long cbBuffer, unsigned long dwFlags);
+}
+static constexpr unsigned long MWMP_BCRYPT_USE_SYSTEM_PREFERRED_RNG = 0x00000002;
 
 // Forward declarations for the portable Blowfish/bcrypt core (bcrypt_impl.cpp)
-// On Windows we compile bcrypt_impl.cpp alongside any translation unit that
-// includes this header. The implementation is in extern/bcrypt/bcrypt_impl.cpp.
 extern "C" {
-    int bcrypt_hashpw(const char* key, const char* setting, char* output);
-    char* bcrypt_gensalt(int log_rounds, uint8_t* input, char* output);
+    int   bcrypt_hashpw  (const char* key, const char* setting, char* output);
+    char* bcrypt_gensalt (int log_rounds, uint8_t* input, char* output);
 }
 
 namespace Bcrypt
@@ -169,8 +176,10 @@ namespace Bcrypt
             if (cost < 4 || cost > 31)
                 throw std::invalid_argument("bcrypt cost must be 4-31");
             uint8_t random[16];
-            if (RAND_bytes(random, sizeof(random)) != 1)
-                throw std::runtime_error("RAND_bytes failed");
+            // Use Windows CNG — always available, no OpenSSL required
+            if (::BCryptGenRandom(nullptr, random, sizeof(random),
+                                  MWMP_BCRYPT_USE_SYSTEM_PREFERRED_RNG) != 0)
+                throw std::runtime_error("BCryptGenRandom failed");
             char saltOut[64] = {};
             bcrypt_gensalt(cost, random, saltOut);
             return std::string(saltOut);

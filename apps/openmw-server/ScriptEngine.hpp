@@ -49,13 +49,6 @@ private:
 
     void registerCoreBindings();
     void handleScriptError(const std::string& context, const std::string& msg);
-
-    // Read a string value from a Lua global table.
-    // e.g. getString("Config", "SPAWN_CELL", "toddtest")
-    // Returns defaultVal if the table or key is absent or not a string.
-    std::string getString(const std::string& tableName,
-                          const std::string& key,
-                          const std::string& defaultVal = "") const;
 };
 
 } // namespace mwmp

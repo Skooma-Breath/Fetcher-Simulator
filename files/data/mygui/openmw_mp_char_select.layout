@@ -1,38 +1,128 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <MyGUI type="Layout">
     <!--
-        Character Select dialog  ~420 x 320
-        Widgets consumed by CharacterSelectDialog.cpp:
-            ConnectedLabel  TextBox  - "Connected as <name> on <host>"
-            CharacterList   ListBox  - populated Phase 8 (stub: one entry)
-            EnterWorldButton Button  - confirm selection and enter world
-            CancelButton     Button  - disconnect and return to main menu
+        Combined Multiplayer dialog  ~440 x 310
+
+        All widgets are direct children of the Window.
+        CharacterSelectDialog.cpp hides/shows the two logical groups:
+
+        LOGIN GROUP (visible first):
+            UsernameLabel   TextBox
+            Username        EditBox
+            PasswordLabel   TextBox
+            Password        EditBox   (masked)
+            StatusLabel     TextBox   - "Connecting..." / error
+            RegisterButton  Button
+            LoginButton     Button
+            LoginCancelButton Button
+
+        CHARSELECT GROUP (visible after auth, hidden initially):
+            ConnectedLabel      TextBox   - "Connected as <n>  |  <host>"
+            CharSelectHint      TextBox   - instruction / error line
+            CharacterList       ListBox
+            NewCharNameRow      Widget    - hidden until New Character clicked
+              NewCharNameEdit   EditBox
+              NewCharNameConfirm Button
+            NewCharButton       Button
+            EnterWorldButton    Button
+            CharCancelButton    Button
     -->
     <Widget type="Window" skin="MW_DialogNoTransp" layer="Modal"
-            position="0 0 420 320" align="Center" name="_Main">
+            position="0 0 440 310" align="Center" name="_Main">
         <Property key="Visible"  value="false"/>
-        <Property key="Caption"  value="Select Character"/>
+        <Property key="Caption"  value="Multiplayer Login"/>
 
-        <!-- Connected status line -->
+        <!-- ═══ LOGIN GROUP ═══ -->
         <Widget type="TextBox" skin="SandText"
-                position="16 16 388 18" name="ConnectedLabel" align="Left Top HStretch">
+                position="16 20 408 18" name="UsernameLabel">
+            <Property key="Caption" value="Username:"/>
+        </Widget>
+        <Widget type="EditBox" skin="MW_TextEdit"
+                position="16 40 408 24" name="Username" align="Left Top HStretch">
+            <Property key="NeedKey"       value="true"/>
+            <Property key="MaxTextLength" value="32"/>
+        </Widget>
+
+        <Widget type="TextBox" skin="SandText"
+                position="16 78 408 18" name="PasswordLabel">
+            <Property key="Caption" value="Password:"/>
+        </Widget>
+        <Widget type="EditBox" skin="MW_TextEdit"
+                position="16 98 408 24" name="Password" align="Left Top HStretch">
+            <Property key="NeedKey"       value="true"/>
+            <Property key="Password"      value="true"/>
+            <Property key="MaxTextLength" value="128"/>
+        </Widget>
+
+        <Widget type="TextBox" skin="SandText"
+                position="16 136 408 36" name="StatusLabel" align="Left Top HStretch">
+            <Property key="Caption"   value=""/>
+            <Property key="TextAlign" value="Left Top"/>
+            <Property key="WordWrap"  value="true"/>
+        </Widget>
+
+        <Widget type="AutoSizedButton" skin="MW_Button"
+                position="16 270 88 24" name="RegisterButton" align="Left Bottom">
+            <Property key="Caption"         value="Register"/>
+            <Property key="ExpandDirection" value="Right"/>
+        </Widget>
+        <Widget type="AutoSizedButton" skin="MW_Button"
+                position="296 270 60 24" name="LoginCancelButton" align="Right Bottom">
+            <Property key="Caption"         value="#{Interface:Cancel}"/>
+            <Property key="ExpandDirection" value="Left"/>
+        </Widget>
+        <Widget type="AutoSizedButton" skin="MW_Button"
+                position="364 270 60 24" name="LoginButton" align="Right Bottom">
+            <Property key="Caption"         value="Login"/>
+            <Property key="ExpandDirection" value="Left"/>
+        </Widget>
+
+        <!-- ═══ CHARSELECT GROUP (hidden initially) ═══ -->
+        <Widget type="TextBox" skin="SandText"
+                position="16 12 408 18" name="ConnectedLabel" align="Left Top HStretch">
             <Property key="Caption"   value=""/>
             <Property key="TextAlign" value="Left VCenter"/>
         </Widget>
 
-        <!-- Character list (stub for Phase 6 — single placeholder row) -->
-        <Widget type="ListBox" skin="MW_ListBox"
-                position="16 42 388 210" name="CharacterList" align="Left Top HStretch VStretch">
+        <Widget type="TextBox" skin="SandText"
+                position="16 34 408 18" name="CharSelectHint" align="Left Top HStretch">
+            <Property key="Caption"   value="Select a character and click Enter World, or create a new one."/>
+            <Property key="TextAlign" value="Left VCenter"/>
         </Widget>
 
-        <!-- Buttons -->
+        <Widget type="ListBox" skin="MW_List"
+                position="16 56 408 158" name="CharacterList" align="Left Top HStretch VStretch">
+        </Widget>
+
+        <!-- New-character name row — hidden until New Character is clicked -->
+        <Widget type="Widget" skin=""
+                position="16 220 408 26" name="NewCharNameRow">
+            <Property key="Visible" value="false"/>
+            <Widget type="EditBox" skin="MW_TextEdit"
+                    position="0 0 296 24" name="NewCharNameEdit">
+                <Property key="NeedKey"       value="true"/>
+                <Property key="MaxTextLength" value="24"/>
+                <Property key="Caption"       value=""/>
+            </Widget>
+            <Widget type="AutoSizedButton" skin="MW_Button"
+                    position="304 0 104 24" name="NewCharNameConfirm">
+                <Property key="Caption"         value="Create"/>
+                <Property key="ExpandDirection" value="Left"/>
+            </Widget>
+        </Widget>
+
         <Widget type="AutoSizedButton" skin="MW_Button"
-                position="16 278 80 24" name="CancelButton" align="Left Bottom">
+                position="16 272 80 24" name="CharCancelButton" align="Left Bottom">
             <Property key="Caption"         value="#{Interface:Cancel}"/>
             <Property key="ExpandDirection" value="Right"/>
         </Widget>
         <Widget type="AutoSizedButton" skin="MW_Button"
-                position="308 278 96 24" name="EnterWorldButton" align="Right Bottom">
+                position="155 272 116 24" name="NewCharButton" align="HCenter Bottom">
+            <Property key="Caption"         value="New Character"/>
+            <Property key="ExpandDirection" value="Right"/>
+        </Widget>
+        <Widget type="AutoSizedButton" skin="MW_Button"
+                position="332 272 96 24" name="EnterWorldButton" align="Right Bottom">
             <Property key="Caption"         value="Enter World"/>
             <Property key="ExpandDirection" value="Left"/>
         </Widget>
