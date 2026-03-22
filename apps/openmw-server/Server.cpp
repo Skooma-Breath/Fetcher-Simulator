@@ -186,6 +186,11 @@ void MPServer::run()
         }
     }
 
+    // Read Config.MAX_CHARS_PER_ACCOUNT from config.lua (0 = unlimited).
+    mMaxCharsPerAccount = mScript.getInt("Config", "MAX_CHARS_PER_ACCOUNT", mMaxCharsPerAccount);
+    Log(Debug::Info) << "[Server] Max chars per account: "
+                     << (mMaxCharsPerAccount == 0 ? "unlimited" : std::to_string(mMaxCharsPerAccount));
+
     mScript.call("OnServerInit");
 
     // Register with the master server (async — does not block the tick loop).
@@ -514,24 +519,6 @@ void MPServer::handleHandshake(ConnectedClient& c, const uint8_t* data, size_t s
         }
     }
 
-    // ── Duplicate session check ───────────────────────────────────────────────
-    for (const auto& [existingConn, existingClient] : mClients)
-    {
-        if (existingConn != c.conn
-            && existingClient.handshakeComplete
-            && existingClient.loginName == hs.playerName)
-        {
-            PacketHandshakeResponse rsp;
-            rsp.accepted     = false;
-            rsp.rejectReason = "'" + hs.playerName + "' is already logged in. "
-                               "Disconnect the other session first.";
-            sendTo(c.conn, rsp.encode());
-            mInterface->CloseConnection(c.conn, 0, "Duplicate session", true);
-            Log(Debug::Warning) << "[Auth] Rejected duplicate login for: " << hs.playerName;
-            return;
-        }
-    }
-
     // ── Accept — look up or create the player's character record ─────────────
     c.loginName         = hs.playerName;
     c.name              = hs.playerName;  // overwritten to charName after charselect
@@ -632,6 +619,21 @@ void MPServer::handleCharacterSelect(ConnectedClient& c, const uint8_t* data, si
         {
             if (sel.isNew)
             {
+                // Enforce per-account character limit (0 = unlimited).
+                if (mMaxCharsPerAccount > 0)
+                {
+                    const auto existing = mPlayerDb->listCharacters(c.dbAccountId);
+                    if ((int)existing.size() >= mMaxCharsPerAccount)
+                    {
+                        PacketCharacterSelectError err;
+                        err.reason = "Character limit reached ("
+                                   + std::to_string(mMaxCharsPerAccount)
+                                   + " per account). Delete a character to create a new one.";
+                        sendTo(c.conn, err.encode());
+                        return;
+                    }
+                }
+
                 // New character slot — name must not already exist on this account.
                 if (mPlayerDb->characterNameTaken(c.dbAccountId, sel.charName))
                 {
@@ -650,7 +652,22 @@ void MPServer::handleCharacterSelect(ConnectedClient& c, const uint8_t* data, si
             }
             else
             {
-                // Existing character — look it up by name.
+                // Existing character — check it isn't already in use by a live session.
+                for (const auto& [existingConn, existingClient] : mClients)
+                {
+                    if (existingConn != c.conn
+                        && existingClient.charSelectComplete
+                        && existingClient.loginName == c.loginName
+                        && existingClient.name == sel.charName)
+                    {
+                        PacketCharacterSelectError err;
+                        err.reason = "'" + sel.charName + "' is already in use by another session.";
+                        sendTo(c.conn, err.encode());
+                        return;
+                    }
+                }
+
+                // Look up by (account_id, name).
                 auto rec = mPlayerDb->lookupCharacter(c.dbAccountId, sel.charName);
                 if (!rec)
                 {

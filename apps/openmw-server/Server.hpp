@@ -112,7 +112,8 @@ public:
     void setPasswordProtected(bool v)               { mPasswordProtected = v; }
     void setDbPath           (const std::string& p) { mDbPath            = p; }
     void setSpawnCell        (const std::string& c) { mDefaultSpawnCell  = c; }
-    void setMaxPlayers       (int n)                { mMaxPlayersConfig  = n; }
+    void setMaxPlayers       (int n)                { mMaxPlayersConfig   = n; }
+    void setMaxCharsPerAccount(int n)               { mMaxCharsPerAccount = n; }
 
 private:
     // ── GNS callbacks ─────────────────────────────────────────────────────
@@ -213,7 +214,8 @@ private:
     std::optional<PlayerDatabase> mPlayerDb;
     std::string                   mDbPath            = "playerdata.db";
     std::string                   mDefaultSpawnCell  = "toddtest";
-    int                           mMaxPlayersConfig  = 32;
+    int                           mMaxPlayersConfig   = 32;
+    int                           mMaxCharsPerAccount = 5; ///< 0 = unlimited; overridden from config.lua
 
     // ── Config ────────────────────────────────────────────────────────────
     static constexpr float       MAX_MOVE_SPEED = 600.f;

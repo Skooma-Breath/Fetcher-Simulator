@@ -39,6 +39,12 @@ public:
                           const std::string& key,
                           const std::string& defaultVal = "") const;
 
+    // Read an integer value from a Lua global table.
+    // Returns defaultVal if the table or key is absent or not a number.
+    int getInt(const std::string& tableName,
+               const std::string& key,
+               int defaultVal = 0) const;
+
 private:
     // sol::state is non-copyable and heavy — owned by pointer so this header
     // doesn't pull in sol/sol.hpp everywhere.

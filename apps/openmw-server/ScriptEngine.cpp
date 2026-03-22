@@ -95,4 +95,14 @@ std::string ScriptEngine::getString(const std::string& tableName,
     return v ? *v : defaultVal;
 }
 
+int ScriptEngine::getInt(const std::string& tableName,
+                          const std::string& key,
+                          int defaultVal) const
+{
+    auto t = mLua->get<sol::optional<sol::table>>(tableName);
+    if (!t) return defaultVal;
+    auto v = (*t).get<sol::optional<int>>(key);
+    return v ? *v : defaultVal;
+}
+
 } // namespace mwmp
