@@ -32,6 +32,13 @@ public:
     template<typename... Args>
     void callWithReturn(const std::string& fn, bool& out, Args&&... args);
 
+    // Read a string value from a named Lua global table.
+    // e.g. getString("Config", "SPAWN_CELL", "toddtest")
+    // Returns defaultVal if the table or key is absent or not a string.
+    std::string getString(const std::string& tableName,
+                          const std::string& key,
+                          const std::string& defaultVal = "") const;
+
 private:
     // sol::state is non-copyable and heavy — owned by pointer so this header
     // doesn't pull in sol/sol.hpp everywhere.
@@ -42,6 +49,13 @@ private:
 
     void registerCoreBindings();
     void handleScriptError(const std::string& context, const std::string& msg);
+
+    // Read a string value from a Lua global table.
+    // e.g. getString("Config", "SPAWN_CELL", "toddtest")
+    // Returns defaultVal if the table or key is absent or not a string.
+    std::string getString(const std::string& tableName,
+                          const std::string& key,
+                          const std::string& defaultVal = "") const;
 };
 
 } // namespace mwmp

@@ -64,9 +64,21 @@ namespace mwmp
         PlayerDatabase(const PlayerDatabase&)            = delete;
         PlayerDatabase& operator=(const PlayerDatabase&) = delete;
 
+        /// Look up account id for username. Returns -1 if not found.
+        int64_t lookupAccount(std::string_view username);
+
+        /// Create a new account. Returns the new account id.
+        int64_t createAccount(std::string_view username);
+
         /// Look up or create the account for username.
         /// Returns the account id.
         int64_t lookupOrCreateAccount(std::string_view username);
+
+        /// Get the stored bcrypt password hash for an account (empty = not set).
+        std::string getPasswordHash(int64_t accountId);
+
+        /// Set (or update) the bcrypt password hash for an account.
+        void setPasswordHash(int64_t accountId, std::string_view hash);
 
         /// Look up or create the character record for accountId.
         /// Returns a filled PlayerRecord.

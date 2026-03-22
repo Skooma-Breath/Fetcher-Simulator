@@ -55,7 +55,8 @@ bool Main::isInitialised()
 // ---------------------------------------------------------------------------
 bool Main::init(const std::string& host, uint16_t port,
                 const std::string& playerName,
-                const std::string& passwordHash)
+                const std::string& passwordHash,
+                bool isRegistration)
 {
     if (sInstance)
     {
@@ -66,8 +67,9 @@ bool Main::init(const std::string& host, uint16_t port,
     try
     {
         sInstance = new Main();
-        sInstance->mPlayerName = playerName;
-        sInstance->mPasswordHash = passwordHash;
+        sInstance->mPlayerName     = playerName;
+        sInstance->mPasswordHash   = passwordHash;
+        sInstance->mIsRegistration = isRegistration;
         sInstance->mPlayerSync->localPlayer().name = playerName;
 
         // Attempt connection
@@ -231,9 +233,10 @@ void Main::onConnected()
 
     // Build and send handshake
     PacketHandshake hs;
-    hs.clientVersion = "0.1.0";
-    hs.playerName    = mPlayerName;
-    hs.passwordHash  = mPasswordHash;
+    hs.clientVersion   = "0.1.0";
+    hs.playerName      = mPlayerName;
+    hs.passwordHash    = mPasswordHash;
+    hs.isRegistration  = mIsRegistration;
     mClient->sendReliable(hs.encode());
 }
 

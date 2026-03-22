@@ -18,7 +18,8 @@ namespace mwmp
         // Client fills these before encoding
         std::string clientVersion;        // e.g. "0.1.0"
         std::string playerName;
-        std::string passwordHash;         // SHA-256(password+salt), hex string
+        std::string passwordHash;         // SHA-256(password), hex string
+        bool        isRegistration = false; // true → create account, false → login
 
         struct PluginEntry
         {
@@ -35,6 +36,7 @@ namespace mwmp
             ws.writeString(clientVersion);
             ws.writeString(playerName);
             ws.writeString(passwordHash);
+            ws.write(isRegistration);
 
             auto count = static_cast<uint32_t>(plugins.size());
             ws.write(count);
@@ -47,9 +49,10 @@ namespace mwmp
 
         void unpack(ReadStream& rs) override
         {
-            clientVersion = rs.readString();
-            playerName    = rs.readString();
-            passwordHash  = rs.readString();
+            clientVersion  = rs.readString();
+            playerName     = rs.readString();
+            passwordHash   = rs.readString();
+            rs.read(isRegistration);
 
             uint32_t count = 0;
             rs.read(count);

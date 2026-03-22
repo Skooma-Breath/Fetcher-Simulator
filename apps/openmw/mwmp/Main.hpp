@@ -36,7 +36,8 @@ namespace mwmp
         // Lifecycle
         static bool init   (const std::string& host, uint16_t port,
                             const std::string& playerName,
-                            const std::string& passwordHash);
+                            const std::string& passwordHash,
+                            bool isRegistration = false);
         static void destroy();
 
         // Per-frame update — call from engine frame loop
@@ -110,6 +111,7 @@ namespace mwmp
         float       mSpawnPos[3] = {0.f, 0.f, 0.f};
         float       mSpawnRot[3] = {0.f, 0.f, 0.f};
         std::string mPasswordHash;
+        bool        mIsRegistration = false;
         std::string mRejectReason;
 
         // Chargen restore data (returning players)

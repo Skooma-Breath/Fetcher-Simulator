@@ -1,5 +1,6 @@
 #include "Server.hpp"
 #include "MasterServerClient.hpp"
+#include "bcrypt.h"  // extern/bcrypt/bcrypt.h — password hashing wrapper
 #include "bindings/PlayerBindings.hpp"
 
 #include <chrono>
@@ -161,6 +162,30 @@ void MPServer::run()
 
     // Load server scripts and fire OnServerInit before entering the loop.
     mScript.loadScriptsFrom("server-scripts");
+
+    // If config.lua set Config.SPAWN_CELL, let it override the C++ default.
+    // mDefaultSpawnCell may already be set by main.cpp (CLI flag); only
+    // override when it is still the compiled-in default ("toddtest").
+    {
+        std::string raw = mScript.getString("Config", "SPAWN_CELL", "");
+        if (!raw.empty())
+        {
+            // Normalise "x, y" coords: strip spaces that follow a comma so
+            // findExteriorPosition / std::from_chars can parse the string.
+            std::string norm;
+            norm.reserve(raw.size());
+            bool afterComma = false;
+            for (char c : raw)
+            {
+                if      (c == ',')               { norm += c; afterComma = true;  }
+                else if (c == ' ' && afterComma) { /* drop */                     }
+                else                             { norm += c; afterComma = false; }
+            }
+            mDefaultSpawnCell = std::move(norm);
+            Log(Debug::Info) << "[Server] Spawn cell set from config.lua: " << mDefaultSpawnCell;
+        }
+    }
+
     mScript.call("OnServerInit");
 
     // Register with the master server (async — does not block the tick loop).
@@ -170,7 +195,7 @@ void MPServer::run()
         cfg.masterUrl         = mMasterUrl;
         cfg.serverName        = mServerName;
         cfg.port              = mPort;
-        cfg.maxPlayers        = MAX_PLAYERS;
+        cfg.maxPlayers        = mMaxPlayersConfig;
         cfg.version           = SERVER_VERSION;
         cfg.gameMode          = mGameMode;
         cfg.passwordProtected = mPasswordProtected;
@@ -279,7 +304,7 @@ void MPServer::processIncomingMessages()
 // ---------------------------------------------------------------------------
 void MPServer::onClientConnected(HSteamNetConnection conn)
 {
-    if ((int)mClients.size() >= MAX_PLAYERS)
+    if ((int)mClients.size() >= mMaxPlayersConfig)
     {
         mInterface->CloseConnection(conn, 0, "Server full", false);
         return;
@@ -411,11 +436,90 @@ void MPServer::handleHandshake(ConnectedClient& c, const uint8_t* data, size_t s
         rsp.rejectReason  = "Version mismatch: server=" + std::string(SERVER_VERSION)
                           + " client=" + hs.clientVersion;
         sendTo(c.conn, rsp.encode());
-        mInterface->CloseConnection(c.conn, 0, "Version mismatch", false);
+        mInterface->CloseConnection(c.conn, 0, "Version mismatch", true);
         return;
     }
 
-    // Accept — look up or create the player record.
+    // ── Authentication ────────────────────────────────────────────────────────
+    if (mPlayerDb)
+    {
+        try
+        {
+            if (hs.isRegistration)
+            {
+                // Registration: username must not already exist
+                if (mPlayerDb->lookupAccount(hs.playerName) >= 0)
+                {
+                    PacketHandshakeResponse rsp;
+                    rsp.accepted     = false;
+                    rsp.rejectReason = "Username '" + hs.playerName + "' is already taken.";
+                    sendTo(c.conn, rsp.encode());
+                    mInterface->CloseConnection(c.conn, 0, "Username taken", true);
+                    return;
+                }
+                // Hash the password and create the account
+                const std::string hash = Bcrypt::hash(hs.passwordHash);
+                const int64_t accountId = mPlayerDb->createAccount(hs.playerName);
+                mPlayerDb->setPasswordHash(accountId, hash);
+                Log(Debug::Info) << "[Auth] Registered new account: " << hs.playerName;
+            }
+            else
+            {
+                // Login: account must exist and password must match
+                const int64_t accountId = mPlayerDb->lookupAccount(hs.playerName);
+                if (accountId < 0)
+                {
+                    PacketHandshakeResponse rsp;
+                    rsp.accepted     = false;
+                    rsp.rejectReason = "Account not found. Did you mean to register?";
+                    sendTo(c.conn, rsp.encode());
+                    mInterface->CloseConnection(c.conn, 0, "Account not found", true);
+                    return;
+                }
+                const std::string storedHash = mPlayerDb->getPasswordHash(accountId);
+                if (storedHash.empty() || !Bcrypt::verify(hs.passwordHash, storedHash))
+                {
+                    PacketHandshakeResponse rsp;
+                    rsp.accepted     = false;
+                    rsp.rejectReason = "Incorrect password.";
+                    sendTo(c.conn, rsp.encode());
+                    mInterface->CloseConnection(c.conn, 0, "Bad password", true);
+                    return;
+                }
+                Log(Debug::Info) << "[Auth] Login verified: " << hs.playerName;
+            }
+        }
+        catch (const std::exception& e)
+        {
+            Log(Debug::Warning) << "[Auth] Auth error for " << hs.playerName << ": " << e.what();
+            PacketHandshakeResponse rsp;
+            rsp.accepted     = false;
+            rsp.rejectReason = "Server authentication error. Please try again.";
+            sendTo(c.conn, rsp.encode());
+            mInterface->CloseConnection(c.conn, 0, "Auth error", true);
+            return;
+        }
+    }
+
+    // ── Duplicate session check ───────────────────────────────────────────────
+    for (const auto& [existingConn, existingClient] : mClients)
+    {
+        if (existingConn != c.conn
+            && existingClient.handshakeComplete
+            && existingClient.name == hs.playerName)
+        {
+            PacketHandshakeResponse rsp;
+            rsp.accepted     = false;
+            rsp.rejectReason = "'" + hs.playerName + "' is already logged in. "
+                               "Disconnect the other session first.";
+            sendTo(c.conn, rsp.encode());
+            mInterface->CloseConnection(c.conn, 0, "Duplicate session", true);
+            Log(Debug::Warning) << "[Auth] Rejected duplicate login for: " << hs.playerName;
+            return;
+        }
+    }
+
+    // ── Accept — look up or create the player's character record ─────────────
     c.name                    = hs.playerName;
     c.player.guid             = c.guid;
     c.player.name             = hs.playerName;
@@ -433,12 +537,13 @@ void MPServer::handleHandshake(ConnectedClient& c, const uint8_t* data, size_t s
             dbRec            = mPlayerDb->lookupOrCreateCharacter(accountId, hs.playerName);
             c.dbCharacterId  = dbRec.characterId;
             isNewCharacter   = dbRec.isNew;
-            spawnCell        = dbRec.cell;
+            // For returning players use saved cell; for new chars use configured default.
+            spawnCell = dbRec.cell.empty() ? mDefaultSpawnCell : dbRec.cell;
         }
         catch (const std::exception& e)
         {
             Log(Debug::Warning) << "[PlayerDB] handshake lookup error: " << e.what();
-            // Fail open: treat as new character.
+            spawnCell = mDefaultSpawnCell;
         }
     }
 

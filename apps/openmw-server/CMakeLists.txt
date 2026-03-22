@@ -6,6 +6,7 @@ set(OPENMW_SERVER_SOURCES
     PlayerDatabase.cpp
     bindings/PlayerBindings.cpp
     bindings/ServerBindings.cpp
+    ${CMAKE_SOURCE_DIR}/extern/bcrypt/bcrypt_impl.cpp
 )
 
 set(OPENMW_SERVER_HEADERS
@@ -27,10 +28,11 @@ add_executable(openmw-server
 )
 
 target_include_directories(openmw-server PRIVATE
-    ${CMAKE_SOURCE_DIR}                  # so <components/...> includes resolve
+    ${CMAKE_SOURCE_DIR}
     ${GNS_INCLUDE_DIR}
-    ${CMAKE_SOURCE_DIR}/extern/sol3      # sol/sol.hpp
-    ${CMAKE_SOURCE_DIR}/extern/httplib   # httplib.h
+    ${CMAKE_SOURCE_DIR}/extern/sol3
+    ${CMAKE_SOURCE_DIR}/extern/httplib
+    ${CMAKE_SOURCE_DIR}/extern/bcrypt
     ${LUA_INCLUDE_DIR}
 )
 

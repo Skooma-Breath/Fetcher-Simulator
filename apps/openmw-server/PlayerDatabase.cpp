@@ -19,9 +19,10 @@ PRAGMA journal_mode = WAL;
 PRAGMA foreign_keys = ON;
 
 CREATE TABLE IF NOT EXISTS accounts (
-    id          INTEGER PRIMARY KEY AUTOINCREMENT,
-    username    TEXT    UNIQUE NOT NULL,
-    created_at  INTEGER NOT NULL DEFAULT 0
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    username      TEXT    UNIQUE NOT NULL,
+    created_at    INTEGER NOT NULL DEFAULT 0,
+    password_hash TEXT    NOT NULL DEFAULT ''
 );
 
 CREATE TABLE IF NOT EXISTS characters (
@@ -60,6 +61,8 @@ static const char* kMigrations[] = {
     "ALTER TABLE characters ADD COLUMN class_name TEXT NOT NULL DEFAULT ''",
     "ALTER TABLE characters ADD COLUMN birth_sign TEXT NOT NULL DEFAULT ''",
     "ALTER TABLE characters ADD COLUMN class_data TEXT NOT NULL DEFAULT ''",
+    // accounts table migrations
+    "ALTER TABLE accounts ADD COLUMN password_hash TEXT NOT NULL DEFAULT ''",
 };
 
 // ============================================================================
@@ -142,35 +145,57 @@ sqlite3_stmt* PlayerDatabase::prepare(const char* sql)
 //  Public API
 // ============================================================================
 
+int64_t PlayerDatabase::lookupAccount(std::string_view username)
+{
+    sqlite3_stmt* s = prepare("SELECT id FROM accounts WHERE username = ?1");
+    sqlite3_bind_text(s, 1, username.data(), static_cast<int>(username.size()), SQLITE_STATIC);
+    const int rc = sqlite3_step(s);
+    const int64_t id = (rc == SQLITE_ROW) ? sqlite3_column_int64(s, 0) : -1;
+    sqlite3_finalize(s);
+    return id;
+}
+
+int64_t PlayerDatabase::createAccount(std::string_view username)
+{
+    sqlite3_stmt* s = prepare(
+        "INSERT INTO accounts(username, created_at) VALUES(?1, ?2)");
+    sqlite3_bind_text(s, 1, username.data(), static_cast<int>(username.size()), SQLITE_STATIC);
+    sqlite3_bind_int64(s, 2, static_cast<int64_t>(std::time(nullptr)));
+    checkSqlite(sqlite3_step(s), mDb, "insert account");
+    sqlite3_finalize(s);
+    const int64_t id = sqlite3_last_insert_rowid(mDb);
+    Log(Debug::Info) << "[PlayerDB] new account: '" << username << "' id=" << id;
+    return id;
+}
+
 int64_t PlayerDatabase::lookupOrCreateAccount(std::string_view username)
 {
-    // Try lookup first
-    {
-        sqlite3_stmt* s = prepare("SELECT id FROM accounts WHERE username = ?1");
-        sqlite3_bind_text(s, 1, username.data(), static_cast<int>(username.size()), SQLITE_STATIC);
-        const int rc = sqlite3_step(s);
-        if (rc == SQLITE_ROW)
-        {
-            const int64_t id = sqlite3_column_int64(s, 0);
-            sqlite3_finalize(s);
-            return id;
-        }
-        sqlite3_finalize(s);
-    }
+    const int64_t id = lookupAccount(username);
+    return (id >= 0) ? id : createAccount(username);
+}
 
-    // Create
+std::string PlayerDatabase::getPasswordHash(int64_t accountId)
+{
+    sqlite3_stmt* s = prepare("SELECT password_hash FROM accounts WHERE id = ?1");
+    sqlite3_bind_int64(s, 1, accountId);
+    std::string hash;
+    if (sqlite3_step(s) == SQLITE_ROW)
     {
-        sqlite3_stmt* s = prepare(
-            "INSERT INTO accounts(username, created_at) VALUES(?1, ?2)");
-        sqlite3_bind_text(s, 1, username.data(), static_cast<int>(username.size()), SQLITE_STATIC);
-        sqlite3_bind_int64(s, 2, static_cast<int64_t>(std::time(nullptr)));
-        checkSqlite(sqlite3_step(s), mDb, "insert account");
-        sqlite3_finalize(s);
-
-        const int64_t id = sqlite3_last_insert_rowid(mDb);
-        Log(Debug::Info) << "[PlayerDB] new account: '" << username << "' id=" << id;
-        return id;
+        const char* t = reinterpret_cast<const char*>(sqlite3_column_text(s, 0));
+        if (t) hash = t;
     }
+    sqlite3_finalize(s);
+    return hash;
+}
+
+void PlayerDatabase::setPasswordHash(int64_t accountId, std::string_view hash)
+{
+    sqlite3_stmt* s = prepare(
+        "UPDATE accounts SET password_hash = ?1 WHERE id = ?2");
+    sqlite3_bind_text(s, 1, hash.data(), static_cast<int>(hash.size()), SQLITE_STATIC);
+    sqlite3_bind_int64(s, 2, accountId);
+    checkSqlite(sqlite3_step(s), mDb, "setPasswordHash");
+    sqlite3_finalize(s);
 }
 
 PlayerRecord PlayerDatabase::lookupOrCreateCharacter(int64_t accountId,

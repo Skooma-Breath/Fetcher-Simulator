@@ -85,4 +85,14 @@ void ScriptEngine::handleScriptError(const std::string& context,
     Log(Debug::Warning) << "[ScriptError] " << context << ": " << msg;
 }
 
+std::string ScriptEngine::getString(const std::string& tableName,
+                                     const std::string& key,
+                                     const std::string& defaultVal) const
+{
+    auto t = mLua->get<sol::optional<sol::table>>(tableName);
+    if (!t) return defaultVal;
+    auto v = (*t).get<sol::optional<std::string>>(key);
+    return v ? *v : defaultVal;
+}
+
 } // namespace mwmp

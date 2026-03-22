@@ -125,7 +125,7 @@ void AccountDialog::onKeyPress(MyGUI::Widget* /*sender*/,
 }
 
 // ---------------------------------------------------------------------------
-void AccountDialog::doConnect(bool /*isRegister*/)
+void AccountDialog::doConnect(bool isRegister)
 {
     if (mState == State::Connecting) return;
 
@@ -156,7 +156,7 @@ void AccountDialog::doConnect(bool /*isRegister*/)
     mConnectTimer = 0.f;
     setState(State::Connecting);
 
-    if (!Main::init(mHost, mPort, user, hash))
+    if (!Main::init(mHost, mPort, user, hash, isRegister))
     {
         setState(State::Rejected, "Could not initiate connection to " + mHost + ".");
         return;

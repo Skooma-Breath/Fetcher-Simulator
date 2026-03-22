@@ -103,11 +103,13 @@ public:
     int getPlayerCount() const;
 
     // ── Master server configuration (call before run()) ───────────────────
-    void setServerName   (const std::string& name) { mServerName    = name; }
-    void setMasterUrl    (const std::string& url)  { mMasterUrl     = url;  }
-    void setGameMode     (const std::string& mode) { mGameMode      = mode; }
-    void setPasswordProtected(bool v)              { mPasswordProtected = v; }
-    void setDbPath           (const std::string& p){ mDbPath            = p; }
+    void setServerName       (const std::string& n) { mServerName        = n; }
+    void setMasterUrl        (const std::string& u) { mMasterUrl         = u; }
+    void setGameMode         (const std::string& m) { mGameMode          = m; }
+    void setPasswordProtected(bool v)               { mPasswordProtected = v; }
+    void setDbPath           (const std::string& p) { mDbPath            = p; }
+    void setSpawnCell        (const std::string& c) { mDefaultSpawnCell  = c; }
+    void setMaxPlayers       (int n)                { mMaxPlayersConfig  = n; }
 
 private:
     // ── GNS callbacks ─────────────────────────────────────────────────────
@@ -205,10 +207,11 @@ private:
     bool               mPasswordProtected = false;
 
     std::optional<PlayerDatabase> mPlayerDb;
-    std::string                   mDbPath = "playerdata.db";
+    std::string                   mDbPath            = "playerdata.db";
+    std::string                   mDefaultSpawnCell  = "toddtest";
+    int                           mMaxPlayersConfig  = 32;
 
     // ── Config ────────────────────────────────────────────────────────────
-    static constexpr int         MAX_PLAYERS    = 32;
     static constexpr float       MAX_MOVE_SPEED = 600.f;
     static constexpr const char* SERVER_VERSION = "0.1.0";
 };
