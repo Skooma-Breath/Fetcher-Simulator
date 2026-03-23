@@ -33,12 +33,18 @@ target_include_directories(openmw-server PRIVATE
     ${CMAKE_SOURCE_DIR}/extern/sol3
     ${CMAKE_SOURCE_DIR}/extern/httplib
     ${CMAKE_SOURCE_DIR}/extern/bcrypt
+    ${CMAKE_SOURCE_DIR}/extern/GameNetworkingSockets/src/common  # crypto_25519.h, keypair.h
+    ${CMAKE_SOURCE_DIR}/extern/GameNetworkingSockets/src/public  # tier0/*, minbase/*
     ${LUA_INCLUDE_DIR}
+)
+
+target_compile_definitions(openmw-server PRIVATE
+    VALVE_CRYPTO_ENABLE_25519   # exposes CCrypto::GenerateSigningKeyPair, CECSigning* etc.
 )
 
 target_link_libraries(openmw-server
     components
-    GameNetworkingSockets::GameNetworkingSockets
+    GameNetworkingSockets::GameNetworkingSockets_s
     SQLite::SQLite3
     ${LUA_LIBRARIES}
 )

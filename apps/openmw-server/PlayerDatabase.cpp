@@ -424,6 +424,30 @@ int64_t PlayerDatabase::lookupAccountByKeypair(std::string_view publicKey)
     return id;
 }
 
+std::string PlayerDatabase::getUsernameForAccount(int64_t accountId)
+{
+    sqlite3_stmt* s = prepare("SELECT username FROM accounts WHERE id=?1 LIMIT 1");
+    sqlite3_bind_int64(s, 1, accountId);
+    const int rc = sqlite3_step(s);
+    std::string name;
+    if (rc == SQLITE_ROW)
+    {
+        const char* t = reinterpret_cast<const char*>(sqlite3_column_text(s, 0));
+        if (t) name = t;
+    }
+    sqlite3_finalize(s);
+    return name;
+}
+
+void PlayerDatabase::removeKeypair(std::string_view publicKey)
+{
+    sqlite3_stmt* s = prepare(
+        "DELETE FROM account_keypairs WHERE public_key=?1");
+    sqlite3_bind_text(s, 1, publicKey.data(), static_cast<int>(publicKey.size()), SQLITE_STATIC);
+    checkSqlite(sqlite3_step(s), mDb, "removeKeypair");
+    sqlite3_finalize(s);
+}
+
 std::vector<PlayerDatabase::CharacterSummary>
 PlayerDatabase::listCharacters(int64_t accountId)
 {

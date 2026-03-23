@@ -326,7 +326,15 @@ namespace MWGui
         return MWBase::Environment::get().getStateManager()->getState() == MWBase::StateManager::State_Running;
     }
 
-    void MainMenu::updateMenu()
+    void MainMenu::onFrame(float dt)
+    {
+#ifdef BUILD_MULTIPLAYER
+        if (mCharSelectDialog && mCharSelectDialog->isVisible())
+            mCharSelectDialog->onFrame(dt);
+#endif
+    }
+
+        void MainMenu::updateMenu()
     {
         setCoord(0, 0, mWidth, mHeight);
 

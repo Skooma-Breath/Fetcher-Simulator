@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -13,6 +14,7 @@
 #include <MyGUI_Widget.h>
 
 #include "../../mwgui/windowbase.hpp"
+#include "KeyLinkDialog.hpp"
 #include <components/openmw-mp/Packets/System/PacketHandshake.hpp>
 
 namespace mwmp
@@ -25,15 +27,21 @@ namespace mwmp
      *
      * State machine:
      *
+     *   [setServer called]
+     *     ├── keypair found → ConnectingWithKey  (skip login panel)
+     *     └── no keypair   → Login
+     *
      *   Login ──Login/Register──> Connecting ──CharacterList──> CharSelect
-     *          └──rejected──> Login (error)                          │
-     *                                                     New Char   │  Enter World
-     *                                                        ▼       ▼
+     *          └──rejected──> Login (error)                          │       │
+     *                                                     New Char   │ Enter │
+     *                                                        ▼       ▼ World │
      *                                                    Naming   WaitingForData
-     *                                                      │  └──error──> CharSelect
      *                                                      └──confirm──> WaitingForData
      *                                                                        │
      *                                                                  [enterWorld]
+     *
+     *   ConnectingWithKey  ──  (same as Connecting) ──> CharSelect
+     *                      └──rejected──> Login (error)
      */
     class CharacterSelectDialog : public MWGui::WindowModal
     {
@@ -50,11 +58,12 @@ namespace mwmp
     private:
         enum class State
         {
-            Login,           ///< showing credentials form
-            Connecting,      ///< waiting for CharacterList to arrive
-            CharSelect,      ///< showing character list, name row hidden
-            Naming,          ///< name row visible, player typing new char name
-            WaitingForData,  ///< PacketCharacterSelect sent, waiting for response
+            Login,              ///< showing credentials form
+            Connecting,         ///< password auth — waiting for CharacterList
+            ConnectingWithKey,  ///< keypair auth  — waiting for CharacterList
+            CharSelect,         ///< showing character list
+            Naming,             ///< new-char name input visible
+            WaitingForData,     ///< PacketCharacterSelect sent, waiting for response
         };
 
         // ── Login panel handlers ──────────────────────────────────────────
@@ -63,6 +72,7 @@ namespace mwmp
         void onLoginCancelClicked(MyGUI::Widget* sender);
         void onLoginKeyPress(MyGUI::Widget* sender, MyGUI::KeyCode key, MyGUI::Char ch);
         void doConnect(bool isRegister);
+        void doConnectWithKey(const std::string& storedUsername);
 
         // ── CharSelect panel handlers ─────────────────────────────────────
         void onEnterWorldClicked   (MyGUI::Widget* sender);
@@ -70,12 +80,14 @@ namespace mwmp
         void onNewCharNameConfirm  (MyGUI::Widget* sender);
         void onNewCharNameKeyPress (MyGUI::Widget* sender, MyGUI::KeyCode key, MyGUI::Char ch);
         void onCharCancelClicked   (MyGUI::Widget* sender);
+        void onKeyLinkClicked      (MyGUI::Widget* sender);
 
         // ── Shared helpers ────────────────────────────────────────────────
         void showLoginPanel();
         void showCharPanel(bool resetNamingRow = true);
         void setLoginStatus(const std::string& msg);
         void setCharStatus (const std::string& msg);
+        void updateKeyLinkButton();
         void populate(const std::vector<CharacterEntry>& characters);
         void sendCharacterSelect(const std::string& charName, bool isNew);
         void setCharPanelBusy(bool busy);
@@ -94,15 +106,19 @@ namespace mwmp
         MyGUI::Button*  mLoginCancelBtn  = nullptr;
 
         // ── CharSelect group widgets ──────────────────────────────────────
-        MyGUI::TextBox* mConnectedLabel  = nullptr;
-        MyGUI::TextBox* mCharSelectHint  = nullptr;
+        MyGUI::TextBox* mConnectedLabel     = nullptr;
+        MyGUI::TextBox* mCharSelectHint     = nullptr;
         MyGUI::ListBox* mList               = nullptr;
-        MyGUI::Widget*  mNewCharNameRow     = nullptr;   ///< hidden container
+        MyGUI::Widget*  mNewCharNameRow     = nullptr;
         MyGUI::EditBox* mNewCharNameEdit    = nullptr;
         MyGUI::Button*  mNewCharNameConfirm = nullptr;
+        MyGUI::Button*  mKeyLinkBtn         = nullptr;   ///< "Link Machine" / "Machine Linked ✓"
         MyGUI::Button*  mEnterBtn           = nullptr;
         MyGUI::Button*  mNewCharBtn         = nullptr;
         MyGUI::Button*  mCharCancelBtn      = nullptr;
+
+        // ── Sub-dialogs ───────────────────────────────────────────────────
+        std::unique_ptr<KeyLinkDialog> mKeyLinkDialog;
 
         // ── State ─────────────────────────────────────────────────────────
         State       mState  = State::Login;

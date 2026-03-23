@@ -111,6 +111,7 @@ namespace mwmp
     // -----------------------------------------------------------------------
     void NetworkClient::sendReliable(const std::vector<uint8_t>& data)
     {
+        Log(Debug::Info) << "[MP] sendReliable called state=" << (int)mState << " size=" << data.size();
         if (mState != ConnectionState::Connected || data.empty())
             return;
 
@@ -195,7 +196,6 @@ namespace mwmp
 
             case k_ESteamNetworkingConnectionState_Connected:
                 setState(ConnectionState::Connected);
-                Log(Debug::Info) << "[MP] Connected to server";
                 break;
 
             case k_ESteamNetworkingConnectionState_ClosedByPeer:
@@ -205,6 +205,14 @@ namespace mwmp
                                     << info->m_info.m_szEndDebug;
                 if (mConnection != k_HSteamNetConnection_Invalid)
                 {
+                    // Drain the receive queue BEFORE closing our end.
+                    // RunCallbacks() fires this callback first, which would
+                    // set mState=Disconnected and mConnection=Invalid, causing
+                    // update()'s processIncomingMessages() guard to skip the
+                    // queue entirely.  Any buffered reliable packets — e.g. a
+                    // HandshakeResponse(accepted=false) sent with linger=true
+                    // — would then never be delivered to the protocol layer.
+                    processIncomingMessages();
                     mInterface->CloseConnection(mConnection, 0, nullptr, false);
                     mConnection = k_HSteamNetConnection_Invalid;
                 }

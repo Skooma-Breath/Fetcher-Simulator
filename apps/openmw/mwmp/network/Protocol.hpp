@@ -48,11 +48,14 @@ namespace mwmp
                 return;
             }
 
+            Log(Debug::Verbose) << "[MP:Protocol] rx type=" << hdr.type;
             auto it = mHandlers.find(hdr.type);
             if (it != mHandlers.end())
+            {
                 it->second(data, size);
+            }
             else
-                Log(Debug::Verbose) << "[MP:Protocol] No handler for packet type " << hdr.type;
+                Log(Debug::Warning) << "[MP:Protocol] No handler for packet type " << hdr.type;
         }
 
         // Convenience: encode a packet and return the wire bytes.

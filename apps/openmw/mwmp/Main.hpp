@@ -1,6 +1,7 @@
 #ifndef OPENMW_MWMP_MAIN_HPP
 #define OPENMW_MWMP_MAIN_HPP
 
+#include <filesystem>
 #include <memory>
 #include <string>
 #include <vector>
@@ -40,7 +41,8 @@ namespace mwmp
         static bool init   (const std::string& host, uint16_t port,
                             const std::string& playerName,
                             const std::string& passwordHash,
-                            bool isRegistration = false);
+                            bool isRegistration = false,
+                            bool useKeypair     = true);
         static void destroy();
 
         // Per-frame update — call from engine frame loop
@@ -64,6 +66,9 @@ namespace mwmp
         const std::string& getPlayerName()          const { return mPlayerName; }
         bool               isNewCharacter()         const { return mIsNewCharacter; }
         bool               isCharacterDataReady()   const { return mCharacterDataReady; }
+        bool               isKeypairLinked()        const { return mIsLinked; }
+        const std::string& getLocalPublicKey()       const { return mLocalPublicKey; }
+        static void        setStaticKeysDir(const std::filesystem::path& dir);
         const std::string& getCharSelectError()      const { return mCharSelectError; }
         void               clearCharSelectError()          { mCharSelectError.clear(); }
         const std::string& getSpawnCell()            const { return mSpawnCell; }
@@ -98,6 +103,7 @@ namespace mwmp
         Main& operator=(const Main&) = delete;
 
         void registerProtocolHandlers();
+        void handleChallenge(const uint8_t* data, size_t size);
         void onConnected();
         void onDisconnected();
 
@@ -119,6 +125,8 @@ namespace mwmp
         std::string mCharacterName;       ///< selected character slot name (may differ from login name)
         bool        mCharacterDataReady   = false;
         std::string mCharSelectError;
+        bool        mIsLinked             = false; ///< true if this server knows our keypair
+        std::string mLocalPublicKey;               ///< base64 public key for current server
         std::vector<CharacterEntry> mCharacterList;
         bool        mCharGenWatching  = false;
         std::string mSpawnCell;
@@ -126,6 +134,9 @@ namespace mwmp
         float       mSpawnRot[3] = {0.f, 0.f, 0.f};
         std::string mPasswordHash;
         bool        mIsRegistration = false;
+        bool        mUseKeypair     = true;
+        std::string mHost;
+        uint16_t    mPort           = 25565;
         std::string mRejectReason;
 
         // Chargen restore data (returning players)

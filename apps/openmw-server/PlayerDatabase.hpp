@@ -151,6 +151,12 @@ namespace mwmp
         /// Look up which account owns a given public key. Returns -1 if not found.
         int64_t lookupAccountByKeypair(std::string_view publicKey);
 
+        /// Get the username for an account id. Returns empty string if not found.
+        std::string getUsernameForAccount(int64_t accountId);
+
+        /// Remove a keypair by public key. No-op if not found.
+        void removeKeypair(std::string_view publicKey);
+
     private:
         void exec(const char* sql);
         sqlite3_stmt* prepare(const char* sql);

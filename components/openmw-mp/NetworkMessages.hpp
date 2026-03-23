@@ -28,6 +28,10 @@ namespace mwmp
         CharacterSelect     = 7,   // Client → server: which character to play (or "" = new)
         CharacterData       = 8,   // Server → client: full chargen/position for selected char
         CharacterSelectError= 9,   // Server → client: character select rejected (reason string)
+        Challenge           = 200, // Server → client: 32-byte nonce for Ed25519 challenge-response
+        ChallengeResponse   = 201, // Client → server: 64-byte Ed25519 signature of challenge nonce
+        LinkKeyRequest      = 202, // Client → server: register a public key to this account
+        UnlinkKeyRequest    = 203, // Client → server: remove a registered public key
 
         // --- Player ---
         PlayerBaseInfo      = 10,
@@ -125,8 +129,6 @@ namespace mwmp
         ClientScriptSettings= 137,
         CellReset           = 138,
         RecordDynamic       = 139,
-
-        COUNT               = 140
     };
 
 } // namespace mwmp

@@ -43,6 +43,11 @@ struct ConnectedClient
     int64_t             dbAccountId          = 0;   ///< PlayerDatabase accounts.id
     int64_t             dbCharacterId        = 0;   ///< PlayerDatabase characters.id, 0 if not set
 
+    // Ed25519 challenge-response state (valid between receiving PacketHandshake
+    // with a publicKey and receiving PacketChallengeResponse)
+    uint8_t             pendingChallenge[32] = {};
+    std::string         pendingPublicKey;           ///< base64 public key being challenged
+
     // Per-player key/value store — set/get from Lua scripts via player:setData/getData().
     std::unordered_map<std::string, std::string> scriptData;
 };
@@ -133,8 +138,11 @@ private:
     void onClientMessage(ConnectedClient& client, const uint8_t* data, size_t size);
 
     // ── Packet handlers ───────────────────────────────────────────────────
-    void handleHandshake        (ConnectedClient& c, const uint8_t* data, size_t size);
-    void handleCharacterSelect  (ConnectedClient& c, const uint8_t* data, size_t size);
+    void handleHandshake          (ConnectedClient& c, const uint8_t* data, size_t size);
+    void handleCharacterSelect    (ConnectedClient& c, const uint8_t* data, size_t size);
+    void handleChallengeResponse  (ConnectedClient& c, const uint8_t* data, size_t size);
+    void handleLinkKeyRequest     (ConnectedClient& c, const uint8_t* data, size_t size);
+    void handleUnlinkKeyRequest   (ConnectedClient& c, const uint8_t* data, size_t size);
     void handlePlayerCharGen    (ConnectedClient& c, const uint8_t* data, size_t size);
     void handlePlayerBaseInfo   (ConnectedClient& c, const uint8_t* data, size_t size);
     void handlePlayerPosition   (ConnectedClient& c, const uint8_t* data, size_t size);

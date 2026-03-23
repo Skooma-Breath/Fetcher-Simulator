@@ -15,6 +15,7 @@
 #include <components/esm/refid.hpp>
 #include <components/esm3/loadclas.hpp>
 #include "../sync/PlayerSync.hpp"
+#include "../Identity.hpp"
 #include "../Main.hpp"
 #include "../network/Client.hpp"
 #include "../sha256.hpp"
@@ -54,6 +55,7 @@ CharacterSelectDialog::CharacterSelectDialog()
     getWidget(mNewCharNameRow,     "NewCharNameRow");
     getWidget(mNewCharNameEdit,    "NewCharNameEdit");
     getWidget(mNewCharNameConfirm, "NewCharNameConfirm");
+    getWidget(mKeyLinkBtn,         "KeyLinkButton");
     getWidget(mEnterBtn,           "EnterWorldButton");
     getWidget(mNewCharBtn,         "NewCharButton");
     getWidget(mCharCancelBtn,      "CharCancelButton");
@@ -68,6 +70,8 @@ CharacterSelectDialog::CharacterSelectDialog()
         MyGUI::newDelegate(this, &CharacterSelectDialog::onNewCharNameKeyPress);
     mCharCancelBtn->eventMouseButtonClick +=
         MyGUI::newDelegate(this, &CharacterSelectDialog::onCharCancelClicked);
+    mKeyLinkBtn->eventMouseButtonClick +=
+        MyGUI::newDelegate(this, &CharacterSelectDialog::onKeyLinkClicked);
 }
 
 // ---------------------------------------------------------------------------
@@ -75,18 +79,33 @@ void CharacterSelectDialog::setServer(const std::string& host, uint16_t port)
 {
     mHost = host;
     mPort = port;
+    // setKeysDir in Main so Identity knows where to store keys.
+    // Use a relative "mp-keys" directory next to the executable for now.
+    Main::setStaticKeysDir(std::filesystem::current_path() / "mp-keys");
 }
 
 void CharacterSelectDialog::onOpen()
 {
     WindowModal::onOpen();
+
+    // If we have a keypair for this server, skip the login form entirely.
+    if (!mHost.empty() && Identity::hasKeypair(mHost, mPort))
+    {
+        const std::string storedUser = Identity::getStoredUsername(mHost, mPort);
+        if (!storedUser.empty())
+        {
+            doConnectWithKey(storedUser);
+            return;
+        }
+    }
+
     showLoginPanel();
     MyGUI::InputManager::getInstance().setKeyFocusWidget(
         mUsername->getCaption().empty() ? mUsername : mPassword);
 }
 
 // ---------------------------------------------------------------------------
-// Show/hide helpers — toggle individual widgets directly (no sub-panels)
+// Panel show/hide
 // ---------------------------------------------------------------------------
 void CharacterSelectDialog::showLoginPanel()
 {
@@ -94,7 +113,6 @@ void CharacterSelectDialog::showLoginPanel()
     mTimer = 0.f;
     mMainWidget->castType<MyGUI::Window>()->setCaption("Multiplayer Login");
 
-    // Login group — show
     mUsernameLabel->setVisible(true);
     mUsername->setVisible(true);
     mPasswordLabel->setVisible(true);
@@ -104,11 +122,11 @@ void CharacterSelectDialog::showLoginPanel()
     mRegBtn->setVisible(true);
     mLoginCancelBtn->setVisible(true);
 
-    // CharSelect group — hide
     mConnectedLabel->setVisible(false);
     mCharSelectHint->setVisible(false);
     mList->setVisible(false);
     mNewCharNameRow->setVisible(false);
+    mKeyLinkBtn->setVisible(false);
     mEnterBtn->setVisible(false);
     mNewCharBtn->setVisible(false);
     mCharCancelBtn->setVisible(false);
@@ -124,7 +142,6 @@ void CharacterSelectDialog::showCharPanel(bool resetNamingRow)
 {
     mMainWidget->castType<MyGUI::Window>()->setCaption("Select Character");
 
-    // Login group — hide
     mUsernameLabel->setVisible(false);
     mUsername->setVisible(false);
     mPasswordLabel->setVisible(false);
@@ -134,10 +151,10 @@ void CharacterSelectDialog::showCharPanel(bool resetNamingRow)
     mRegBtn->setVisible(false);
     mLoginCancelBtn->setVisible(false);
 
-    // CharSelect group — show
     mConnectedLabel->setVisible(true);
     mCharSelectHint->setVisible(true);
     mList->setVisible(true);
+    mKeyLinkBtn->setVisible(true);
     mEnterBtn->setVisible(true);
     mNewCharBtn->setVisible(true);
     mCharCancelBtn->setVisible(true);
@@ -149,11 +166,11 @@ void CharacterSelectDialog::showCharPanel(bool resetNamingRow)
         mState = State::CharSelect;
     }
 
+    updateKeyLinkButton();
     setCharStatus("");
     setCharPanelBusy(false);
 }
 
-// ---------------------------------------------------------------------------
 void CharacterSelectDialog::setLoginStatus(const std::string& msg)
 {
     mStatusLabel->setCaption(msg);
@@ -174,25 +191,33 @@ void CharacterSelectDialog::setCharStatus(const std::string& msg)
     }
 }
 
+void CharacterSelectDialog::updateKeyLinkButton()
+{
+    if (Identity::hasKeypair(mHost, mPort))
+        mKeyLinkBtn->setCaption("Machine Linked \xE2\x9C\x93"); // UTF-8 check mark
+    else
+        mKeyLinkBtn->setCaption("Link Machine");
+}
+
 void CharacterSelectDialog::setCharPanelBusy(bool busy)
 {
     mEnterBtn->setEnabled(!busy);
     mNewCharBtn->setEnabled(!busy);
     mCharCancelBtn->setEnabled(!busy);
+    mKeyLinkBtn->setEnabled(!busy);
     mNewCharNameConfirm->setEnabled(!busy);
     mNewCharNameEdit->setEnabled(!busy);
 }
 
 // ---------------------------------------------------------------------------
-// Login group handlers
+// Login group
 // ---------------------------------------------------------------------------
 void CharacterSelectDialog::onLoginClicked   (MyGUI::Widget*) { doConnect(false); }
 void CharacterSelectDialog::onRegisterClicked(MyGUI::Widget*) { doConnect(true);  }
 
 void CharacterSelectDialog::onLoginCancelClicked(MyGUI::Widget*)
 {
-    if (Main::isInitialised())
-        Main::destroy();
+    if (Main::isInitialised()) Main::destroy();
     setVisible(false);
 }
 
@@ -207,7 +232,7 @@ void CharacterSelectDialog::onLoginKeyPress(MyGUI::Widget*,
 
 void CharacterSelectDialog::doConnect(bool isRegister)
 {
-    if (mState == State::Connecting) return;
+    if (mState == State::Connecting || mState == State::ConnectingWithKey) return;
 
     const std::string user = std::string(mUsername->getCaption());
     const std::string pass = std::string(mPassword->getCaption());
@@ -216,8 +241,7 @@ void CharacterSelectDialog::doConnect(bool isRegister)
     if (pass.empty()) { setLoginStatus("Password cannot be empty."); return; }
     if (mHost.empty()){ setLoginStatus("No server address set.");    return; }
 
-    if (Main::isInitialised())
-        Main::destroy();
+    if (Main::isInitialised()) Main::destroy();
 
     mState = State::Connecting;
     mTimer = 0.f;
@@ -227,7 +251,37 @@ void CharacterSelectDialog::doConnect(bool isRegister)
     mUsername->setEnabled(false);
     mPassword->setEnabled(false);
 
-    if (!Main::init(mHost, mPort, user, sha256hex(pass), isRegister))
+    if (!Main::init(mHost, mPort, user, sha256hex(pass), isRegister, /*useKeypair=*/false))
+    {
+        showLoginPanel();
+        setLoginStatus("Could not initiate connection to " + mHost + ".");
+    }
+}
+
+void CharacterSelectDialog::doConnectWithKey(const std::string& storedUsername)
+{
+    if (Main::isInitialised()) Main::destroy();
+
+    // Show a minimal "connecting" state on the login panel momentarily,
+    // then switch to char panel once connected.
+    mMainWidget->castType<MyGUI::Window>()->setCaption("Connecting...");
+    // Hide all groups — a clean blank window while challenge-response happens.
+    showLoginPanel();
+    // Set state AFTER showLoginPanel() — showLoginPanel() resets mState to Login,
+    // so we must override it here to enter the ConnectingWithKey polling path in onFrame.
+    mState = State::ConnectingWithKey;
+    mTimer = 0.f;
+    setLoginStatus("Connecting with linked key...");
+    mLoginBtn->setVisible(false);
+    mRegBtn->setVisible(false);
+    mLoginCancelBtn->setVisible(true);
+    mLoginCancelBtn->setEnabled(true);
+
+    Log(Debug::Info) << "[MP] Attempting keypair auth for " << storedUsername
+                     << " on " << mHost << ":" << mPort;
+
+    // Init with empty password — publicKey will be set in onConnected().
+    if (!Main::init(mHost, mPort, storedUsername, "", false))
     {
         showLoginPanel();
         setLoginStatus("Could not initiate connection to " + mHost + ".");
@@ -235,7 +289,7 @@ void CharacterSelectDialog::doConnect(bool isRegister)
 }
 
 // ---------------------------------------------------------------------------
-// CharSelect group handlers
+// CharSelect group
 // ---------------------------------------------------------------------------
 void CharacterSelectDialog::populate(const std::vector<CharacterEntry>& characters)
 {
@@ -304,27 +358,40 @@ void CharacterSelectDialog::onNewCharNameConfirm(MyGUI::Widget*)
 {
     if (mState != State::Naming) return;
     const std::string name = std::string(mNewCharNameEdit->getCaption());
-    if (name.empty())
-    {
-        MyGUI::InputManager::getInstance().setKeyFocusWidget(mNewCharNameEdit);
-        return;
-    }
+    if (name.empty()) { MyGUI::InputManager::getInstance().setKeyFocusWidget(mNewCharNameEdit); return; }
     sendCharacterSelect(name, /*isNew=*/true);
 }
 
 void CharacterSelectDialog::onCharCancelClicked(MyGUI::Widget*)
 {
-    if (Main::isInitialised())
-        Main::destroy();
+    if (Main::isInitialised()) Main::destroy();
     setVisible(false);
     mState = State::Login;
+}
+
+void CharacterSelectDialog::onKeyLinkClicked(MyGUI::Widget*)
+{
+    if (mState != State::CharSelect) return;
+    if (!Main::isInitialised()) return;
+
+    const std::string username = Main::get().getPlayerName();
+    const bool linked = Identity::hasKeypair(mHost, mPort);
+
+    if (!mKeyLinkDialog)
+        mKeyLinkDialog = std::make_unique<KeyLinkDialog>();
+
+    mKeyLinkDialog->open(mHost, mPort, username, linked,
+        [this](bool isNowLinked) {
+            // Refresh button text after dialog closes.
+            updateKeyLinkButton();
+            (void)isNowLinked;
+        });
 }
 
 // ---------------------------------------------------------------------------
 void CharacterSelectDialog::sendCharacterSelect(const std::string& charName, bool isNew)
 {
     if (!Main::isInitialised()) return;
-
     Main::get().clearCharSelectError();
 
     PacketCharacterSelect pkt;
@@ -337,8 +404,7 @@ void CharacterSelectDialog::sendCharacterSelect(const std::string& charName, boo
     setCharStatus("Loading...");
     setCharPanelBusy(true);
 
-    Log(Debug::Info) << "[MP] Sent CharacterSelect: '"
-                     << charName << "' isNew=" << isNew;
+    Log(Debug::Info) << "[MP] Sent CharacterSelect: '" << charName << "' isNew=" << isNew;
 }
 
 // ---------------------------------------------------------------------------
@@ -346,14 +412,17 @@ void CharacterSelectDialog::sendCharacterSelect(const std::string& charName, boo
 // ---------------------------------------------------------------------------
 void CharacterSelectDialog::onFrame(float dt)
 {
-    if (mState == State::Connecting)
+    // Both Connecting and ConnectingWithKey wait for the same thing: isWorldReady()
+    if (mState == State::Connecting || mState == State::ConnectingWithKey)
     {
         mTimer += dt;
         if (mTimer > 15.f)
         {
             if (Main::isInitialised()) Main::destroy();
             showLoginPanel();
-            setLoginStatus("Connection timed out.");
+            setLoginStatus(mState == State::ConnectingWithKey
+                ? "Keypair auth timed out. Try logging in with your password."
+                : "Connection timed out.");
             return;
         }
         if (!Main::isInitialised())
@@ -368,8 +437,25 @@ void CharacterSelectDialog::onFrame(float dt)
         if (mp.isNetworkDisconnected())
         {
             const std::string reason = mp.getRejectReason();
-            showLoginPanel();
-            setLoginStatus(reason.empty() ? "Rejected by server." : reason);
+
+            // If keypair auth was rejected because the server doesn't recognise
+            // the key, the local file is orphaned — delete it so onOpen() stops
+            // looping and pre-fill the username so the user just needs their password.
+            if (mState == State::ConnectingWithKey
+                && reason.find("Key not recognised") != std::string::npos)
+            {
+                const std::string storedUser = Identity::getStoredUsername(mHost, mPort);
+                Identity::removeKeypair(mHost, mPort);
+                showLoginPanel();
+                if (!storedUser.empty())
+                    mUsername->setCaption(storedUser);
+                setLoginStatus("Key not registered on this server — enter your password to log in.");
+            }
+            else
+            {
+                showLoginPanel();
+                setLoginStatus(reason.empty() ? "Rejected by server." : reason);
+            }
             Main::destroy();
             return;
         }

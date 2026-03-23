@@ -1,34 +1,35 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <MyGUI type="Layout">
     <!--
-        Combined Multiplayer dialog  ~440 x 310
+        Combined Multiplayer dialog  ~440 x 330
 
         All widgets are direct children of the Window.
         CharacterSelectDialog.cpp hides/shows the two logical groups:
 
         LOGIN GROUP (visible first):
-            UsernameLabel   TextBox
-            Username        EditBox
-            PasswordLabel   TextBox
-            Password        EditBox   (masked)
-            StatusLabel     TextBox   - "Connecting..." / error
-            RegisterButton  Button
-            LoginButton     Button
+            UsernameLabel     TextBox
+            Username          EditBox
+            PasswordLabel     TextBox
+            Password          EditBox   (masked)
+            StatusLabel       TextBox   - "Connecting..." / error
+            RegisterButton    Button
+            LoginButton       Button
             LoginCancelButton Button
 
-        CHARSELECT GROUP (visible after auth, hidden initially):
-            ConnectedLabel      TextBox   - "Connected as <n>  |  <host>"
-            CharSelectHint      TextBox   - instruction / error line
-            CharacterList       ListBox
-            NewCharNameRow      Widget    - hidden until New Character clicked
+        CHARSELECT GROUP (visible after auth):
+            ConnectedLabel    TextBox   - "Connected as <n>  |  <host>"
+            CharSelectHint    TextBox   - instruction / error line
+            CharacterList     ListBox
+            NewCharNameRow    Widget    - hidden until New Character clicked
               NewCharNameEdit   EditBox
               NewCharNameConfirm Button
-            NewCharButton       Button
-            EnterWorldButton    Button
-            CharCancelButton    Button
+            KeyLinkButton     Button   - "Link Machine" or "Machine Linked ✓"
+            CharCancelButton  Button
+            NewCharButton     Button
+            EnterWorldButton  Button
     -->
     <Widget type="Window" skin="MW_DialogNoTransp" layer="Modal"
-            position="0 0 440 310" align="Center" name="_Main">
+            position="0 0 440 330" align="Center" name="_Main">
         <Property key="Visible"  value="false"/>
         <Property key="Caption"  value="Multiplayer Login"/>
 
@@ -62,22 +63,22 @@
         </Widget>
 
         <Widget type="AutoSizedButton" skin="MW_Button"
-                position="16 270 88 24" name="RegisterButton" align="Left Bottom">
+                position="16 288 88 24" name="RegisterButton" align="Left Bottom">
             <Property key="Caption"         value="Register"/>
             <Property key="ExpandDirection" value="Right"/>
         </Widget>
         <Widget type="AutoSizedButton" skin="MW_Button"
-                position="296 270 60 24" name="LoginCancelButton" align="Right Bottom">
+                position="296 288 60 24" name="LoginCancelButton" align="Right Bottom">
             <Property key="Caption"         value="#{Interface:Cancel}"/>
             <Property key="ExpandDirection" value="Left"/>
         </Widget>
         <Widget type="AutoSizedButton" skin="MW_Button"
-                position="364 270 60 24" name="LoginButton" align="Right Bottom">
+                position="364 288 60 24" name="LoginButton" align="Right Bottom">
             <Property key="Caption"         value="Login"/>
             <Property key="ExpandDirection" value="Left"/>
         </Widget>
 
-        <!-- ═══ CHARSELECT GROUP (hidden initially) ═══ -->
+        <!-- ═══ CHARSELECT GROUP ═══ -->
         <Widget type="TextBox" skin="SandText"
                 position="16 12 408 18" name="ConnectedLabel" align="Left Top HStretch">
             <Property key="Caption"   value=""/>
@@ -90,13 +91,14 @@
             <Property key="TextAlign" value="Left VCenter"/>
         </Widget>
 
+        <!-- Character list -->
         <Widget type="ListBox" skin="MW_List"
-                position="16 56 408 158" name="CharacterList" align="Left Top HStretch VStretch">
+                position="16 56 408 168" name="CharacterList" align="Left Top HStretch VStretch">
         </Widget>
 
         <!-- New-character name row — hidden until New Character is clicked -->
         <Widget type="Widget" skin=""
-                position="16 220 408 26" name="NewCharNameRow">
+                position="16 230 408 26" name="NewCharNameRow">
             <Property key="Visible" value="false"/>
             <Widget type="EditBox" skin="MW_TextEdit"
                     position="0 0 296 24" name="NewCharNameEdit">
@@ -111,18 +113,26 @@
             </Widget>
         </Widget>
 
+        <!-- Key link row -->
         <Widget type="AutoSizedButton" skin="MW_Button"
-                position="16 272 80 24" name="CharCancelButton" align="Left Bottom">
+                position="16 262 140 24" name="KeyLinkButton" align="Left Bottom">
+            <Property key="Caption"         value="Link Machine"/>
+            <Property key="ExpandDirection" value="Right"/>
+        </Widget>
+
+        <!-- Primary action row -->
+        <Widget type="AutoSizedButton" skin="MW_Button"
+                position="16 292 80 24" name="CharCancelButton" align="Left Bottom">
             <Property key="Caption"         value="#{Interface:Cancel}"/>
             <Property key="ExpandDirection" value="Right"/>
         </Widget>
         <Widget type="AutoSizedButton" skin="MW_Button"
-                position="155 272 116 24" name="NewCharButton" align="HCenter Bottom">
+                position="170 292 116 24" name="NewCharButton" align="HCenter Bottom">
             <Property key="Caption"         value="New Character"/>
             <Property key="ExpandDirection" value="Right"/>
         </Widget>
         <Widget type="AutoSizedButton" skin="MW_Button"
-                position="332 272 96 24" name="EnterWorldButton" align="Right Bottom">
+                position="336 292 96 24" name="EnterWorldButton" align="Right Bottom">
             <Property key="Caption"         value="Enter World"/>
             <Property key="ExpandDirection" value="Left"/>
         </Widget>

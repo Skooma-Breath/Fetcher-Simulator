@@ -61,6 +61,7 @@ namespace MWGui
         void setVisible(bool visible) override;
 
         bool exit() override;
+        void onFrame(float dt) override;
 
     private:
         const VFS::Manager* mVFS;

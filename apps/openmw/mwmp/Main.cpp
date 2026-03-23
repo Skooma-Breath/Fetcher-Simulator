@@ -1,4 +1,6 @@
 #include "Main.hpp"
+#include "Identity.hpp"
+#include <cstring>
 
 #include <stdexcept>
 
@@ -31,6 +33,7 @@
 #include "../mwworld/player.hpp"
 #include "../mwworld/esmstore.hpp"
 #include <sstream>
+#include <filesystem>
 #include <components/esm/position.hpp>
 #include <components/esm/refid.hpp>
 
@@ -56,7 +59,8 @@ bool Main::isInitialised()
 bool Main::init(const std::string& host, uint16_t port,
                 const std::string& playerName,
                 const std::string& passwordHash,
-                bool isRegistration)
+                bool isRegistration,
+                bool useKeypair)
 {
     if (sInstance)
     {
@@ -70,6 +74,9 @@ bool Main::init(const std::string& host, uint16_t port,
         sInstance->mPlayerName     = playerName;
         sInstance->mPasswordHash   = passwordHash;
         sInstance->mIsRegistration = isRegistration;
+        sInstance->mUseKeypair     = useKeypair;
+        sInstance->mHost           = host;
+        sInstance->mPort           = port;
         sInstance->mPlayerSync->localPlayer().name = playerName;
 
         // Attempt connection
@@ -237,6 +244,25 @@ void Main::onConnected()
     hs.playerName      = mPlayerName;
     hs.passwordHash    = mPasswordHash;
     hs.isRegistration  = mIsRegistration;
+    
+    if (mUseKeypair)
+    {
+        mLocalPublicKey = Identity::getPublicKeyBase64(mHost, mPort);
+        if (!mLocalPublicKey.empty())
+        {
+            hs.publicKey = mLocalPublicKey;
+            mIsLinked    = true;
+            Log(Debug::Info) << "[MP] Sending keypair auth for " << mPlayerName;
+        }
+        else
+            mIsLinked = false;
+    }
+    else
+    {
+        mLocalPublicKey.clear();
+        mIsLinked = false;
+        Log(Debug::Info) << "[MP] Connected to server";
+    }
     mClient->sendReliable(hs.encode());
 }
 
@@ -249,7 +275,16 @@ void Main::onDisconnected()
     mCharSelectError.clear();
     mCharacterName.clear();
     mCharacterList.clear();
+    mIsLinked       = false;
+    mLocalPublicKey.clear();
     // Phase 3: show reconnect dialog
+}
+
+// ---------------------------------------------------------------------------
+/*static*/
+void Main::setStaticKeysDir(const std::filesystem::path& dir)
+{
+    Identity::setKeysDir(dir);
 }
 
 // ---------------------------------------------------------------------------
@@ -285,7 +320,34 @@ void Main::registerProtocolHandlers()
             // mWorldReady is set when PacketCharacterList arrives.
         });
 
-    // --- Character list — arrives immediately after accepted handshake ---
+    // --- Ed25519 challenge — server sends 32-byte nonce, we sign and respond ---
+    proto.registerHandler(PacketType::Challenge,
+        [this](const uint8_t* data, size_t size)
+        {
+            Log(Debug::Info) << "[MP] Challenge received, signing nonce";
+            PacketChallenge pkt;
+            if (!pkt.decode(data, size))
+            {
+                Log(Debug::Error) << "[MP] Challenge decode FAILED";
+                return;
+            }
+            uint8_t sig[64] = {};
+            if (!Identity::sign(mHost, mPort, pkt.nonce, sig))
+            {
+                Log(Debug::Error) << "[MP] Identity::sign FAILED for "
+                                  << mHost << ":" << mPort;
+                mClient->disconnect("No keypair");
+                return;
+            }
+            PacketChallengeResponse rsp;
+            std::memcpy(rsp.signature, sig, 64);
+            mClient->sendReliable(rsp.encode());
+            Log(Debug::Info) << "[MP] Challenge response sent";
+            });
+    Log(Debug::Info) << "[MP] Challenge handler registered, type="
+                     << static_cast<int>(PacketType::Challenge);
+
+// --- Character list — arrives immediately after accepted handshake ---
     proto.registerHandler(PacketType::CharacterList,
         [this](const uint8_t* data, size_t size)
         {

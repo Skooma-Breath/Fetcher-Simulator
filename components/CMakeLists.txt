@@ -637,7 +637,7 @@ target_link_libraries(components
     )
 
 if (BUILD_MULTIPLAYER OR BUILD_DEDICATED_SERVER)
-    target_link_libraries(components GameNetworkingSockets::GameNetworkingSockets)
+    target_link_libraries(components GameNetworkingSockets::GameNetworkingSockets_s)
     target_include_directories(components PUBLIC ${GNS_INCLUDE_DIR})
 endif()
 

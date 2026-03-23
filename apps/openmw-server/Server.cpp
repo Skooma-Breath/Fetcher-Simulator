@@ -1,10 +1,22 @@
 #include "Server.hpp"
 #include "MasterServerClient.hpp"
 #include "bcrypt.h"  // extern/bcrypt/bcrypt.h — password hashing wrapper
+
+// GNS C++ crypto API — CECSigningPublicKey::VerifySignature for challenge-response auth.
+// Include paths: extern/GameNetworkingSockets/src/common + src/public
+#include <crypto_25519.h>
+
+#ifdef _WIN32
+#define WIN32_LEAN_AND_MEAN
+#include <windows.h>
+#endif
+
 #include "bindings/PlayerBindings.hpp"
 
 #include <chrono>
 #include <cmath>
+#include <cstring>
+#include <fstream>
 #include <iostream>
 #include <sstream>
 #include <stdexcept>
@@ -384,7 +396,9 @@ void MPServer::onClientMessage(ConnectedClient& client,
     auto type = static_cast<PacketType>(hdr.type);
 
     // Must complete handshake before any other packet is processed.
-    if (!client.handshakeComplete && type != PacketType::Handshake)
+    if (!client.handshakeComplete
+        && type != PacketType::Handshake
+        && type != PacketType::ChallengeResponse)
     {
         Log(Debug::Warning) << "[Server] Pre-handshake packet from conn="
                             << client.conn << ", ignoring";
@@ -395,7 +409,10 @@ void MPServer::onClientMessage(ConnectedClient& client,
     // CharacterSelect and PlayerCharGen are the only exceptions.
     if (client.handshakeComplete && !client.charSelectComplete
         && type != PacketType::CharacterSelect
+        && type != PacketType::ChallengeResponse
         && type != PacketType::PlayerCharGen
+        && type != PacketType::LinkKeyRequest    // allowed during charselect flow
+        && type != PacketType::UnlinkKeyRequest  // allowed during charselect flow
         && type != PacketType::Handshake)
     {
         Log(Debug::Verbose) << "[Server] Pre-charselect packet type=" << (int)type
@@ -407,6 +424,9 @@ void MPServer::onClientMessage(ConnectedClient& client,
     {
         case PacketType::Handshake:        handleHandshake(client, data, size);          break;
         case PacketType::CharacterSelect:  handleCharacterSelect(client, data, size);    break;
+        case PacketType::ChallengeResponse:handleChallengeResponse(client, data, size); break;
+        case PacketType::LinkKeyRequest:   handleLinkKeyRequest(client, data, size);    break;
+        case PacketType::UnlinkKeyRequest: handleUnlinkKeyRequest(client, data, size);  break;
         case PacketType::PlayerCharGen:    handlePlayerCharGen(client, data, size);      break;
         case PacketType::PlayerBaseInfo:   handlePlayerBaseInfo(client, data, size);     break;
         case PacketType::PlayerPosition:   handlePlayerPosition(client, data, size);     break;
@@ -456,6 +476,62 @@ void MPServer::handleHandshake(ConnectedClient& c, const uint8_t* data, size_t s
         sendTo(c.conn, rsp.encode());
         mInterface->CloseConnection(c.conn, 0, "Version mismatch", true);
         return;
+    }
+
+    // ── Ed25519 keypair path ──────────────────────────────────────────────────
+    // If the client presents a public key and it maps to a known account,
+    // issue a challenge instead of asking for a password.
+    if (mPlayerDb && !hs.publicKey.empty())
+    {
+        try
+        {
+            const int64_t accountId = mPlayerDb->lookupAccountByKeypair(hs.publicKey);
+            if (accountId >= 0)
+            {
+                // Recognised key — generate a random 32-byte challenge nonce.
+                // Store the challenge in ConnectedClient so handleChallengeResponse
+                // can verify the signature.
+                std::memset(c.pendingChallenge, 0, 32);
+#ifdef _WIN32
+                typedef BOOLEAN (WINAPI *PfnRtlGenRandom)(void*, ULONG);
+                static PfnRtlGenRandom rng = nullptr;
+                if (!rng) rng = reinterpret_cast<PfnRtlGenRandom>(
+                    GetProcAddress(LoadLibraryA("advapi32.dll"), "SystemFunction036"));
+                if (rng) rng(c.pendingChallenge, 32);
+#else
+                {   std::ifstream r("/dev/urandom", std::ios::binary);
+                    r.read(reinterpret_cast<char*>(c.pendingChallenge), 32); }
+#endif
+                c.pendingPublicKey = hs.publicKey;
+                // Store login name so the accept path (in handleChallengeResponse)
+                // can set c.loginName.
+                c.loginName = hs.playerName.empty()
+                    ? mPlayerDb->getUsernameForAccount(accountId)
+                    : hs.playerName;
+                c.dbAccountId = accountId;
+
+                PacketChallenge pkt;
+                std::memcpy(pkt.nonce, c.pendingChallenge, 32);
+                sendTo(c.conn, pkt.encode());
+                Log(Debug::Info) << "[Auth] Keypair challenge sent to " << c.loginName;
+                return; // wait for PacketChallengeResponse
+            }
+            // Unknown key — reject immediately with a clear message.
+            // The client sent a keypair auth request (empty passwordHash) so
+            // falling through to password auth would always fail with
+            // "Incorrect password" which is misleading.
+            Log(Debug::Warning) << "[Auth] Keypair not recognised for conn=" << c.conn;
+            PacketHandshakeResponse rsp;
+            rsp.accepted     = false;
+            rsp.rejectReason = "Key not recognised on this server. Please log in with your password to re-link.";
+            sendTo(c.conn, rsp.encode());
+            mInterface->CloseConnection(c.conn, 0, "Unknown key", true);
+            return;
+        }
+        catch (const std::exception& e)
+        {
+            Log(Debug::Warning) << "[Auth] Keypair lookup error: " << e.what();
+        }
     }
 
     // ── Authentication ────────────────────────────────────────────────────────
@@ -1083,6 +1159,150 @@ void MPServer::onConnectionStatusChanged(SteamNetConnectionStatusChangedCallback
 
         default:
             break;
+    }
+}
+
+// ---------------------------------------------------------------------------
+void MPServer::handleChallengeResponse(ConnectedClient& c,
+                                        const uint8_t* data, size_t size)
+{
+    // Must have an outstanding challenge — ignore if there isn't one.
+    if (c.pendingPublicKey.empty()) return;
+
+    PacketChallengeResponse pkt;
+    if (!pkt.decode(data, size)) return;
+
+    // Load the stored public key from its base64 representation directly into
+    // a GNS key object — no manual base64 decode needed.
+    CECSigningPublicKey pubKey;
+    if (!pubKey.SetFromBase64EncodedString(c.pendingPublicKey.c_str()) || !pubKey.IsValid())
+    {
+        mInterface->CloseConnection(c.conn, 0, "Bad keypair", true);
+        return;
+    }
+
+    // Verify the Ed25519 signature using the GNS C++ API.
+    CryptoSignature_t sig;
+    std::memcpy(sig, pkt.signature, 64);
+    if (!pubKey.VerifySignature(c.pendingChallenge, 32, sig))
+    {
+        PacketHandshakeResponse rsp;
+        rsp.accepted     = false;
+        rsp.rejectReason = "Keypair verification failed.";
+        sendTo(c.conn, rsp.encode());
+        mInterface->CloseConnection(c.conn, 0, "Bad signature", true);
+        Log(Debug::Warning) << "[Auth] Bad signature from " << c.loginName;
+        return;
+    }
+
+    Log(Debug::Info) << "[Auth] Keypair auth verified for " << c.loginName;
+    c.pendingPublicKey.clear();
+
+    // Auth succeeded via keypair — proceed exactly as a normal accepted handshake.
+    c.player.guid       = c.guid;
+    c.player.name       = c.loginName;
+    c.handshakeComplete = true;
+
+    if (mWorld.hostGuid == 0)
+        mWorld.hostGuid = c.guid;
+
+    PacketHandshakeResponse rsp;
+    rsp.accepted      = true;
+    rsp.assignedGuid  = c.guid;
+    rsp.serverVersion = SERVER_VERSION;
+    sendTo(c.conn, rsp.encode());
+
+    Log(Debug::Info) << "[Server] Keypair handshake accepted: " << c.name
+                     << " guid=" << c.guid;
+
+    PacketCharacterList charListPkt;
+    if (mPlayerDb && c.dbAccountId > 0)
+    {
+        try
+        {
+            for (const auto& cs : mPlayerDb->listCharacters(c.dbAccountId))
+            {
+                CharacterEntry entry;
+                entry.name      = cs.name;
+                entry.race      = cs.race;
+                entry.className = cs.className;
+                entry.lastSeen  = cs.lastSeen;
+                entry.isNew     = cs.isNew;
+                charListPkt.characters.push_back(std::move(entry));
+            }
+        }
+        catch (const std::exception& e)
+        {
+            Log(Debug::Warning) << "[PlayerDB] listCharacters error: " << e.what();
+        }
+    }
+    sendTo(c.conn, charListPkt.encode());
+    Log(Debug::Info) << "[Server] Sent " << charListPkt.characters.size()
+                     << " character(s) to " << c.name;
+}
+
+// ---------------------------------------------------------------------------
+void MPServer::handleLinkKeyRequest(ConnectedClient& c,
+                                     const uint8_t* data, size_t size)
+{
+    if (!c.handshakeComplete || !mPlayerDb || c.dbAccountId <= 0) return;
+
+    PacketLinkKeyRequest pkt;
+    if (!pkt.decode(data, size)) return;
+
+    if (pkt.publicKey.empty()) return;
+
+    // Check the key isn't already registered globally.
+    if (mPlayerDb->lookupAccountByKeypair(pkt.publicKey) >= 0)
+    {
+        Log(Debug::Warning) << "[Auth] LinkKey: key already registered for "
+                            << c.loginName;
+        return; // silently ignore — client considers itself linked already
+    }
+
+    try
+    {
+        mPlayerDb->addKeypair(c.dbAccountId, pkt.publicKey,
+                              pkt.label.empty() ? "linked machine" : pkt.label);
+        Log(Debug::Info) << "[Auth] Keypair linked for " << c.loginName
+                         << " label='" << pkt.label << "'";
+    }
+    catch (const std::exception& e)
+    {
+        Log(Debug::Warning) << "[Auth] addKeypair error: " << e.what();
+    }
+}
+
+// ---------------------------------------------------------------------------
+void MPServer::handleUnlinkKeyRequest(ConnectedClient& c,
+                                       const uint8_t* data, size_t size)
+{
+    if (!c.handshakeComplete || !mPlayerDb || c.dbAccountId <= 0) return;
+
+    PacketUnlinkKeyRequest pkt;
+    if (!pkt.decode(data, size)) return;
+
+    if (pkt.publicKey.empty()) return;
+
+    // Only allow removing a key that belongs to this account.
+    const int64_t owner = mPlayerDb->lookupAccountByKeypair(pkt.publicKey);
+    if (owner != c.dbAccountId)
+    {
+        Log(Debug::Warning) << "[Auth] UnlinkKey: key not owned by " << c.loginName;
+        return;
+    }
+
+    try
+    {
+        // Simple DELETE — use a prepared statement via exec since we don't have
+        // a dedicated removeKeypair method; add one to PlayerDatabase.
+        // For now find and delete by public_key.
+        mPlayerDb->removeKeypair(pkt.publicKey);
+        Log(Debug::Info) << "[Auth] Keypair unlinked for " << c.loginName;
+    }
+    catch (const std::exception& e)
+    {
+        Log(Debug::Warning) << "[Auth] removeKeypair error: " << e.what();
     }
 }
 

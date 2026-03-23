@@ -126,10 +126,10 @@ if (BUILD_MULTIPLAYER)
     add_openmw_dir (mwmp/gui
         ChatWindow LoginDialog PlayerListWindow ServerBrowser
         ServerAddressDialog ServerBrowserDialog
-        AccountDialog CharacterSelectDialog
+        AccountDialog CharacterSelectDialog KeyLinkDialog
     )
     add_openmw_dir (mwmp
-        Main
+        Main Identity
     )
     add_compile_definitions(BUILD_MULTIPLAYER)
 endif()
@@ -211,11 +211,16 @@ target_link_libraries(openmw-lib
 
 if (BUILD_MULTIPLAYER)
     target_link_libraries(openmw-lib
-        GameNetworkingSockets::GameNetworkingSockets
+        GameNetworkingSockets::GameNetworkingSockets_s
     )
     target_include_directories(openmw-lib PRIVATE
         ${GNS_INCLUDE_DIR}
         ${CMAKE_SOURCE_DIR}/extern/httplib   # httplib.h for ServerBrowserDialog
+        ${CMAKE_SOURCE_DIR}/extern/GameNetworkingSockets/src/common  # crypto_25519.h, keypair.h
+        ${CMAKE_SOURCE_DIR}/extern/GameNetworkingSockets/src/public  # tier0/*, minbase/*
+    )
+    target_compile_definitions(openmw-lib PRIVATE
+        VALVE_CRYPTO_ENABLE_25519   # needed to expose CCrypto::GenerateSigningKeyPair etc.
     )
 endif()
 

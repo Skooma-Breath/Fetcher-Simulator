@@ -20,6 +20,7 @@ namespace mwmp
         std::string playerName;
         std::string passwordHash;         // SHA-256(password), hex string
         bool        isRegistration = false; // true → create account, false → login
+        std::string publicKey;             // base64 Ed25519 public key; non-empty = try keypair auth
 
         struct PluginEntry
         {
@@ -37,9 +38,11 @@ namespace mwmp
             ws.writeString(playerName);
             ws.writeString(passwordHash);
             ws.write(isRegistration);
+            ws.writeString(publicKey);
 
-            auto count = static_cast<uint32_t>(plugins.size());
-            ws.write(count);
+            // Plugin list — not yet populated by the client, but must be
+            // symmetric with unpack() so the server can read the count (0).
+            ws.write(static_cast<uint32_t>(plugins.size()));
             for (const auto& p : plugins)
             {
                 ws.writeString(p.filename);
@@ -53,6 +56,7 @@ namespace mwmp
             playerName     = rs.readString();
             passwordHash   = rs.readString();
             rs.read(isRegistration);
+            publicKey      = rs.readString();
 
             uint32_t count = 0;
             rs.read(count);
@@ -278,6 +282,93 @@ namespace mwmp
             classData  = rs.readString();
             characterName = rs.readString();
         }
+    };
+
+    // -----------------------------------------------------------------------
+    // PacketChallenge — server sends a 32-byte random nonce to the client
+    // when the client presents a public key in its PacketHandshake.
+    // The client must sign this nonce with the matching private key.
+    // -----------------------------------------------------------------------
+    class PacketChallenge : public BasePacket
+    {
+    public:
+        uint8_t nonce[32] = {};
+
+        PacketChallenge() : BasePacket(PacketType::Challenge) {}
+
+    protected:
+        void pack(WriteStream& ws) override
+        {
+            for (int i = 0; i < 32; ++i) ws.write(nonce[i]);
+        }
+        void unpack(ReadStream& rs) override
+        {
+            for (int i = 0; i < 32; ++i) rs.read(nonce[i]);
+        }
+    };
+
+    // -----------------------------------------------------------------------
+    // PacketChallengeResponse — client signs the challenge nonce and returns
+    // the 64-byte Ed25519 signature.
+    // -----------------------------------------------------------------------
+    class PacketChallengeResponse : public BasePacket
+    {
+    public:
+        uint8_t signature[64] = {};
+
+        PacketChallengeResponse() : BasePacket(PacketType::ChallengeResponse) {}
+
+    protected:
+        void pack(WriteStream& ws) override
+        {
+            for (int i = 0; i < 64; ++i) ws.write(signature[i]);
+        }
+        void unpack(ReadStream& rs) override
+        {
+            for (int i = 0; i < 64; ++i) rs.read(signature[i]);
+        }
+    };
+
+    // -----------------------------------------------------------------------
+    // PacketLinkKeyRequest — client sends its public key to the server after
+    // a successful password authentication, requesting the key be stored so
+    // future logins from this machine can skip the password.
+    // -----------------------------------------------------------------------
+    class PacketLinkKeyRequest : public BasePacket
+    {
+    public:
+        std::string publicKey; ///< base64-encoded Ed25519 public key (32 bytes)
+        std::string label;     ///< human-readable machine label e.g. "home PC"
+
+        PacketLinkKeyRequest() : BasePacket(PacketType::LinkKeyRequest) {}
+
+    protected:
+        void pack(WriteStream& ws) override
+        {
+            ws.writeString(publicKey);
+            ws.writeString(label);
+        }
+        void unpack(ReadStream& rs) override
+        {
+            publicKey = rs.readString();
+            label     = rs.readString();
+        }
+    };
+
+    // -----------------------------------------------------------------------
+    // PacketUnlinkKeyRequest — client requests removal of a public key from
+    // the server (e.g. to revoke a lost or compromised machine).
+    // -----------------------------------------------------------------------
+    class PacketUnlinkKeyRequest : public BasePacket
+    {
+    public:
+        std::string publicKey; ///< base64-encoded public key to remove
+
+        PacketUnlinkKeyRequest() : BasePacket(PacketType::UnlinkKeyRequest) {}
+
+    protected:
+        void pack(WriteStream& ws) override  { ws.writeString(publicKey); }
+        void unpack(ReadStream& rs) override { publicKey = rs.readString(); }
     };
 
     // -----------------------------------------------------------------------
