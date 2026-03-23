@@ -32,6 +32,8 @@ namespace mwmp
         ChallengeResponse   = 201, // Client → server: 64-byte Ed25519 signature of challenge nonce
         LinkKeyRequest      = 202, // Client → server: register a public key to this account
         UnlinkKeyRequest    = 203, // Client → server: remove a registered public key
+        DeleteCharRequest   = 204, // Client → server: delete a character slot
+        DeleteCharResponse  = 205, // Server → client: deletion result (ok / error)
 
         // --- Player ---
         PlayerBaseInfo      = 10,

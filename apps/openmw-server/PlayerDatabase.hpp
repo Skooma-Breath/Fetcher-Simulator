@@ -118,6 +118,10 @@ namespace mwmp
         /// Update last_seen timestamp.
         void touch(int64_t characterId);
 
+        /// Delete a character slot by (accountId, charName).
+        /// Returns true if a row was actually deleted, false if not found.
+        bool deleteCharacter(int64_t accountId, std::string_view charName);
+
         /// Lightweight summary used to build PacketCharacterList.
         struct CharacterSummary
         {

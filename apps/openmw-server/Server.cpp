@@ -413,6 +413,7 @@ void MPServer::onClientMessage(ConnectedClient& client,
         && type != PacketType::PlayerCharGen
         && type != PacketType::LinkKeyRequest    // allowed during charselect flow
         && type != PacketType::UnlinkKeyRequest  // allowed during charselect flow
+        && type != PacketType::DeleteCharRequest  // allowed during charselect flow
         && type != PacketType::Handshake)
     {
         Log(Debug::Verbose) << "[Server] Pre-charselect packet type=" << (int)type
@@ -427,6 +428,7 @@ void MPServer::onClientMessage(ConnectedClient& client,
         case PacketType::ChallengeResponse:handleChallengeResponse(client, data, size); break;
         case PacketType::LinkKeyRequest:   handleLinkKeyRequest(client, data, size);    break;
         case PacketType::UnlinkKeyRequest: handleUnlinkKeyRequest(client, data, size);  break;
+        case PacketType::DeleteCharRequest:handleDeleteCharRequest(client, data, size);  break;
         case PacketType::PlayerCharGen:    handlePlayerCharGen(client, data, size);      break;
         case PacketType::PlayerBaseInfo:   handlePlayerBaseInfo(client, data, size);     break;
         case PacketType::PlayerPosition:   handlePlayerPosition(client, data, size);     break;
@@ -1304,6 +1306,54 @@ void MPServer::handleUnlinkKeyRequest(ConnectedClient& c,
     {
         Log(Debug::Warning) << "[Auth] removeKeypair error: " << e.what();
     }
+}
+
+
+// ---------------------------------------------------------------------------
+void MPServer::handleDeleteCharRequest(ConnectedClient& c,
+                                        const uint8_t* data, size_t size)
+{
+    if (!c.handshakeComplete || c.charSelectComplete || !mPlayerDb || c.dbAccountId <= 0)
+        return;
+
+    PacketDeleteCharRequest pkt;
+    if (!pkt.decode(data, size) || pkt.charName.empty()) return;
+
+    // Refuse to delete a character that is live in another session.
+    for (const auto& [conn, other] : mClients)
+    {
+        if (&other == &c) continue;
+        if (other.handshakeComplete && other.charSelectComplete
+            && other.dbAccountId == c.dbAccountId
+            && other.name == pkt.charName)
+        {
+            PacketDeleteCharResponse rsp;
+            rsp.success  = false;
+            rsp.charName = pkt.charName;
+            rsp.error    = "'" + pkt.charName + "' is currently in-world in another session.";
+            sendTo(c.conn, rsp.encode());
+            return;
+        }
+    }
+
+    PacketDeleteCharResponse rsp;
+    rsp.charName = pkt.charName;
+    try
+    {
+        rsp.success = mPlayerDb->deleteCharacter(c.dbAccountId, pkt.charName);
+        if (!rsp.success)
+            rsp.error = "Character '" + pkt.charName + "' not found on this account.";
+        else
+            Log(Debug::Info) << "[Server] Deleted character '" << pkt.charName
+                             << "' for " << c.loginName;
+    }
+    catch (const std::exception& e)
+    {
+        rsp.success = false;
+        rsp.error   = "Server error during deletion.";
+        Log(Debug::Warning) << "[Server] deleteCharacter error: " << e.what();
+    }
+    sendTo(c.conn, rsp.encode());
 }
 
 } // namespace mwmp

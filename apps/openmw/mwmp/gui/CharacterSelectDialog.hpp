@@ -80,6 +80,7 @@ namespace mwmp
         void onNewCharNameConfirm  (MyGUI::Widget* sender);
         void onNewCharNameKeyPress (MyGUI::Widget* sender, MyGUI::KeyCode key, MyGUI::Char ch);
         void onCharCancelClicked   (MyGUI::Widget* sender);
+        void onDeleteCharClicked   (MyGUI::Widget* sender);
         void onKeyLinkClicked      (MyGUI::Widget* sender);
 
         // ── Shared helpers ────────────────────────────────────────────────
@@ -116,6 +117,7 @@ namespace mwmp
         MyGUI::Button*  mEnterBtn           = nullptr;
         MyGUI::Button*  mNewCharBtn         = nullptr;
         MyGUI::Button*  mCharCancelBtn      = nullptr;
+        MyGUI::Button*  mDeleteCharBtn      = nullptr;
 
         // ── Sub-dialogs ───────────────────────────────────────────────────
         std::unique_ptr<KeyLinkDialog> mKeyLinkDialog;
@@ -127,6 +129,8 @@ namespace mwmp
         uint16_t    mPort   = 25565;
 
         std::vector<CharacterEntry> mCharacters;
+        bool        mDeletePending = false; ///< true = next delete click confirms
+        std::string mDeletePendingName;     ///< name awaiting confirmation
     };
 
 } // namespace mwmp

@@ -24,6 +24,7 @@
               NewCharNameEdit   EditBox
               NewCharNameConfirm Button
             KeyLinkButton     Button   - "Link Machine" or "Machine Linked ✓"
+            DeleteCharButton  Button   - "Delete" / "Confirm Delete"
             CharCancelButton  Button
             NewCharButton     Button
             EnterWorldButton  Button
@@ -126,13 +127,17 @@
             <Property key="Caption"         value="#{Interface:Cancel}"/>
             <Property key="ExpandDirection" value="Right"/>
         </Widget>
+        <Widget type="Button" skin="MW_Button"
+                position="100 292 100 24" name="DeleteCharButton" align="Left Bottom">
+            <Property key="Caption" value="Delete"/>
+        </Widget>
         <Widget type="AutoSizedButton" skin="MW_Button"
-                position="170 292 116 24" name="NewCharButton" align="HCenter Bottom">
+                position="204 292 110 24" name="NewCharButton" align="HCenter Bottom">
             <Property key="Caption"         value="New Character"/>
             <Property key="ExpandDirection" value="Right"/>
         </Widget>
         <Widget type="AutoSizedButton" skin="MW_Button"
-                position="336 292 96 24" name="EnterWorldButton" align="Right Bottom">
+                position="322 292 100 24" name="EnterWorldButton" align="Right Bottom">
             <Property key="Caption"         value="Enter World"/>
             <Property key="ExpandDirection" value="Left"/>
         </Widget>

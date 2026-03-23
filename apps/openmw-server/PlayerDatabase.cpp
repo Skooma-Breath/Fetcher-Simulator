@@ -371,6 +371,18 @@ void PlayerDatabase::touch(int64_t characterId)
     sqlite3_finalize(s);
 }
 
+bool PlayerDatabase::deleteCharacter(int64_t accountId, std::string_view charName)
+{
+    sqlite3_stmt* s = prepare(
+        "DELETE FROM characters WHERE account_id=?1 AND name=?2");
+    sqlite3_bind_int64(s,  1, accountId);
+    sqlite3_bind_text (s,  2, charName.data(), static_cast<int>(charName.size()), SQLITE_TRANSIENT);
+    checkSqlite(sqlite3_step(s), mDb, "deleteCharacter");
+    int changes = sqlite3_changes(mDb);
+    sqlite3_finalize(s);
+    return changes > 0;
+}
+
 int64_t PlayerDatabase::addKeypair(int64_t accountId,
                                     std::string_view publicKey,
                                     std::string_view label)

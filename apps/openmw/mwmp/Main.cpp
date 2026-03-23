@@ -373,7 +373,20 @@ void Main::registerProtocolHandlers()
             Log(Debug::Warning) << "[MP] CharacterSelect rejected: " << mCharSelectError;
         });
 
-    // --- Character data — arrives after client sends PacketCharacterSelect ---
+    
+    // --- Delete character response ---
+    proto.registerHandler(PacketType::DeleteCharResponse,
+        [this](const uint8_t* data, size_t size)
+        {
+            PacketDeleteCharResponse rsp;
+            if (!rsp.decode(data, size)) return;
+            mDeleteCharResponse = rsp;
+            mDeleteCharResponseReady = true;
+            Log(Debug::Info) << "[MP] DeleteCharResponse: success=" << rsp.success
+                             << " char='" << rsp.charName << "'"
+                             << (rsp.success ? "" : " error=" + rsp.error);
+        });
+// --- Character data — arrives after client sends PacketCharacterSelect ---
     proto.registerHandler(PacketType::CharacterData,
         [this](const uint8_t* data, size_t size)
         {

@@ -5,6 +5,7 @@
 #include <memory>
 #include <string>
 #include <vector>
+#include <components/openmw-mp/Packets/System/PacketHandshake.hpp>
 
 namespace mwmp
 {
@@ -71,6 +72,9 @@ namespace mwmp
         static void        setStaticKeysDir(const std::filesystem::path& dir);
         const std::string& getCharSelectError()      const { return mCharSelectError; }
         void               clearCharSelectError()          { mCharSelectError.clear(); }
+        bool               isDeleteCharResponseReady() const { return mDeleteCharResponseReady; }
+        const PacketDeleteCharResponse& getDeleteCharResponse() const { return mDeleteCharResponse; }
+        void               clearDeleteCharResponse()  { mDeleteCharResponseReady = false; }
         const std::string& getSpawnCell()            const { return mSpawnCell; }
         const std::string& getCharacterName()        const { return mCharacterName; }
         float              getSpawnX()    const { return mSpawnPos[0]; }
@@ -125,6 +129,8 @@ namespace mwmp
         std::string mCharacterName;       ///< selected character slot name (may differ from login name)
         bool        mCharacterDataReady   = false;
         std::string mCharSelectError;
+        bool                     mDeleteCharResponseReady = false;
+        PacketDeleteCharResponse mDeleteCharResponse;
         bool        mIsLinked             = false; ///< true if this server knows our keypair
         std::string mLocalPublicKey;               ///< base64 public key for current server
         std::vector<CharacterEntry> mCharacterList;

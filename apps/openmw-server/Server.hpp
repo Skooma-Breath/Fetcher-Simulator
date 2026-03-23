@@ -143,6 +143,7 @@ private:
     void handleChallengeResponse  (ConnectedClient& c, const uint8_t* data, size_t size);
     void handleLinkKeyRequest     (ConnectedClient& c, const uint8_t* data, size_t size);
     void handleUnlinkKeyRequest   (ConnectedClient& c, const uint8_t* data, size_t size);
+    void handleDeleteCharRequest  (ConnectedClient& c, const uint8_t* data, size_t size);
     void handlePlayerCharGen    (ConnectedClient& c, const uint8_t* data, size_t size);
     void handlePlayerBaseInfo   (ConnectedClient& c, const uint8_t* data, size_t size);
     void handlePlayerPosition   (ConnectedClient& c, const uint8_t* data, size_t size);

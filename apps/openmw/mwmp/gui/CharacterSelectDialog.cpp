@@ -2,6 +2,7 @@
 
 #include <MyGUI_InputManager.h>
 
+#include <algorithm>
 #include <components/debug/debuglog.hpp>
 
 #include "../../mwbase/environment.hpp"
@@ -59,6 +60,7 @@ CharacterSelectDialog::CharacterSelectDialog()
     getWidget(mEnterBtn,           "EnterWorldButton");
     getWidget(mNewCharBtn,         "NewCharButton");
     getWidget(mCharCancelBtn,      "CharCancelButton");
+    getWidget(mDeleteCharBtn,      "DeleteCharButton");
 
     mEnterBtn->eventMouseButtonClick  +=
         MyGUI::newDelegate(this, &CharacterSelectDialog::onEnterWorldClicked);
@@ -70,6 +72,8 @@ CharacterSelectDialog::CharacterSelectDialog()
         MyGUI::newDelegate(this, &CharacterSelectDialog::onNewCharNameKeyPress);
     mCharCancelBtn->eventMouseButtonClick +=
         MyGUI::newDelegate(this, &CharacterSelectDialog::onCharCancelClicked);
+    mDeleteCharBtn->eventMouseButtonClick +=
+        MyGUI::newDelegate(this, &CharacterSelectDialog::onDeleteCharClicked);
     mKeyLinkBtn->eventMouseButtonClick +=
         MyGUI::newDelegate(this, &CharacterSelectDialog::onKeyLinkClicked);
 }
@@ -129,6 +133,7 @@ void CharacterSelectDialog::showLoginPanel()
     mKeyLinkBtn->setVisible(false);
     mEnterBtn->setVisible(false);
     mNewCharBtn->setVisible(false);
+    mDeleteCharBtn->setVisible(false);
     mCharCancelBtn->setVisible(false);
 
     setLoginStatus("");
@@ -158,6 +163,7 @@ void CharacterSelectDialog::showCharPanel(bool resetNamingRow)
     mEnterBtn->setVisible(true);
     mNewCharBtn->setVisible(true);
     mCharCancelBtn->setVisible(true);
+    mDeleteCharBtn->setVisible(true);
 
     if (resetNamingRow)
     {
@@ -166,6 +172,9 @@ void CharacterSelectDialog::showCharPanel(bool resetNamingRow)
         mState = State::CharSelect;
     }
 
+    mDeletePending = false;
+    mDeletePendingName.clear();
+    mDeleteCharBtn->setCaption("Delete");
     updateKeyLinkButton();
     setCharStatus("");
     setCharPanelBusy(false);
@@ -207,6 +216,7 @@ void CharacterSelectDialog::setCharPanelBusy(bool busy)
     mKeyLinkBtn->setEnabled(!busy);
     mNewCharNameConfirm->setEnabled(!busy);
     mNewCharNameEdit->setEnabled(!busy);
+    mDeleteCharBtn->setEnabled(!busy);
 }
 
 // ---------------------------------------------------------------------------
@@ -369,6 +379,40 @@ void CharacterSelectDialog::onCharCancelClicked(MyGUI::Widget*)
     mState = State::Login;
 }
 
+void CharacterSelectDialog::onDeleteCharClicked(MyGUI::Widget*)
+{
+    if (mState != State::CharSelect && mState != State::Naming) return;
+    if (!Main::isInitialised()) return;
+
+    const size_t sel = mList->getIndexSelected();
+    if (sel == MyGUI::ITEM_NONE || sel >= mCharacters.size()) return;
+
+    const std::string& charName = mCharacters[sel].name;
+
+    if (!mDeletePending || mDeletePendingName != charName)
+    {
+        // First click — arm confirmation
+        mDeletePending     = true;
+        mDeletePendingName = charName;
+        mDeleteCharBtn->setCaption("Confirm Delete");
+        setCharStatus("Delete '" + charName + "'? Click Confirm Delete to proceed.");
+        return;
+    }
+
+    // Second click — send the request
+    mDeletePending = false;
+    mDeletePendingName.clear();
+    mDeleteCharBtn->setCaption("Delete");
+
+    PacketDeleteCharRequest pkt;
+    pkt.charName = charName;
+    Main::get().getNetworking().sendReliable(pkt.encode());
+
+    setCharPanelBusy(true);
+    setCharStatus("Deleting '" + charName + "'...");
+    mState = State::WaitingForData;
+}
+
 void CharacterSelectDialog::onKeyLinkClicked(MyGUI::Widget*)
 {
     if (mState != State::CharSelect) return;
@@ -477,7 +521,34 @@ void CharacterSelectDialog::onFrame(float dt)
         if (!Main::isInitialised()) { showLoginPanel(); return; }
         Main& mp = Main::get();
 
-        const std::string& err = mp.getCharSelectError();
+        // Poll for delete-character response (state is WaitingForData during delete).
+        if (mp.isDeleteCharResponseReady())
+        {
+            const auto& rsp = mp.getDeleteCharResponse();
+            mp.clearDeleteCharResponse();
+            mState = State::CharSelect;
+            setCharPanelBusy(false);
+            mEnterBtn->setEnabled(!mCharacters.empty());
+            mNewCharBtn->setEnabled(true);
+            if (rsp.success)
+            {
+                // Remove the deleted entry from local list and repopulate.
+                mCharacters.erase(
+                    std::remove_if(mCharacters.begin(), mCharacters.end(),
+                        [&](const CharacterEntry& c){ return c.name == rsp.charName; }),
+                    mCharacters.end());
+                populate(mCharacters);
+                setCharStatus("Character '" + rsp.charName + "' deleted.");
+            }
+            else
+            {
+                setCharStatus(rsp.error.empty()
+                    ? "Delete failed." : rsp.error);
+            }
+            return;
+        }
+
+                const std::string& err = mp.getCharSelectError();
         if (!err.empty())
         {
             setCharStatus(err);

@@ -372,6 +372,50 @@ namespace mwmp
     };
 
     // -----------------------------------------------------------------------
+    // PacketDeleteCharRequest — client requests deletion of one of its characters.
+    // Allowed only after charSelectComplete=false (i.e. still in the char-select
+    // screen, before entering the world).
+    // -----------------------------------------------------------------------
+    class PacketDeleteCharRequest : public BasePacket
+    {
+    public:
+        std::string charName; ///< name of the character to delete
+
+        PacketDeleteCharRequest() : BasePacket(PacketType::DeleteCharRequest) {}
+
+    protected:
+        void pack(WriteStream& ws) override  { ws.writeString(charName); }
+        void unpack(ReadStream& rs) override { charName = rs.readString(); }
+    };
+
+    // -----------------------------------------------------------------------
+    // PacketDeleteCharResponse — server confirms or rejects the deletion.
+    // -----------------------------------------------------------------------
+    class PacketDeleteCharResponse : public BasePacket
+    {
+    public:
+        bool        success  = false;
+        std::string charName; ///< echoed back so client knows which deletion completed
+        std::string error;    ///< human-readable reason on failure
+
+        PacketDeleteCharResponse() : BasePacket(PacketType::DeleteCharResponse) {}
+
+    protected:
+        void pack(WriteStream& ws) override
+        {
+            ws.write(static_cast<uint8_t>(success ? 1 : 0));
+            ws.writeString(charName);
+            ws.writeString(error);
+        }
+        void unpack(ReadStream& rs) override
+        {
+            uint8_t s = 0; rs.read(s); success = (s != 0);
+            charName = rs.readString();
+            error    = rs.readString();
+        }
+    };
+
+    // -----------------------------------------------------------------------
     // Disconnect — either side sends this before closing the connection.
     // -----------------------------------------------------------------------
     class PacketDisconnect : public BasePacket
