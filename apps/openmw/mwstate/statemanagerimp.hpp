@@ -58,6 +58,7 @@ namespace MWState
         void endGame();
 
         void resumeGame() override;
+        void returnToMainMenu() override;
 
         void deleteGame(const MWState::Character* character, const MWState::Slot* slot) override;
         ///< Delete a saved game slot from this character. If all save slots are deleted, the character will be deleted

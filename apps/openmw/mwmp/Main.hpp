@@ -89,6 +89,10 @@ namespace mwmp
         /// Called by CharacterSelectDialog to arm the chargen-completion watcher.
         void               startWatchingCharGen()          { mCharGenWatching = true; }
         bool               isNetworkDisconnected()  const;
+        // Returns true while a GNS connection is alive (in-lobby or in-world)
+        static bool        isConnected();
+        // Gracefully disconnect; safe to call from any thread context
+        void               disconnect(const std::string& reason = "Client disconnect");
 
         // Restored chargen data — populated from PacketCharacterData after character selection
         const std::string& getRestoredRace()      const { return mRestoredRace; }
@@ -140,7 +144,8 @@ namespace mwmp
         float       mSpawnRot[3] = {0.f, 0.f, 0.f};
         std::string mPasswordHash;
         bool        mIsRegistration = false;
-        bool        mUseKeypair     = true;
+        bool        mUseKeypair          = true;
+        bool        mUnexpectedDisconnect = false; ///< set by onDisconnected when world was ready; polled on main thread
         std::string mHost;
         uint16_t    mPort           = 25565;
         std::string mRejectReason;

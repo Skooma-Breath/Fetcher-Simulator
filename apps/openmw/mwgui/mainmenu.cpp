@@ -160,6 +160,16 @@ namespace MWGui
         MWBase::Environment::get().getStateManager()->newGame();
     }
 
+#ifdef BUILD_MULTIPLAYER
+    void MainMenu::onMainMenuConfirmed()
+    {
+        // Disconnect from the server, then tear down the game world and push the main menu.
+        if (mwmp::Main::isInitialised())
+            mwmp::Main::get().disconnect("User returned to main menu");
+        MWBase::Environment::get().getStateManager()->returnToMainMenu();
+    }
+#endif
+
     void MainMenu::onExitConfirmed()
     {
         MWBase::Environment::get().getStateManager()->requestQuit();
@@ -173,6 +183,16 @@ namespace MWGui
         winMgr->playSound(ESM::RefId::stringRefId("Menu Click"));
         if (name == "return")
             winMgr->removeGuiMode(GM_MainMenu);
+#ifdef BUILD_MULTIPLAYER
+        else if (name == "mainmenu")
+        {
+            ConfirmationDialog* dialog = winMgr->getConfirmationDialog();
+            dialog->askForConfirmation("#{OMWEngine:ReturnToMainMenuConfirmation}");
+            dialog->eventOkClicked.clear();
+            dialog->eventOkClicked += MyGUI::newDelegate(this, &MainMenu::onMainMenuConfirmed);
+            dialog->eventCancelClicked.clear();
+        }
+#endif
         else if (name == "credits")
             winMgr->playVideo("mw_credits.bik", true);
         else if (name == "exitgame")
@@ -351,7 +371,13 @@ namespace MWGui
         std::vector<std::string> buttons;
 
         if (state == MWBase::StateManager::State_Running)
+        {
             buttons.emplace_back("return");
+#ifdef BUILD_MULTIPLAYER
+            if (mwmp::Main::isConnected())
+                buttons.emplace_back("mainmenu");
+#endif
+        }
 
         buttons.emplace_back("newgame");
 
@@ -378,7 +404,7 @@ namespace MWGui
         buttons.emplace_back("exitgame");
 
         // Create new buttons if needed
-        for (std::string_view id : { "return", "newgame", "savegame", "loadgame",
+        for (std::string_view id : { "return", "mainmenu", "newgame", "savegame", "loadgame",
                                         "directconnect", "serverbrowser",
                                         "options", "credits", "exitgame" })
         {

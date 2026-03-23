@@ -28,6 +28,7 @@
 
 #include <components/openmw-mp/Packets/Player/PacketPlayerCharGen.hpp>
 #include "../mwbase/environment.hpp"
+#include "../mwbase/statemanager.hpp"
 #include "../mwbase/mechanicsmanager.hpp"
 #include "../mwbase/world.hpp"
 #include "../mwworld/player.hpp"
@@ -154,6 +155,16 @@ void Main::frame(float dt)
 
     mClient->update();
 
+    // Handle unexpected server disconnect — return player to main menu.
+    if (mUnexpectedDisconnect)
+    {
+        mUnexpectedDisconnect = false;
+        mCharGenWatching = false;
+        Log(Debug::Warning) << "[MP] Unexpected disconnect — returning to main menu";
+        MWBase::Environment::get().getStateManager()->returnToMainMenu();
+        return;
+    }
+
     if (!mClient->isConnected()) return;
 
     mChatWindow->update(dt);
@@ -270,6 +281,11 @@ void Main::onConnected()
 void Main::onDisconnected()
 {
     Log(Debug::Warning) << "[MP] Disconnected from server";
+    // If we were already in-world, request a main-menu return on the next frame.
+    // Do NOT touch engine state here — this fires inside mClient->update() and
+    // must remain engine-API-free to stay thread-safe.
+    if (mWorldReady)
+        mUnexpectedDisconnect = true;
     mWorldReady         = false;
     mCharacterDataReady = false;
     mCharSelectError.clear();
@@ -277,7 +293,6 @@ void Main::onDisconnected()
     mCharacterList.clear();
     mIsLinked       = false;
     mLocalPublicKey.clear();
-    // Phase 3: show reconnect dialog
 }
 
 // ---------------------------------------------------------------------------
@@ -291,6 +306,20 @@ void Main::setStaticKeysDir(const std::filesystem::path& dir)
 bool Main::isNetworkDisconnected() const
 {
     return mClient->getState() == ConnectionState::Disconnected;
+}
+
+// ---------------------------------------------------------------------------
+/*static*/
+bool Main::isConnected()
+{
+    return sInstance && sInstance->mClient && sInstance->mClient->isConnected();
+}
+
+// ---------------------------------------------------------------------------
+void Main::disconnect(const std::string& reason)
+{
+    if (mClient && mClient->isConnected())
+        mClient->disconnect(reason);
 }
 
 // ---------------------------------------------------------------------------

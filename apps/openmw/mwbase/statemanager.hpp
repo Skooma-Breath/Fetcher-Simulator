@@ -56,6 +56,10 @@ namespace MWBase
 
         virtual void resumeGame() = 0;
 
+        /// Tear down the current game session and return to the main menu.
+        /// Safe to call from the engine frame loop.
+        virtual void returnToMainMenu() = 0;
+
         virtual void deleteGame(const MWState::Character* character, const MWState::Slot* slot) = 0;
 
         virtual void saveGame(std::string_view description, const MWState::Slot* slot = nullptr) = 0;

@@ -208,6 +208,12 @@ void MWState::StateManager::resumeGame()
     MWBase::Environment::get().getLuaManager()->gameLoaded();
 }
 
+void MWState::StateManager::returnToMainMenu()
+{
+    cleanup(true);
+    MWBase::Environment::get().getWindowManager()->pushGuiMode(MWGui::GM_MainMenu);
+}
+
 void MWState::StateManager::saveGame(std::string_view description, const Slot* slot)
 {
     MWBase::Environment::get().getLuaManager()->applyDelayedActions();

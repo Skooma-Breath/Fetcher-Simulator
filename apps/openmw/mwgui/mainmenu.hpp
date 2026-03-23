@@ -77,6 +77,7 @@ namespace MWGui
 
         void onButtonClicked(MyGUI::Widget* sender);
         void onNewGameConfirmed();
+        void onMainMenuConfirmed();
         void onExitConfirmed();
 
         void showBackground(bool show);

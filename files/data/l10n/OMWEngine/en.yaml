@@ -27,6 +27,7 @@ LoadingRequiresOldVersionError: |-
     Load and save this file using {version} to upgrade it.
 NewGameConfirmation: "Do you want to start a new game and lose the current one?"
 QuitGameConfirmation: "Quit the game?"
+ReturnToMainMenuConfirmation: "Return to the main menu? You will be disconnected from the server."
 SaveGameDenied: "The game cannot be saved right now."
 SavingInProgress: "Saving..."
 ScreenshotFailed: "Failed to save screenshot"
