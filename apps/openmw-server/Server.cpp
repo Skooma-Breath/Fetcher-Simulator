@@ -736,7 +736,7 @@ void MPServer::handleCharacterSelect(ConnectedClient& c, const uint8_t* data, si
                     if (existingConn != c.conn
                         && existingClient.charSelectComplete
                         && existingClient.loginName == c.loginName
-                        && existingClient.name == sel.charName)
+                        && existingClient.slotName == sel.charName)
                     {
                         PacketCharacterSelectError err;
                         err.reason = "'" + sel.charName + "' is already in use by another session.";
@@ -800,13 +800,20 @@ void MPServer::handleCharacterSelect(ConnectedClient& c, const uint8_t* data, si
     sendTo(c.conn, cdPkt.encode());
     c.charSelectComplete = true;
 
-    // Update the display name to the character slot name now that it's known.
-    // c.name was set to the login username at handshake time; Lua scripts and
-    // server logs should use the character name from here on.
+    // Update the display name now that the character slot is known.
+    // slotName is the permanent DB key; name/player.name use nickname if set.
     if (!cdPkt.characterName.empty())
     {
-        c.name        = cdPkt.characterName;
-        c.player.name = cdPkt.characterName;
+        c.slotName = cdPkt.characterName;
+        // Load nickname from the DB record (empty string if never set).
+        if (mPlayerDb)
+        {
+            auto rec = mPlayerDb->lookupCharacter(c.dbAccountId, cdPkt.characterName);
+            if (rec) c.nickname = rec->nickname;
+        }
+        const std::string displayName = c.nickname.empty() ? c.slotName : c.nickname;
+        c.name        = displayName;
+        c.player.name = displayName;
     }
 
     // Late-join catch-up: send state of all in-world players to the new joiner.
@@ -899,8 +906,15 @@ void MPServer::handlePlayerBaseInfo(ConnectedClient& c, const uint8_t* data, siz
     pkt.setPlayer(&c.player);
     if (!pkt.decode(data, size)) return;
 
-    // Broadcast to everyone else so they can render this player
-    broadcastToAll(std::vector<uint8_t>(data, data + size), c.conn);
+    // Stamp the server-authoritative display name (nickname if set, else character
+    // name) before rebroadcasting.  The client sends its raw character name in its
+    // own forceFullSync, but other clients must always see the canonical c.name.
+    // This also keeps c.player.name in sync so the late-join catch-up loop
+    // (which re-encodes from existingClient.player) sends the right name too.
+    c.player.name = c.name;
+
+    // Re-encode with the corrected name so all receivers get the nickname.
+    broadcastToAll(pkt.encode(), c.conn);
 }
 
 // ---------------------------------------------------------------------------
@@ -1054,6 +1068,13 @@ void MPServer::handleChatMessage(ConnectedClient& c, const uint8_t* data, size_t
     pkt.setPlayer(&c.player);
     if (!pkt.decode(data, size)) return;
 
+    // The client encodes its local player name into the packet, which may be
+    // the slot name (before a nickname is set) rather than the current display
+    // name. Re-assert the server-authoritative name so the relay uses the
+    // nickname if one has been set, and to prevent the decode from corrupting
+    // c.player.name for subsequent operations.
+    c.player.name = c.name;
+
     Log(Debug::Info) << "[Server] Chat [" << c.name << "] "
                      << "(server time " << mWorld.gameHour << "h "
                      << "day=" << mWorld.day << " mo=" << mWorld.month
@@ -1068,7 +1089,7 @@ void MPServer::handleChatMessage(ConnectedClient& c, const uint8_t* data, size_t
                            pkt.message);
 
     if (relay)
-        broadcastToAll(std::vector<uint8_t>(data, data + size));
+        broadcastToAll(pkt.encode());  // re-encoded with authoritative name
 }
 
 // ---------------------------------------------------------------------------
@@ -1100,6 +1121,33 @@ ConnectedClient* MPServer::findClientByGuid(uint32_t guid)
         if (client.guid == guid)
             return &client;
     return nullptr;
+}
+
+// ---------------------------------------------------------------------------
+void MPServer::setPlayerNickname(uint32_t guid, const std::string& nickname)
+{
+    ConnectedClient* c = findClientByGuid(guid);
+    if (!c || !c->charSelectComplete) return;
+
+    // Clamp to 32 chars to prevent abuse
+    const std::string nick = nickname.substr(0, 32);
+
+    c->nickname = nick;
+    const std::string displayName = nick.empty() ? c->slotName : nick;
+    c->name        = displayName;
+    c->player.name = displayName;
+
+    // Persist to DB
+    if (mPlayerDb && c->dbCharacterId != 0)
+        mPlayerDb->setNickname(c->dbCharacterId, nick);
+
+    // Broadcast updated base info so all clients update their nameplate
+    PacketPlayerBaseInfo pkt;
+    pkt.setPlayer(&c->player);
+    broadcastToAll(pkt.encode());
+
+    Log(Debug::Info) << "[Server] " << c->slotName
+                     << " nickname set to '" << displayName << "'";
 }
 
 int MPServer::getPlayerCount() const
@@ -1325,7 +1373,7 @@ void MPServer::handleDeleteCharRequest(ConnectedClient& c,
         if (&other == &c) continue;
         if (other.handshakeComplete && other.charSelectComplete
             && other.dbAccountId == c.dbAccountId
-            && other.name == pkt.charName)
+            && other.slotName == pkt.charName)
         {
             PacketDeleteCharResponse rsp;
             rsp.success  = false;

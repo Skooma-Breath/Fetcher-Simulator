@@ -95,7 +95,7 @@ function OnPlayerSendMessage(player, msg)
     -- ── !help ──────────────────────────────────────────────────────────
     if msg == "!help" then
         player:sendMessage(
-            "Commands:  !who  !time  !uptime"
+            "Commands:  !who  !time  !uptime  !nick <n>  !nick off"
             .. (isAdmin(player) and "  !kick <name>  !settime <hour>" or "")
             .. "  !login <password>"
         )
@@ -170,7 +170,32 @@ function OnPlayerSendMessage(player, msg)
         end
         return false
 
-    -- ── unknown ! command ──────────────────────────────────────────────
+    -- ── !nick <n> / !nick off ──────────────────────────────────────────────
+    elseif msg:sub(1, 5) == "!nick" then
+        local arg = msg:sub(7)  -- everything after "!nick " (empty if bare "!nick")
+        if msg == "!nick off" then
+            -- Clear nickname — revert to slot name
+            player:setNickname("")
+            player:sendMessage("Nickname cleared.")
+            mp.log("[core] " .. player.name .. " cleared nickname")
+        elseif #arg == 0 then
+            -- "!nick" alone or "!nick " with no text — show current
+            local current = player:getNickname()
+            if current == "" then
+                player:sendMessage("No nickname set.  Usage: !nick <name> | !nick off")
+            else
+                player:sendMessage("Your nickname is: " .. current)
+            end
+        elseif #arg > 24 then
+            player:sendMessage("Nickname too long (max 24 characters).")
+        else
+            player:setNickname(arg)
+            player:sendMessage("Nickname set to: " .. arg)
+            mp.log("[core] " .. player.name .. " set nickname to '" .. arg .. "'")
+        end
+        return false
+
+    -- ── unknown ! command ──────────────────────────────────────────────────
     elseif msg:sub(1, 1) == "!" then
         player:sendMessage("Unknown command.  Type !help for a list.")
         return false

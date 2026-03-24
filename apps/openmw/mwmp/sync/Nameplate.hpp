@@ -6,6 +6,7 @@
 #include <osg/ref_ptr>
 #include <osg/AutoTransform>
 #include <osg/Group>
+namespace osgText { class Text; }
 
 namespace mwmp
 {
@@ -28,6 +29,9 @@ namespace mwmp
         Nameplate(osg::Group* parentNode, const std::string& name);
         ~Nameplate();
 
+        // Update the displayed text in-place (no node rebuild needed).
+        void updateName(const std::string& name);
+
         // Non-copyable / non-movable
         Nameplate(const Nameplate&)            = delete;
         Nameplate& operator=(const Nameplate&) = delete;
@@ -35,6 +39,7 @@ namespace mwmp
     private:
         osg::Group*                       mParentNode;
         osg::ref_ptr<osg::AutoTransform>  mLabelNode;
+        osg::ref_ptr<osgText::Text>       mText;
     };
 
 } // namespace mwmp

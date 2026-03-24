@@ -67,7 +67,8 @@ namespace mwmp
         : mParentNode(parentNode)
     {
         // --- text node -------------------------------------------------------
-        osg::ref_ptr<osgText::Text> text = new osgText::Text;
+        mText = new osgText::Text;
+        osg::ref_ptr<osgText::Text> text = mText;
 
         text->setText(name, osgText::String::ENCODING_UTF8);
         text->setCharacterSize(CHAR_SIZE);
@@ -113,6 +114,13 @@ namespace mwmp
         mParentNode->addChild(mLabelNode);
 
         Log(Debug::Verbose) << "[MP] Nameplate created for '" << name << "'";
+    }
+
+    // -----------------------------------------------------------------------
+    void Nameplate::updateName(const std::string& name)
+    {
+        if (mText)
+            mText->setText(name, osgText::String::ENCODING_UTF8);
     }
 
     // -----------------------------------------------------------------------

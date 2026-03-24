@@ -511,7 +511,6 @@ void Main::registerProtocolHandlers()
             PacketPlayerBaseInfo pkt;
             pkt.setPlayer(&tmp);
             if (!pkt.decode(data, size)) return;
-            if (tmp.guid == mPlayerSync->localPlayer().guid) return;
 
             if (tmp.guid == 0)
             {
@@ -520,11 +519,25 @@ void Main::registerProtocolHandlers()
                 return;
             }
 
-            if (!mPlayerList->getPlayer(tmp.guid))
+            // If this is our own guid, update localPlayer name so outgoing
+            // chat and base-info broadcasts use the current nickname.
+            if (tmp.guid == mPlayerSync->localPlayer().guid)
+            {
+                mPlayerSync->localPlayer().name = tmp.name;
+                return;
+            }
+
+            RemotePlayer* rp = mPlayerList->getPlayer(tmp.guid);
+            if (!rp)
             {
                 mPlayerList->addPlayer(tmp.guid, tmp.name);
                 Log(Debug::Info) << "[MP] Player joined: " << tmp.name
                                  << " (guid=" << tmp.guid << ")";
+            }
+            else
+            {
+                // Existing player — may be a nickname update
+                rp->onBaseInfoUpdate(tmp);
             }
         });
 

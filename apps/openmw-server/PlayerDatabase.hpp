@@ -51,6 +51,7 @@ namespace mwmp
         std::string className;
         std::string birthSign;
         std::string classData; ///< CLDTstruct encoded as comma-separated ints
+        std::string nickname;  ///< cosmetic display name; empty = use slot name
     };
 
     class PlayerDatabase
@@ -121,6 +122,10 @@ namespace mwmp
         /// Delete a character slot by (accountId, charName).
         /// Returns true if a row was actually deleted, false if not found.
         bool deleteCharacter(int64_t accountId, std::string_view charName);
+
+        /// Set (or clear) the nickname for a character slot.
+        /// Pass an empty string to revert to the slot name.
+        void setNickname(int64_t characterId, std::string_view nickname);
 
         /// Lightweight summary used to build PacketCharacterList.
         struct CharacterSummary

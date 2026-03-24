@@ -57,6 +57,17 @@ static void scriptPlayer_kick(const ScriptPlayer& p, const std::string& reason)
     if (p.server) p.server->kickClient(p.guid, reason);
 }
 
+static std::string scriptPlayer_getNickname(const ScriptPlayer& p)
+{
+    auto* c = p.server ? p.server->findClientByGuid(p.guid) : nullptr;
+    return c ? c->nickname : "";
+}
+
+static void scriptPlayer_setNickname(const ScriptPlayer& p, const std::string& nick)
+{
+    if (p.server) p.server->setPlayerNickname(p.guid, nick);
+}
+
 static void scriptPlayer_setData(const ScriptPlayer& p,
                                   const std::string& key,
                                   const std::string& value)
@@ -92,8 +103,10 @@ void registerPlayerBindings(sol::state& lua, MPServer* server)
 
         "sendMessage", &scriptPlayer_sendMessage,
         "kick",        &scriptPlayer_kick,
-        "setData",     &scriptPlayer_setData,
-        "getData",     &scriptPlayer_getData
+        "setData",       &scriptPlayer_setData,
+        "getData",       &scriptPlayer_getData,
+        "getNickname",   &scriptPlayer_getNickname,
+        "setNickname",   &scriptPlayer_setNickname
     );
 
     sol::table mp = lua["mp"].get_or_create<sol::table>();

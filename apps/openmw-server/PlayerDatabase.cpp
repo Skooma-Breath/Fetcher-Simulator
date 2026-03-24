@@ -45,7 +45,8 @@ CREATE TABLE IF NOT EXISTS characters (
     class_id    TEXT    NOT NULL DEFAULT '',
     class_name  TEXT    NOT NULL DEFAULT '',
     birth_sign  TEXT    NOT NULL DEFAULT '',
-    class_data  TEXT    NOT NULL DEFAULT ''
+    class_data  TEXT    NOT NULL DEFAULT '',
+    nickname    TEXT    NOT NULL DEFAULT ''
 );
 
 CREATE INDEX IF NOT EXISTS idx_chars_account ON characters(account_id);
@@ -85,6 +86,7 @@ static const char* kMigrations[] = {
     "  label TEXT NOT NULL DEFAULT '',"
     "  created_at INTEGER NOT NULL DEFAULT 0)",
     "CREATE INDEX IF NOT EXISTS idx_keypairs_account ON account_keypairs(account_id)",
+    "ALTER TABLE characters ADD COLUMN nickname TEXT NOT NULL DEFAULT ''",
 };
 
 // ============================================================================
@@ -225,7 +227,7 @@ std::optional<PlayerRecord> PlayerDatabase::lookupCharacter(int64_t accountId,
 {
     sqlite3_stmt* s = prepare(
         "SELECT id, name, cell, pos_x, pos_y, pos_z, rot_x, rot_y, rot_z, is_new,"
-        " race, head_mesh, hair_mesh, is_male, class_id, class_name, birth_sign, class_data"
+        " race, head_mesh, hair_mesh, is_male, class_id, class_name, birth_sign, class_data, nickname"
         " FROM characters WHERE account_id = ?1 AND name = ?2 LIMIT 1");
     sqlite3_bind_int64(s, 1, accountId);
     sqlite3_bind_text (s, 2, charName.data(), static_cast<int>(charName.size()), SQLITE_STATIC);
@@ -256,6 +258,7 @@ std::optional<PlayerRecord> PlayerDatabase::lookupCharacter(int64_t accountId,
     rec.className = col(15);
     rec.birthSign = col(16);
     rec.classData = col(17);
+    rec.nickname  = col(18);
     sqlite3_finalize(s);
     return rec;
 }
@@ -381,6 +384,16 @@ bool PlayerDatabase::deleteCharacter(int64_t accountId, std::string_view charNam
     int changes = sqlite3_changes(mDb);
     sqlite3_finalize(s);
     return changes > 0;
+}
+
+void PlayerDatabase::setNickname(int64_t characterId, std::string_view nickname)
+{
+    sqlite3_stmt* s = prepare(
+        "UPDATE characters SET nickname=?1 WHERE id=?2");
+    sqlite3_bind_text (s, 1, nickname.data(), static_cast<int>(nickname.size()), SQLITE_TRANSIENT);
+    sqlite3_bind_int64(s, 2, characterId);
+    checkSqlite(sqlite3_step(s), mDb, "setNickname");
+    sqlite3_finalize(s);
 }
 
 int64_t PlayerDatabase::addKeypair(int64_t accountId,

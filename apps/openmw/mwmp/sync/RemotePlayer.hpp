@@ -38,6 +38,7 @@ namespace mwmp
         void update(float dt);
 
         // Packet handlers — called by the Networking dispatcher
+        void onBaseInfoUpdate    (const BasePlayer& state);
         void onPositionUpdate    (const BasePlayer& state);
         void onEquipmentUpdate   (const BasePlayer& state);
         void onStatsDynamicUpdate(const BasePlayer& state);

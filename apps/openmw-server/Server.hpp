@@ -36,7 +36,9 @@ struct ConnectedClient
     HSteamNetConnection conn   = k_HSteamNetConnection_Invalid;
     uint32_t            guid   = 0;
     std::string         loginName; ///< account username — used for auth and duplicate-session checks
-    std::string         name;      ///< display name — character name after charselect, login name before
+    std::string         name;      ///< display name — nickname if set, else character slot name
+    std::string         slotName;  ///< permanent character slot name (DB key) — never changes
+    std::string         nickname;  ///< cosmetic override; empty = use slotName
     BasePlayer          player;
     bool                handshakeComplete    = false; ///< auth passed, CharacterList sent
     bool                charSelectComplete   = false; ///< player chose a character, in-world
@@ -85,6 +87,10 @@ public:
 
     // Disconnect a player by guid with a reason string.
     void kickClient(uint32_t guid, const std::string& reason);
+
+    /// Set (or clear with "") the cosmetic nickname for a connected player.
+    /// Updates c.name, c.player.name, persists to DB, broadcasts PacketPlayerBaseInfo.
+    void setPlayerNickname(uint32_t guid, const std::string& nickname);
 
     // World time accessors.
     float getWorldHour() const  { return mWorld.gameHour; }

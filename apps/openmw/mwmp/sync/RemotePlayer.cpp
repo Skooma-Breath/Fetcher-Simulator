@@ -292,6 +292,25 @@ void RemotePlayer::applyInterpolationToWorld()
 }
 
 // ---------------------------------------------------------------------------
+void RemotePlayer::onBaseInfoUpdate(const BasePlayer& state)
+{
+    const std::string& newName = state.name;
+    if (newName == mName) return;  // nothing changed
+
+    Log(Debug::Info) << "[MP] RemotePlayer " << mName
+                     << " renamed to '" << newName << "'";
+    mName = newName;
+
+    // Update the user value used by the hover-tooltip system
+    if (!mNpcPtr.isEmpty())
+        mNpcPtr.getRefData().getBaseNode()->setUserValue("mp_player_name", mName);
+
+    // Update the live nameplate text — no node rebuild needed
+    if (mNameplate)
+        mNameplate->updateName(mName);
+}
+
+// ---------------------------------------------------------------------------
 void RemotePlayer::onPositionUpdate(const BasePlayer& state)
 {
     // NOTE: PacketPlayerPosition does NOT serialise the cell field.
