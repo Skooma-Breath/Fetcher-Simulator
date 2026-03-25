@@ -672,7 +672,17 @@ void CharacterSelectDialog::enterWorld()
             Log(Debug::Warning) << "[MP] Chargen restore error: " << e.what();
         }
 
-        const std::string targetCell = spawnCell.empty() ? "toddtest" : spawnCell;
+        // Race/head/hair are now written into the player NPC record.
+        // Send BaseInfo to all peers so they can build the correct-looking
+        // remote NPC. This must happen here, AFTER setPlayerRace(), not in
+        // the CharacterData handler where the NPC record is still blank.
+        if (Main::isInitialised())
+        {
+            Log(Debug::Info) << "[MP] Returning player restore complete — sending full sync";
+            Main::get().getPlayerSync().forceFullSync();
+        }
+
+        const std::string targetCell = (spawnCell.empty() ? "toddtest" : spawnCell);
         const float sx = Main::get().getSpawnX(),    sy = Main::get().getSpawnY(),
                     sz = Main::get().getSpawnZ();
         const float rx = Main::get().getSpawnRotX(), ry = Main::get().getSpawnRotY(),

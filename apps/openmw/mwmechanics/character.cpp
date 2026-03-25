@@ -23,6 +23,7 @@
 #include <unordered_set>
 
 #include <components/esm/records.hpp>
+#include <components/debug/debuglog.hpp>
 #include <components/misc/mathutil.hpp>
 #include <components/misc/resourcehelpers.hpp>
 #include <components/misc/rng.hpp>
@@ -59,6 +60,13 @@
 
 namespace
 {
+#ifdef BUILD_MULTIPLAYER
+    bool getMpRemoteName(const MWWorld::Ptr& ptr, std::string& outName)
+    {
+        const auto* baseNode = ptr.getRefData().getBaseNode();
+        return baseNode && baseNode->getUserValue("mp_player_name", outName);
+    }
+#endif
 
     std::string_view getBestAttack(const ESM::Weapon* weapon)
     {
@@ -1668,8 +1676,8 @@ namespace MWMechanics
 
                     MWBase::LuaManager::ActorControls* actorControls
                         = MWBase::Environment::get().getLuaManager()->getActorControls(mPtr);
-                    const bool aiInactive
-                        = actorControls->mDisableAI || !MWBase::Environment::get().getMechanicsManager()->isAIActive();
+                    const bool aiInactive = !actorControls || actorControls->mDisableAI 
+                        || !MWBase::Environment::get().getMechanicsManager()->isAIActive();
                     if (mWeaponType != ESM::Weapon::PickProbe && !isRandomAttackAnimation(mCurrentWeapon))
                     {
                         if (weapclass == ESM::WeaponType::Ranged || weapclass == ESM::WeaponType::Thrown)
@@ -1965,6 +1973,7 @@ namespace MWMechanics
     {
         if (!mAnimation)
             return;
+        mMpDebugTimer = std::max(0.f, mMpDebugTimer - duration);
         MWBase::World* world = MWBase::Environment::get().getWorld();
         MWBase::SoundManager* sndMgr = MWBase::Environment::get().getSoundManager();
         const MWWorld::Class& cls = mPtr.getClass();
@@ -2115,6 +2124,17 @@ namespace MWMechanics
                 mAnimation->setUpperBodyYawRadians(mAnimation->getUpperBodyYawRadians() + mAnimation->getHeadYaw() / 2);
 
             speed = cls.getCurrentSpeed(mPtr);
+#ifdef BUILD_MULTIPLAYER
+            // For remote multiplayer actors, override the stats-based speed
+            // with the actual interpolation velocity so animation rate (footstep
+            // cadence) tracks real visual movement instead of template NPC stats.
+            {
+                float mpSpeed = 0.f;
+                auto* bn = mPtr.getRefData().getBaseNode();
+                if (bn && bn->getUserValue("mp_interp_speed", mpSpeed) && mpSpeed > 0.f)
+                    speed = mpSpeed;
+            }
+#endif
             vec.x() *= speed;
             vec.y() *= speed;
 
@@ -2395,15 +2415,60 @@ namespace MWMechanics
                     mAnimation->adjustSpeedMult(mCurrentMovement, turnSpeed);
                 }
             }
-            else if (mMovementState != CharState_None && mAdjustMovementAnimSpeed)
+            else if (mMovementState != CharState_None)
             {
-                // Vanilla caps the played animation speed.
-                const float maxSpeedMult = 10.f;
-                const float speedMult = speed / mMovementAnimSpeed;
-                mAnimation->adjustSpeedMult(mCurrentMovement, std::min(maxSpeedMult, speedMult));
-                // Make sure the actual speed is the "expected" speed even though the animation is slower
-                if (isMovementAnimationControlled())
-                    scale *= std::max(1.f, speedMult / maxSpeedMult);
+                if (mAdjustMovementAnimSpeed)
+                {
+                    // Vanilla caps the played animation speed.
+                    const float maxSpeedMult = 10.f;
+                    const float speedMult = speed / mMovementAnimSpeed;
+                    mAnimation->adjustSpeedMult(mCurrentMovement, std::min(maxSpeedMult, speedMult));
+                    // Make sure the actual speed is the "expected" speed even though the animation is slower
+                    if (isMovementAnimationControlled())
+                        scale *= std::max(1.f, speedMult / maxSpeedMult);
+
+#ifdef BUILD_MULTIPLAYER
+                    std::string mpName;
+                    if (mMpDebugTimer <= 0.f && getMpRemoteName(mPtr, mpName))
+                    {
+                        Log(Debug::Info) << "[MPDBG] AnimRate " << mpName
+                                         << " group=" << mCurrentMovement
+                                         << " speed=" << speed
+                                         << " animVel=" << mMovementAnimSpeed
+                                         << " speedMult=" << speedMult
+                                         << " capped=" << std::min(maxSpeedMult, speedMult)
+                                         << " speedFactor=" << movementSettings.mSpeedFactor
+                                         << " move=(" << movementSettings.mPosition[0] << ","
+                                         << movementSettings.mPosition[1] << ","
+                                         << movementSettings.mPosition[2] << ")"
+                                         << " run=" << isrunning
+                                         << " sneak=" << sneak;
+                        mMpDebugTimer = 0.25f;
+                    }
+#endif
+                }
+#ifdef BUILD_MULTIPLAYER
+                else
+                {
+                    std::string mpName;
+                    if (mMpDebugTimer <= 0.f && getMpRemoteName(mPtr, mpName))
+                    {
+                        Log(Debug::Info) << "[MPDBG] AnimRate " << mpName
+                                         << " group=" << mCurrentMovement
+                                         << " speed=" << speed
+                                         << " animVel=" << mMovementAnimSpeed
+                                         << " speedMult=skipped"
+                                         << " speedFactor=" << movementSettings.mSpeedFactor
+                                         << " move=(" << movementSettings.mPosition[0] << ","
+                                         << movementSettings.mPosition[1] << ","
+                                         << movementSettings.mPosition[2] << ")"
+                                         << " run=" << isrunning
+                                         << " sneak=" << sneak
+                                         << " adjust=false";
+                        mMpDebugTimer = 0.25f;
+                    }
+                }
+#endif
             }
 
             if (!mSkipAnim)

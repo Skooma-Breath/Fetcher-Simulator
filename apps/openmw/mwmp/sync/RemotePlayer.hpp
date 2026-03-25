@@ -37,7 +37,7 @@ namespace mwmp
         // Called every frame; drives interpolation and world placement
         void update(float dt);
 
-        // Packet handlers — called by the Networking dispatcher
+        // --- Phase 6 packet handlers ---
         void onBaseInfoUpdate    (const BasePlayer& state);
         void onPositionUpdate    (const BasePlayer& state);
         void onEquipmentUpdate   (const BasePlayer& state);
@@ -45,6 +45,25 @@ namespace mwmp
         void onCellChange        (const BasePlayer& state);
         void onDeath             (const BasePlayer& state);
         void onResurrect         (const BasePlayer& state);
+
+        // --- Phase 7 pre-work packet handlers ---
+
+        // Unreliable per-frame: apply movement/action flags to CharacterController
+        // so the vanilla animation system drives locomotion automatically.
+        void onAnimFlagsUpdate   (const BasePlayer& state);
+
+        // Reliable one-shot: explicitly trigger an animation group on the remote NPC.
+        void onAnimPlay          (const BasePlayer& state);
+
+        // Reliable: apply melee/ranged hit to target, trigger attack anim.
+        void onAttack            (const BasePlayer& state);
+
+        // Reliable: apply spell effects to target, trigger cast anim.
+        void onCast              (const BasePlayer& state);
+
+        // Cosmetic inventory delta: keep remote NPC ContainerStore consistent
+        // with what they're carrying so equipment renders correctly.
+        void onInventoryUpdate   (const BasePlayer& state);
 
         // Accessors
         uint32_t           getGuid()     const { return mGuid; }
@@ -57,48 +76,63 @@ namespace mwmp
         // ---- world interaction ----
         void trySpawn();
         void despawnFromWorld();
+        void ensureMechanicsRegistration();
         void applyInterpolationToWorld();
+        void applyAnimationStateToActor();
 
         // ---- interpolation ----
         void updateInterpolation(float dt);
 
         // ---- cell helpers ----
-        // quiet=true suppresses the verbose mismatch log (used from
-        // applyInterpolationToWorld to avoid double-logging with trySpawn).
         bool isInSameCellAsLocalPlayer(bool quiet = false) const;
 
         uint32_t    mGuid;
         std::string mName;
-        BasePlayer  mState;       // latest authoritative state from server
+        BasePlayer  mState;
         bool        mIsDead = false;
 
         // --- world NPC ---
         MWWorld::Ptr mNpcPtr;
         bool         mIsSpawned = false;
+        bool         mMechanicsRegistered = false;
         std::unique_ptr<Nameplate> mNameplate;
 
         // --- trySpawn cooldown ---
-        // trySpawn() is called every frame until the NPC is placed.
-        // Rate-limit it so we don't spam log/work every frame while waiting
-        // for the remote player's first CellChange packet or a cell mismatch.
         float mSpawnRetryTimer = 0.f;
-        static constexpr float SPAWN_RETRY_RATE = 0.2f; // seconds between attempts
+        static constexpr float SPAWN_RETRY_RATE = 0.2f;
 
         // --- interpolation state ---
         struct InterpState
         {
-            float cx = 0.f, cy = 0.f, cz = 0.f;    // current rendered pos
-            float tx = 0.f, ty = 0.f, tz = 0.f;    // target pos
-            float crx = 0.f, cry = 0.f, crz = 0.f; // current rot
-            float trx = 0.f, try_ = 0.f, trz = 0.f;// target rot
-            bool  hasTarget       = false;
-            bool  hasSnapped      = false;  // true after first snap
+            float cx = 0.f, cy = 0.f, cz = 0.f;
+            float tx = 0.f, ty = 0.f, tz = 0.f;
+            float crx = 0.f, cry = 0.f, crz = 0.f;
+            float trx = 0.f, try_ = 0.f, trz = 0.f;
+            float yawDelta = 0.f;
+            bool  hasTarget  = false;
+            bool  hasSnapped = false;
         } mInterp;
 
-        // Lerp factors (per second). Position is smoothed to absorb jitter;
-        // rotation is snappier so turns feel responsive.
-        static constexpr float POS_INTERP_SPEED = 10.f;
+        static constexpr float POS_INTERP_SPEED = 15.f;
         static constexpr float ROT_INTERP_SPEED = 20.f;
+
+        // Throttled debug output for comparing interpolation speed to
+        // CharacterController animation-rate decisions on the same remote actor.
+        float mFootstepDebugTimer = 0.f;
+
+        // Per-frame interpolation planar speed (units/s), broadcast to the
+        // CharacterController via a user-value on the NPC base node so that
+        // animation rate tracks actual movement instead of stats-based speed.
+        float mInterpPlanarSpeed = 0.f;
+
+        // --- anim flag state (last applied, for delta suppression) ---
+        AnimFlags mLastAppliedAnimFlags;
+
+        // Edge-detect for MF_JUMP — trigger "jump"/"jump landing" anim once on
+        // rising/falling edge.  We never write mPosition[2] for remote players
+        // because that feeds handleJump() in PhysicsSystem which imparts a real
+        // upward velocity impulse every frame and fights the Z interpolator.
+        bool mWasJumping = false;
     };
 
     // -----------------------------------------------------------------------

@@ -108,17 +108,45 @@ namespace mwmp
     };
 
     // -----------------------------------------------------------------------
-    // Animation flags (matches TES3MP BaseStructs)
+    // Animation flags — movement / action state (unreliable, per-frame)
     // -----------------------------------------------------------------------
     struct AnimFlags
     {
-        uint32_t movementFlags = 0;
-        uint32_t actionFlags   = 0;
-        int8_t   movementType  = 0;
+        uint32_t movementFlags = 0;  // bitmask: Walk|Run|Sneak|Swim|Jump|Fly|Turn etc.
+        uint32_t actionFlags   = 0;  // bitmask: Attack|Cast|Block|WeaponDrawn|SpellReady
+        int8_t   movementType  = 0;  // send path uses -1 for idle, 0=fwd,1=back,2=left,3=right,4=strafe-l,5=strafe-r
+
+        // movementFlags bit constants — must match the encode side in PlayerSync
+        static constexpr uint32_t MF_RUN   = (1u << 0);
+        static constexpr uint32_t MF_SNEAK = (1u << 1);
+        static constexpr uint32_t MF_SWIM  = (1u << 2);
+        static constexpr uint32_t MF_JUMP  = (1u << 3);
+        static constexpr uint32_t MF_FLY   = (1u << 4);
+        static constexpr uint32_t MF_STRAFING = (1u << 5);
+
+        // actionFlags bit constants
+        static constexpr uint32_t AF_WEAPON_DRAWN = (1u << 0);
+        static constexpr uint32_t AF_SPELL_READY  = (1u << 1);
+        static constexpr uint32_t AF_ATTACKING    = (1u << 2);
+        static constexpr uint32_t AF_CASTING      = (1u << 3);
+        static constexpr uint32_t AF_BLOCKING     = (1u << 4);
     };
 
     // -----------------------------------------------------------------------
-    // Attack
+    // One-shot animation play (reliable)
+    // Triggers explicit animations on the remote NPC (death, hit, emote, cast).
+    // -----------------------------------------------------------------------
+    struct AnimPlay
+    {
+        std::string groupName;
+        int         priority  = 0;
+        int         loops     = 0;
+        std::string startKey  = "start";
+        std::string stopKey   = "stop";
+    };
+
+    // -----------------------------------------------------------------------
+    // Melee / ranged / thrown attack (reliable)
     // -----------------------------------------------------------------------
     struct Attack
     {
@@ -131,6 +159,17 @@ namespace mwmp
         bool        knocked = false;
         float       strength = 0.f;
         int         type    = 0;    // 0=melee,1=magic,2=bow,3=throw
+    };
+
+    // -----------------------------------------------------------------------
+    // Spell cast (reliable)
+    // -----------------------------------------------------------------------
+    struct CastSpell
+    {
+        std::string spellId;
+        uint32_t    targetGuid  = 0;    // mp guid of target player (0 = world object)
+        std::string targetRefId;        // refId of world object target
+        bool        success     = false;
     };
 
 } // namespace mwmp

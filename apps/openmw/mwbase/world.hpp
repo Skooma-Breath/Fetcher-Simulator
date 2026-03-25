@@ -319,6 +319,11 @@ namespace MWBase
         virtual void setActorCollisionMode(const MWWorld::Ptr& ptr, bool internal, bool external) = 0;
         virtual bool isActorCollisionEnabled(const MWWorld::Ptr& ptr) = 0;
 
+        /// Set the physics actor's on-ground flag directly.
+        /// Used by multiplayer to drive jump animation state on remote NPCs
+        /// without going through the physics simulation (ported from TES3MP).
+        virtual void setOnGround(const MWWorld::Ptr& ptr, bool onGround) = 0;
+
         virtual bool toggleCollisionMode() = 0;
         ///< Toggle collision mode for player. If disabled player object should ignore
         /// collisions and gravity.

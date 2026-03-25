@@ -198,6 +198,7 @@ namespace MWMechanics
 
         bool mIsMovingBackward{ false };
         osg::Vec2f mSmoothedSpeed;
+        float mMpDebugTimer{ 0.f };
 
         std::string_view getMovementBasedAttackType() const;
 

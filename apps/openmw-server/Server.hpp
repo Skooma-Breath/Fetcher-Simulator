@@ -155,6 +155,11 @@ private:
     void handlePlayerPosition   (ConnectedClient& c, const uint8_t* data, size_t size);
     void handlePlayerCellChange (ConnectedClient& c, const uint8_t* data, size_t size);
     void handlePlayerEquipment  (ConnectedClient& c, const uint8_t* data, size_t size);
+    void handlePlayerAnimFlags  (ConnectedClient& c, const uint8_t* data, size_t size);
+    void handlePlayerAnimPlay   (ConnectedClient& c, const uint8_t* data, size_t size);
+    void handlePlayerAttack     (ConnectedClient& c, const uint8_t* data, size_t size);
+    void handlePlayerCast       (ConnectedClient& c, const uint8_t* data, size_t size);
+    void handlePlayerInventory  (ConnectedClient& c, const uint8_t* data, size_t size);
     void handlePlayerStatsDynamic(ConnectedClient& c, const uint8_t* data, size_t size);
     void handleChatMessage      (ConnectedClient& c, const uint8_t* data, size_t size);
     void handleDoorState        (ConnectedClient& c, const uint8_t* data, size_t size);

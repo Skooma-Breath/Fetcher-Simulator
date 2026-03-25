@@ -20,7 +20,16 @@
 #include "../../mwworld/class.hpp"
 #include "../../mwworld/esmstore.hpp"
 #include <components/sceneutil/positionattitudetransform.hpp>
+#include "../../mwmechanics/movement.hpp"
 #include "../../mwmechanics/creaturestats.hpp"
+#include "../../mwmechanics/aisetting.hpp"
+#include "../../mwmechanics/character.hpp"
+#include "../../mwrender/animation.hpp"
+#include "../../mwrender/blendmask.hpp"
+#include "../../mwrender/animationpriority.hpp"
+#include "../../mwworld/containerstore.hpp"
+#include "../../mwworld/esmstore.hpp"
+#include <components/esm3/loadnpc.hpp>
 
 namespace mwmp
 {
@@ -37,6 +46,7 @@ namespace {
         while (diff < -PI) diff += TWO_PI;
         return current + diff * alpha;
     }
+
 }
 
 // ---------------------------------------------------------------------------
@@ -45,6 +55,8 @@ RemotePlayer::RemotePlayer(uint32_t guid, const std::string& name)
 {
     mState.guid = guid;
     mState.name = name;
+    mState.animFlags.movementType = -1;
+    mLastAppliedAnimFlags.movementType = -1;
     Log(Debug::Info) << "[MP] RemotePlayer created: " << name << " (guid=" << guid << ")";
 }
 
@@ -62,6 +74,24 @@ void RemotePlayer::update(float dt)
     if (mIsSpawned)
     {
         applyInterpolationToWorld();
+        ensureMechanicsRegistration();
+        applyAnimationStateToActor();
+
+        // Suppress AI every frame — MechanicsManager::add() re-activates
+        // the AI sequence, so a one-time clear() at spawn time isn't enough.
+        // Without this the remote NPC will greet, wander, enter combat, etc.
+        // Matches TES3MP DedicatedPlayer::update() suppression block exactly.
+        if (mMechanicsRegistered)
+        {
+            MWMechanics::CreatureStats& cs = mNpcPtr.getClass().getCreatureStats(mNpcPtr);
+            cs.getAiSequence().stopCombat();
+            cs.setAttacked(false);
+            cs.setAlarmed(false);
+            cs.setAiSetting(MWMechanics::AiSetting::Alarm, 0);
+            cs.setAiSetting(MWMechanics::AiSetting::Fight, 0);
+            cs.setAiSetting(MWMechanics::AiSetting::Flee,  0);
+            cs.setAiSetting(MWMechanics::AiSetting::Hello, 0);
+        }
 
         // The OSG base node is attached to the scene graph one frame after
         // placeObject() returns, so the first trySpawn() attempt always misses
@@ -87,6 +117,114 @@ void RemotePlayer::update(float dt)
             trySpawn();
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+void RemotePlayer::ensureMechanicsRegistration()
+{
+    if (!mIsSpawned || mNpcPtr.isEmpty() || mMechanicsRegistered)
+        return;
+
+    MWBase::World* world = MWBase::Environment::get().getWorld();
+    if (!world)
+        return;
+
+    auto* baseNode = mNpcPtr.getRefData().getBaseNode();
+    if (!baseNode)
+        return;
+
+    baseNode->setUserValue("mp_player_name", mName);
+
+    MWRender::Animation* anim = world->getAnimation(mNpcPtr);
+    if (!anim)
+        return;
+
+    MWBase::Environment::get().getMechanicsManager()->add(mNpcPtr);
+    mMechanicsRegistered = true;
+
+    Log(Debug::Info) << "[MP] RemotePlayer " << mName
+                     << ": registered with MechanicsManager (deferred)";
+}
+
+// ---------------------------------------------------------------------------
+void RemotePlayer::applyAnimationStateToActor()
+{
+    if (!mIsSpawned || mNpcPtr.isEmpty())
+        return;
+
+    const AnimFlags& f = mState.animFlags;
+
+    MWMechanics::Movement& mov
+        = mNpcPtr.getClass().getMovementSettings(mNpcPtr);
+
+    switch (f.movementType)
+    {
+        case 0:  mov.mPosition[1] =  1.f; mov.mPosition[0] =  0.f; break; // forward
+        case 1:  mov.mPosition[1] = -1.f; mov.mPosition[0] =  0.f; break; // backward
+        case 2:  mov.mPosition[0] = -1.f; mov.mPosition[1] =  0.f; break; // strafe left
+        case 3:  mov.mPosition[0] =  1.f; mov.mPosition[1] =  0.f; break; // strafe right
+        case 4:  mov.mPosition[0] = -1.f; mov.mPosition[1] =  0.f; break; // strafe-l (alias)
+        case 5:  mov.mPosition[0] =  1.f; mov.mPosition[1] =  0.f; break; // strafe-r (alias)
+        default: mov.mPosition[0] =  0.f; mov.mPosition[1] =  0.f; break; // idle / standing
+    }
+
+    // Pass the interpolated yaw delta so standing turn animations trigger
+    mov.mRotation[0] = 0.f;
+    mov.mRotation[1] = 0.f;
+    if (f.movementType < 0 && std::abs(mInterp.yawDelta) > 0.005f)
+        mov.mRotation[2] = mInterp.yawDelta;
+    else
+        mov.mRotation[2] = 0.f;
+
+    // Jump animation — ported from TES3MP's DedicatedPlayer::setAnimFlags().
+    //
+    // The CharacterController's jump path requires the physics actor to report
+    // !onGround so the "in the air" branch fires (character.cpp ~2229).
+    // Actors::update() forces internal collision on every NPC each frame, so
+    // the physics sim runs and traceDown() sets onGround=true every frame as
+    // long as moveObject() keeps the NPC at ground level.  We break that by
+    // calling world->setOnGround(false) on the rising edge and (true) on the
+    // falling edge — directly writing Actor::mOnGround via the new World API.
+    //
+    // Flag_ForceJump on CreatureStats is the vanilla signal that makes the CC
+    // set mPosition[2] = onground ? 1 : 0 each frame (character.cpp ~2028).
+    // With onGround forced false that resolves to 0, so PhysicsSystem::handleJump()
+    // never fires — no spurious fatigue drain, no upward impulse.  The CC enters
+    // JumpState_InAir purely from the !onGround branch, exactly as locally.
+    const bool isJumping = (f.movementFlags & AnimFlags::MF_JUMP) != 0;
+    if (isJumping != mWasJumping)
+    {
+        MWBase::Environment::get().getWorld()->setOnGround(mNpcPtr, !isJumping);
+        mWasJumping = isJumping;
+    }
+    // The CharacterController only selects strafe animation groups (WalkLeft,
+    // RunRight, etc.) when mIsStrafing == true — it completely ignores mPosition[0]
+    // otherwise and falls back to WalkForward/WalkBack.  The sender's MF_STRAFING
+    // flag only fires for drawn-weapon strafing (CC line ~2099), so unarmed
+    // sideways walking (movementType 2/3/4/5) arrives with MF_STRAFING=0 and
+    // the remote NPC plays walkforward instead.  Always force mIsStrafing when
+    // the movementType tells us the actor is moving sideways.
+    const bool isSideways = (f.movementType == 2 || f.movementType == 3
+                          || f.movementType == 4 || f.movementType == 5);
+    mov.mIsStrafing = isSideways || (f.movementFlags & AnimFlags::MF_STRAFING) != 0;
+
+
+    MWMechanics::CreatureStats& stats = mNpcPtr.getClass().getCreatureStats(mNpcPtr);
+    stats.setMovementFlag(MWMechanics::CreatureStats::Flag_ForceJump, isJumping);
+    stats.setMovementFlag(MWMechanics::CreatureStats::Flag_ForceMoveJump, isJumping);
+    stats.setMovementFlag(MWMechanics::CreatureStats::Flag_Run,
+        (f.movementFlags & AnimFlags::MF_RUN) != 0);
+    stats.setMovementFlag(MWMechanics::CreatureStats::Flag_Sneak,
+        (f.movementFlags & AnimFlags::MF_SNEAK) != 0);
+    stats.setAttackingOrSpell(
+        (f.actionFlags & AnimFlags::AF_ATTACKING) != 0 || mState.attack.pressed);
+
+    MWMechanics::DrawState ds = MWMechanics::DrawState::Nothing;
+    if (f.actionFlags & AnimFlags::AF_WEAPON_DRAWN)
+        ds = MWMechanics::DrawState::Weapon;
+    else if (f.actionFlags & AnimFlags::AF_SPELL_READY)
+        ds = MWMechanics::DrawState::Spell;
+    stats.setDrawState(ds);
 }
 
 // ---------------------------------------------------------------------------
@@ -157,10 +295,55 @@ void RemotePlayer::trySpawn()
 
     try
     {
-        // Use the "Player" NPC record as the base template.
-        // This gives us a human-shaped actor with all the right animations.
+        // Build a unique NPC record for this remote player so they display their
+        // own race/face/hair rather than the local player's appearance.
+        // Strategy (mirrors TES3MP RecordHelper::createRecord / overrideRecord):
+        //   1. Clone the "player" ESM::NPC record as an animation-compatible base.
+        //   2. Overwrite appearance fields with what we received in PacketPlayerBaseInfo.
+        //   3. Assign a deterministic unique ID based on this player's GUID so the
+        //      record survives the lifetime of this RemotePlayer and is stable across
+        //      re-spawns within the same session.
+        //   4. Insert/update the record in ESMStore via overrideRecord(), then spawn.
+        const std::string npcRecordId = "mp_remote_" + std::to_string(mGuid);
+
+        // Copy the player template for animation skeleton/flags/class defaults
+        const ESM::NPC* playerTemplate
+            = world->getStore().get<ESM::NPC>().find(ESM::RefId::stringRefId("player"));
+        ESM::NPC npcRecord = *playerTemplate;
+
+        // Assign unique ID and override appearance from received base info
+        npcRecord.mId   = ESM::RefId::stringRefId(npcRecordId);
+        npcRecord.mName = mState.name;
+
+        // Race / head / hair — only override if the server sent non-empty strings.
+        // An empty string here means PacketPlayerBaseInfo hasn't arrived yet;
+        // in that case fall back to the player template so we at least get a
+        // valid NPC shape while waiting for the packet.
+        if (!mState.race.empty())
+            npcRecord.mRace = ESM::RefId::deserializeText(mState.race);
+        if (!mState.headMesh.empty())
+            npcRecord.mHead = ESM::RefId::deserializeText(mState.headMesh);
+        if (!mState.hairMesh.empty())
+            npcRecord.mHair = ESM::RefId::deserializeText(mState.hairMesh);
+
+        // Sex flag — ESM::NPC::Female == 0x01; clear for male, set for female
+        if (mState.isMale)
+            npcRecord.mFlags &= ~static_cast<unsigned char>(ESM::NPC::Female);
+        else
+            npcRecord.mFlags |=  static_cast<unsigned char>(ESM::NPC::Female);
+
+        // Insert (or update if already exists from a previous spawn) the record
+        world->getStore().overrideRecord(npcRecord);
+
+        Log(Debug::Info) << "[MP] RemotePlayer " << mName
+                         << ": NPC record '" << npcRecordId << "'"
+                         << " race='" << mState.race << "'"
+                         << " head='" << mState.headMesh << "'"
+                         << " hair='" << mState.hairMesh << "'"
+                         << " male=" << mState.isMale;
+
         MWWorld::ManualRef ref(world->getStore(),
-                               ESM::RefId::stringRefId("player"), 1);
+                               ESM::RefId::stringRefId(npcRecordId), 1);
 
         mNpcPtr = world->placeObject(ref.getPtr(), cell, pos);
 
@@ -175,10 +358,11 @@ void RemotePlayer::trySpawn()
         mNpcPtr.getClass().getCreatureStats(mNpcPtr).getAiSequence().clear();
 
         // Disable collision so remote players don't physically block the local player
-        world->setActorCollisionMode(mNpcPtr, false, false);
+        //world->setActorCollisionMode(mNpcPtr, false, false);
 
 
         mIsSpawned = true;
+        mMechanicsRegistered = false;
 
         // Attach world-space nameplate above the NPC's head.
         // Also tag the base node with the player's network name so that
@@ -224,8 +408,10 @@ void RemotePlayer::despawnFromWorld()
     }
 
     mNpcPtr          = MWWorld::Ptr();
-    mIsSpawned       = false;
-    mSpawnRetryTimer = SPAWN_RETRY_RATE; // attempt immediately on next update
+    mIsSpawned           = false;
+    mMechanicsRegistered = false;
+    mWasJumping          = false; // reset so re-spawn doesn't skip the first jump edge
+    mSpawnRetryTimer     = SPAWN_RETRY_RATE; // attempt immediately on next update
     Log(Debug::Info) << "[MP] RemotePlayer " << mName << ": despawned from world";
 }
 
@@ -270,6 +456,12 @@ void RemotePlayer::applyInterpolationToWorld()
         if (!mNpcPtr.getRefData().getBaseNode())
             return;
 
+        // Broadcast interpolation speed to CharacterController via user-value.
+        // This lets the animation rate track the actual visual speed rather
+        // than the stats-based speed which doesn't account for network interp.
+        if (auto* bn = mNpcPtr.getRefData().getBaseNode())
+            bn->setUserValue("mp_interp_speed", mInterpPlanarSpeed);
+
         MWWorld::Ptr moved = world->moveObject(mNpcPtr, newPos, /*movePhysics=*/true,
                                                /*moveToActive=*/true);
         // moveObject returns an updated Ptr when the cell changes; keep it if valid
@@ -294,20 +486,45 @@ void RemotePlayer::applyInterpolationToWorld()
 // ---------------------------------------------------------------------------
 void RemotePlayer::onBaseInfoUpdate(const BasePlayer& state)
 {
-    const std::string& newName = state.name;
-    if (newName == mName) return;  // nothing changed
+    // Track whether any appearance field changed (requires re-spawn to rebuild NPC record)
+    const bool appearanceChanged =
+        (mState.race     != state.race)     ||
+        (mState.headMesh != state.headMesh) ||
+        (mState.hairMesh != state.hairMesh) ||
+        (mState.isMale   != state.isMale);
+
+    const bool nameChanged = (mState.name != state.name);
+
+    if (!nameChanged && !appearanceChanged)
+        return;
+
+    // Always copy all base-info fields
+    mState.name     = state.name;
+    mState.race     = state.race;
+    mState.headMesh = state.headMesh;
+    mState.hairMesh = state.hairMesh;
+    mState.isMale   = state.isMale;
+    mState.scale    = state.scale;
+    mName           = state.name;
 
     Log(Debug::Info) << "[MP] RemotePlayer " << mName
-                     << " renamed to '" << newName << "'";
-    mName = newName;
+                     << ": base info updated";
 
-    // Update the user value used by the hover-tooltip system
     if (!mNpcPtr.isEmpty())
-        mNpcPtr.getRefData().getBaseNode()->setUserValue("mp_player_name", mName);
+        if (auto* bn = mNpcPtr.getRefData().getBaseNode())
+            bn->setUserValue("mp_player_name", mName);
 
-    // Update the live nameplate text — no node rebuild needed
     if (mNameplate)
         mNameplate->updateName(mName);
+
+    // If appearance changed on an already-spawned actor we must despawn and
+    // re-spawn so trySpawn() rebuilds the NPC record with the new race/head/hair.
+    if (appearanceChanged && mIsSpawned)
+    {
+        Log(Debug::Info) << "[MP] RemotePlayer " << mName
+                         << ": appearance changed — re-spawning for NPC record rebuild";
+        despawnFromWorld();
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -430,23 +647,270 @@ void RemotePlayer::onResurrect(const BasePlayer& /*state*/)
 }
 
 // ---------------------------------------------------------------------------
+// movementType encoding:
+//   -1=idle  0=fwd  1=back  2=left(strafe)  3=right(strafe)  4=strafe-l  5=strafe-r
+//
+// mPosition[1] = forward/back axis (+1 = forward, -1 = back)
+// mPosition[0] = strafe axis       (+1 = right,   -1 = left)
+// mPosition[2] = jump              ( 1 = jumping,   0 = grounded)
+//
+// Flag_Run / Flag_Sneak on CreatureStats drive CharacterController
+// speed selection — they are independent of mPosition.
+void RemotePlayer::onAnimFlagsUpdate(const BasePlayer& state)
+{
+    const AnimFlags& f = state.animFlags;
+
+    // Delta suppress — skip if nothing changed since last application
+    if (f.movementFlags == mLastAppliedAnimFlags.movementFlags
+        && f.actionFlags  == mLastAppliedAnimFlags.actionFlags
+        && f.movementType == mLastAppliedAnimFlags.movementType)
+        return;
+
+    mLastAppliedAnimFlags = f;
+    mState.animFlags      = f;
+
+    if (mIsSpawned && !mNpcPtr.isEmpty())
+        applyAnimationStateToActor();
+}
+
+// ---------------------------------------------------------------------------
+void RemotePlayer::onAnimPlay(const BasePlayer& state)
+{
+    if (!mIsSpawned || mNpcPtr.isEmpty()) return;
+
+    mState.animPlay = state.animPlay;
+    const AnimPlay& ap = state.animPlay;
+
+    if (ap.groupName.empty()) return;
+
+    MWBase::World* world = MWBase::Environment::get().getWorld();
+    if (!world) return;
+
+    MWRender::Animation* anim = world->getAnimation(mNpcPtr);
+    if (!anim)
+    {
+        Log(Debug::Warning) << "[MP] RemotePlayer " << mName
+                            << ": onAnimPlay — no Animation for NPC";
+        return;
+    }
+
+    anim->play(ap.groupName,
+               MWRender::AnimPriority(ap.priority),
+               MWRender::BlendMask_All,
+               /*autodisable=*/false,
+               /*speedmult=*/1.f,
+               ap.startKey,
+               ap.stopKey,
+               /*startpoint=*/0.f,
+               /*loops=*/static_cast<uint32_t>(std::max(0, ap.loops)));
+
+    Log(Debug::Verbose) << "[MP] RemotePlayer " << mName
+                        << ": onAnimPlay group='" << ap.groupName
+                        << "' priority=" << ap.priority
+                        << " loops=" << ap.loops;
+}
+
+// ---------------------------------------------------------------------------
+void RemotePlayer::onAttack(const BasePlayer& state)
+{
+    if (!mIsSpawned || mNpcPtr.isEmpty()) return;
+
+    mState.attack = state.attack;
+    const Attack& atk = state.attack;
+
+    Log(Debug::Info) << "[MP] RemotePlayer " << mName
+                     << ": onAttack hit=" << atk.hit
+                     << " block=" << atk.block
+                     << " miss=" << atk.miss
+                     << " type=" << atk.type
+                     << " target='" << atk.target << "'"
+                     << " targetMpNum=" << atk.targetMpNum;
+
+    // Tell the CharacterController the actor is attacking so it transitions
+    // into the correct attack animation group on its own.  We set the flag
+    // to match the incoming pressed state so the controller sees both the
+    // press (true) and the release (false) when the two packets arrive.
+    MWMechanics::CreatureStats& stats
+        = mNpcPtr.getClass().getCreatureStats(mNpcPtr);
+    stats.setAttackingOrSpell(atk.pressed);
+
+    // Phase 7E: resolve target Ptr and apply damage via MWMechanics combat.
+}
+
+// ---------------------------------------------------------------------------
+void RemotePlayer::onCast(const BasePlayer& state)
+{
+    if (!mIsSpawned || mNpcPtr.isEmpty()) return;
+
+    mState.castSpell = state.castSpell;
+    const CastSpell& cs = state.castSpell;
+
+    Log(Debug::Info) << "[MP] RemotePlayer " << mName
+                     << ": onCast spellId='" << cs.spellId << "'"
+                     << " success=" << cs.success
+                     << " targetGuid=" << cs.targetGuid;
+
+    // Play the standard spell-cast animation on the caster's NPC.
+    // "spellcast" is the vanilla Morrowind animation group name for this.
+    BasePlayer animState;
+    animState.animPlay.groupName = "spellcast";
+    animState.animPlay.priority  = 5;
+    animState.animPlay.loops     = 0;
+    animState.animPlay.startKey  = "start";
+    animState.animPlay.stopKey   = "stop";
+    onAnimPlay(animState);
+
+    // Phase 7E: resolve target and apply spell effects via MWMechanics.
+}
+
+// ---------------------------------------------------------------------------
+void RemotePlayer::onInventoryUpdate(const BasePlayer& state)
+{
+    if (!mIsSpawned || mNpcPtr.isEmpty()) return;
+
+    mState.inventoryChanges = state.inventoryChanges;
+    const auto& changes = state.inventoryChanges;
+
+    MWWorld::ContainerStore& store
+        = mNpcPtr.getClass().getContainerStore(mNpcPtr);
+
+    using Action = BasePlayer::InventoryChanges::Action;
+
+    switch (changes.action)
+    {
+        case Action::Set:
+            store.clear();
+            for (const auto& item : changes.items)
+                store.add(ESM::RefId::stringRefId(item.refId), item.count);
+            Log(Debug::Verbose) << "[MP] RemotePlayer " << mName
+                                << ": inventory Set ("
+                                << changes.items.size() << " items)";
+            break;
+
+        case Action::Add:
+            for (const auto& item : changes.items)
+                store.add(ESM::RefId::stringRefId(item.refId), item.count);
+            Log(Debug::Verbose) << "[MP] RemotePlayer " << mName
+                                << ": inventory Add ("
+                                << changes.items.size() << " items)";
+            break;
+
+        case Action::Remove:
+            for (const auto& item : changes.items)
+                store.remove(ESM::RefId::stringRefId(item.refId), item.count);
+            Log(Debug::Verbose) << "[MP] RemotePlayer " << mName
+                                << ": inventory Remove ("
+                                << changes.items.size() << " items)";
+            break;
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Linear-interpolate current position/rotation toward target each frame.
 void RemotePlayer::updateInterpolation(float dt)
 {
     if (!mInterp.hasTarget) return;
 
+    const float prevCx = mInterp.cx;
+    const float prevCy = mInterp.cy;
+    const float prevCz = mInterp.cz;
+
     // Position: smooth, slightly laggy — hides network jitter
-    const float posAlpha = std::min(1.f, dt * POS_INTERP_SPEED);
+    // When the authoritative state is idle, increase the catch-up speed so the
+    // remote actor smoothly but rapidly closes the final gap instead of coasting.
+    const bool isAirborne = (mState.animFlags.movementFlags & AnimFlags::MF_JUMP) != 0;
+    const bool isIdleGrounded = (mState.animFlags.movementType < 0) && !isAirborne;
+
+    // Idle catch-up: faster XY convergence when standing still, but NOT during
+    // a jump — the arc is a fast parabola and we don't want to fight it with
+    // an inflated speed multiplier that makes the Z curve feel sluggish.
+    float interpSpeed = POS_INTERP_SPEED;
+    if (isIdleGrounded)
+        interpSpeed *= 2.5f; // 15 * 2.5 = 37.5 u/s snap-to-stop on ground
+
+    const float posAlpha = std::min(1.f, dt * interpSpeed);
     mInterp.cx += (mInterp.tx - mInterp.cx) * posAlpha;
     mInterp.cy += (mInterp.ty - mInterp.cy) * posAlpha;
-    mInterp.cz += (mInterp.tz - mInterp.cz) * posAlpha;
+
+    // Z-axis: fast interpolation for the parabolic jump arc.
+    const float zAlpha = std::min(1.f, dt * 60.f);
+    mInterp.cz += (mInterp.tz - mInterp.cz) * zAlpha;
+
+    // Idle ground snap: quickly close the last few units after movement stops
+    // so the actor doesn't visibly coast to a halt.  Deliberately excluded
+    // when airborne — during a jump the Z delta oscillates through small values
+    // at packet boundaries, and snapping would cause the erratic zStep jitter
+    // seen in logs (e.g. +3.8, -11.6, +8.3 in consecutive frames).
+    if (isIdleGrounded)
+    {
+        const float dx = mInterp.tx - mInterp.cx;
+        const float dy = mInterp.ty - mInterp.cy;
+        const float dz = mInterp.tz - mInterp.cz;
+        if (dx * dx + dy * dy < 25.f) // 5-unit XY radius
+        {
+            mInterp.cx = mInterp.tx;
+            mInterp.cy = mInterp.ty;
+        }
+        if (std::abs(dz) < 3.f)
+            mInterp.cz = mInterp.tz;
+    }
 
     // Rotation: snappier — turns should feel responsive, not lag behind.
     // lerpAngle handles the 0/2π wrap so we always take the short path.
     const float rotAlpha = std::min(1.f, dt * ROT_INTERP_SPEED);
+    const float oldCrz = mInterp.crz;
     mInterp.crx = lerpAngle(mInterp.crx, mInterp.trx,  rotAlpha);
     mInterp.cry = lerpAngle(mInterp.cry, mInterp.try_,  rotAlpha);
-    mInterp.crz = lerpAngle(mInterp.crz, mInterp.trz,  rotAlpha);
+    mInterp.crz = lerpAngle(oldCrz, mInterp.trz,  rotAlpha);
+
+    // Save the wrapped delta for CharacterController's standing turn calculation
+    mInterp.yawDelta = mInterp.crz - oldCrz;
+    while (mInterp.yawDelta > osg::PIf)  mInterp.yawDelta -= osg::PIf * 2.f;
+    while (mInterp.yawDelta < -osg::PIf) mInterp.yawDelta += osg::PIf * 2.f;
+
+    mFootstepDebugTimer = std::max(0.f, mFootstepDebugTimer - dt);
+    const float remDx = mInterp.tx - mInterp.cx;
+    const float remDy = mInterp.ty - mInterp.cy;
+    const float remainingPlanar = std::sqrt(remDx * remDx + remDy * remDy);
+    const float interpStepX = mInterp.cx - prevCx;
+    const float interpStepY = mInterp.cy - prevCy;
+    const float interpStepZ = mInterp.cz - prevCz;
+    const float interpPlanarSpeed = dt > 0.f
+        ? std::sqrt(interpStepX * interpStepX + interpStepY * interpStepY) / dt
+        : 0.f;
+    const float netPlanarSpeed = std::sqrt(
+        mState.velocity.linear[0] * mState.velocity.linear[0]
+        + mState.velocity.linear[1] * mState.velocity.linear[1]);
+
+    // Override the animation cadence using `netPlanarSpeed` from the sender to
+    // eliminate choppy footstep pacing. Only fall back to `interpPlanarSpeed`
+    // when idle (snapping to stop). Cap to 200 so huge spawns don't trigger the 10x cap.
+    if (mState.animFlags.movementType >= 0)
+        mInterpPlanarSpeed = netPlanarSpeed;
+    else
+        mInterpPlanarSpeed = std::min(interpPlanarSpeed, 200.f);
+
+    const bool movingOrSettling = mState.animFlags.movementType >= 0
+        || remainingPlanar > 1.f
+        || std::abs(interpStepZ) > 0.1f;
+    if (movingOrSettling && mFootstepDebugTimer <= 0.f)
+    {
+        Log(Debug::Info) << "[MPDBG] Interp " << mName
+                         << " moveType=" << int(mState.animFlags.movementType)
+                         << " run=" << ((mState.animFlags.movementFlags & AnimFlags::MF_RUN) != 0)
+                         << " sneak=" << ((mState.animFlags.movementFlags & AnimFlags::MF_SNEAK) != 0)
+                         << " netPlanar=" << netPlanarSpeed
+                         << " interpPlanar=" << interpPlanarSpeed
+                         << " remainingPlanar=" << remainingPlanar
+                         << " posAlpha=" << posAlpha
+                         << " zStep=" << interpStepZ
+                         << " jump=" << ((mState.animFlags.movementFlags & AnimFlags::MF_JUMP) != 0);
+        mFootstepDebugTimer = 0.25f;
+    }
+
+    // Extrapolate Z target using last known vertical velocity
+    if (isAirborne && mState.velocity.linear[2] != 0.f)
+        mInterp.tz += mState.velocity.linear[2] * dt;
 }
 
 // ---------------------------------------------------------------------------

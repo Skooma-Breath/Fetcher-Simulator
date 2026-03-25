@@ -15,6 +15,11 @@
 #include <components/openmw-mp/Packets/System/PacketHandshake.hpp>
 #include <components/openmw-mp/Packets/Worldstate/PacketWorldTime.hpp>
 #include <components/openmw-mp/Packets/Object/PacketDoorState.hpp>
+#include <components/openmw-mp/Packets/Player/PacketPlayerAnimFlags.hpp>
+#include <components/openmw-mp/Packets/Player/PacketPlayerAnimPlay.hpp>
+#include <components/openmw-mp/Packets/Player/PacketPlayerAttack.hpp>
+#include <components/openmw-mp/Packets/Player/PacketPlayerCast.hpp>
+#include <components/openmw-mp/Packets/Player/PacketPlayerInventory.hpp>
 
 #include "network/Client.hpp"
 #include "network/Protocol.hpp"
@@ -425,8 +430,8 @@ void Main::registerProtocolHandlers()
             mIsNewCharacter = cd.isNewCharacter;
             mCharacterName  = cd.characterName;
             // Update the sync layer name to the character slot name so
-            // PacketPlayerBaseInfo (sent via forceFullSync below) broadcasts
-            // the correct name to other players. Falls back to login name.
+            // PacketPlayerBaseInfo (sent by forceFullSync in CharacterSelectDialog
+            // after setPlayerRace()) broadcasts the correct name to other players.
             if (!cd.characterName.empty())
                 mPlayerSync->localPlayer().name = cd.characterName;
             mSpawnCell      = cd.spawnCell;
@@ -467,11 +472,12 @@ void Main::registerProtocolHandlers()
                              << " class=" << mRestoredClassName;
 
             mCharacterDataReady = true;
-            // For returning players, push base info immediately so other
-            // clients can render us. New characters must wait until chargen
-            // completes and the watcher fires.
-            if (!cd.isNewCharacter)
-                mPlayerSync->forceFullSync();
+            // NOTE: do NOT call forceFullSync() here for returning players.
+            // At this point world->getPlayerPtr() still has the blank template
+            // NPC record — setPlayerRace() has not been called yet.
+            // CharacterSelectDialog::startReturningPlayer() calls forceFullSync()
+            // *after* setPlayerRace() so the BaseInfo packet carries the real
+            // race/head/hair. New characters use the chargen-complete watcher.
         });
 
     // --- Remote player position ---
@@ -533,12 +539,12 @@ void Main::registerProtocolHandlers()
                 mPlayerList->addPlayer(tmp.guid, tmp.name);
                 Log(Debug::Info) << "[MP] Player joined: " << tmp.name
                                  << " (guid=" << tmp.guid << ")";
+                // Populate appearance on the new RemotePlayer immediately —
+                // addPlayer() only sets the name; race/head/hair live in onBaseInfoUpdate.
+                rp = mPlayerList->getPlayer(tmp.guid);
             }
-            else
-            {
-                // Existing player — may be a nickname update
-                rp->onBaseInfoUpdate(tmp);
-            }
+            // Always apply appearance (covers both new join and live updates)
+            if (rp) rp->onBaseInfoUpdate(tmp);
         });
 
     // --- Remote player equipment ---
@@ -624,6 +630,76 @@ void Main::registerProtocolHandlers()
             if (pkt.authorGuid == mPlayerSync->localPlayer().guid) return;
             for (const auto& d : pkt.doors)
                 mObjectSync->onServerDoorState(d.cellId, d.refId, d.refNum, d.isOpen);
+        });
+
+    // --- Remote player animation flags ---
+    proto.registerHandler(PacketType::PlayerAnimFlags,
+        [this](const uint8_t* data, size_t size)
+        {
+            BasePlayer tmp;
+            PacketPlayerAnimFlags pkt;
+            pkt.setPlayer(&tmp);
+            if (!pkt.decode(data, size)) return;
+            if (tmp.guid == mPlayerSync->localPlayer().guid) return;
+
+            auto* rp = mPlayerList->getPlayer(tmp.guid);
+            if (rp) rp->onAnimFlagsUpdate(tmp);
+        });
+
+    // --- Remote player one-shot animation ---
+    proto.registerHandler(PacketType::PlayerAnimPlay,
+        [this](const uint8_t* data, size_t size)
+        {
+            BasePlayer tmp;
+            PacketPlayerAnimPlay pkt;
+            pkt.setPlayer(&tmp);
+            if (!pkt.decode(data, size)) return;
+            if (tmp.guid == mPlayerSync->localPlayer().guid) return;
+
+            auto* rp = mPlayerList->getPlayer(tmp.guid);
+            if (rp) rp->onAnimPlay(tmp);
+        });
+
+    // --- Remote player attack event ---
+    proto.registerHandler(PacketType::PlayerAttack,
+        [this](const uint8_t* data, size_t size)
+        {
+            BasePlayer tmp;
+            PacketPlayerAttack pkt;
+            pkt.setPlayer(&tmp);
+            if (!pkt.decode(data, size)) return;
+            if (tmp.guid == mPlayerSync->localPlayer().guid) return;
+
+            auto* rp = mPlayerList->getPlayer(tmp.guid);
+            if (rp) rp->onAttack(tmp);
+        });
+
+    // --- Remote player cast event ---
+    proto.registerHandler(PacketType::PlayerCast,
+        [this](const uint8_t* data, size_t size)
+        {
+            BasePlayer tmp;
+            PacketPlayerCast pkt;
+            pkt.setPlayer(&tmp);
+            if (!pkt.decode(data, size)) return;
+            if (tmp.guid == mPlayerSync->localPlayer().guid) return;
+
+            auto* rp = mPlayerList->getPlayer(tmp.guid);
+            if (rp) rp->onCast(tmp);
+        });
+
+    // --- Remote player cosmetic inventory delta ---
+    proto.registerHandler(PacketType::PlayerInventory,
+        [this](const uint8_t* data, size_t size)
+        {
+            BasePlayer tmp;
+            PacketPlayerInventory pkt;
+            pkt.setPlayer(&tmp);
+            if (!pkt.decode(data, size)) return;
+            if (tmp.guid == mPlayerSync->localPlayer().guid) return;
+
+            auto* rp = mPlayerList->getPlayer(tmp.guid);
+            if (rp) rp->onInventoryUpdate(tmp);
         });
 
     Log(Debug::Info) << "[MP] Protocol handlers registered";

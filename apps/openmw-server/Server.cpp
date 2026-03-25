@@ -30,6 +30,11 @@
 #include <components/openmw-mp/Packets/Player/PacketPlayerPosition.hpp>
 #include <components/openmw-mp/Packets/Player/PacketPlayerCellChange.hpp>
 #include <components/openmw-mp/Packets/Player/PacketPlayerEquipment.hpp>
+#include <components/openmw-mp/Packets/Player/PacketPlayerAnimFlags.hpp>
+#include <components/openmw-mp/Packets/Player/PacketPlayerAnimPlay.hpp>
+#include <components/openmw-mp/Packets/Player/PacketPlayerAttack.hpp>
+#include <components/openmw-mp/Packets/Player/PacketPlayerCast.hpp>
+#include <components/openmw-mp/Packets/Player/PacketPlayerInventory.hpp>
 #include <components/openmw-mp/Packets/Player/PacketPlayerStatsDynamic.hpp>
 #include <components/openmw-mp/Packets/Player/PacketChatMessage.hpp>
 #include <components/openmw-mp/Packets/Worldstate/PacketWorldTime.hpp>
@@ -434,6 +439,11 @@ void MPServer::onClientMessage(ConnectedClient& client,
         case PacketType::PlayerPosition:   handlePlayerPosition(client, data, size);     break;
         case PacketType::PlayerCellChange: handlePlayerCellChange(client, data, size);   break;
         case PacketType::PlayerEquipment:  handlePlayerEquipment(client, data, size);    break;
+        case PacketType::PlayerAnimFlags:  handlePlayerAnimFlags(client, data, size);    break;
+        case PacketType::PlayerAnimPlay:   handlePlayerAnimPlay(client, data, size);     break;
+        case PacketType::PlayerAttack:     handlePlayerAttack(client, data, size);       break;
+        case PacketType::PlayerCast:       handlePlayerCast(client, data, size);         break;
+        case PacketType::PlayerInventory:  handlePlayerInventory(client, data, size);    break;
         case PacketType::PlayerStatsDynamic: handlePlayerStatsDynamic(client, data, size); break;
         case PacketType::ChatMessage:      handleChatMessage(client, data, size);        break;
         case PacketType::DoorState:        handleDoorState(client, data, size);          break;
@@ -962,6 +972,51 @@ void MPServer::handlePlayerCellChange(ConnectedClient& c, const uint8_t* data, s
 void MPServer::handlePlayerEquipment(ConnectedClient& c, const uint8_t* data, size_t size)
 {
     PacketPlayerEquipment pkt;
+    pkt.setPlayer(&c.player);
+    if (!pkt.decode(data, size)) return;
+    broadcastToAll(std::vector<uint8_t>(data, data + size), c.conn);
+}
+
+// ---------------------------------------------------------------------------
+void MPServer::handlePlayerAnimFlags(ConnectedClient& c, const uint8_t* data, size_t size)
+{
+    PacketPlayerAnimFlags pkt;
+    pkt.setPlayer(&c.player);
+    if (!pkt.decode(data, size)) return;
+    broadcastToAll(std::vector<uint8_t>(data, data + size), c.conn, /*reliable=*/false);
+}
+
+// ---------------------------------------------------------------------------
+void MPServer::handlePlayerAnimPlay(ConnectedClient& c, const uint8_t* data, size_t size)
+{
+    PacketPlayerAnimPlay pkt;
+    pkt.setPlayer(&c.player);
+    if (!pkt.decode(data, size)) return;
+    broadcastToAll(std::vector<uint8_t>(data, data + size), c.conn);
+}
+
+// ---------------------------------------------------------------------------
+void MPServer::handlePlayerAttack(ConnectedClient& c, const uint8_t* data, size_t size)
+{
+    PacketPlayerAttack pkt;
+    pkt.setPlayer(&c.player);
+    if (!pkt.decode(data, size)) return;
+    broadcastToAll(std::vector<uint8_t>(data, data + size), c.conn);
+}
+
+// ---------------------------------------------------------------------------
+void MPServer::handlePlayerCast(ConnectedClient& c, const uint8_t* data, size_t size)
+{
+    PacketPlayerCast pkt;
+    pkt.setPlayer(&c.player);
+    if (!pkt.decode(data, size)) return;
+    broadcastToAll(std::vector<uint8_t>(data, data + size), c.conn);
+}
+
+// ---------------------------------------------------------------------------
+void MPServer::handlePlayerInventory(ConnectedClient& c, const uint8_t* data, size_t size)
+{
+    PacketPlayerInventory pkt;
     pkt.setPlayer(&c.player);
     if (!pkt.decode(data, size)) return;
     broadcastToAll(std::vector<uint8_t>(data, data + size), c.conn);

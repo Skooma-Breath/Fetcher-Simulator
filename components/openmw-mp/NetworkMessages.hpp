@@ -14,6 +14,8 @@ namespace mwmp
     //   50-89 Actor
     //   90-129 Object
     //   130-159 Worldstate
+    //   150-199 Lua bridge (reserved)
+    //   200+  Auth extensions
     // ---------------------------------------------------------------------------
     enum class PacketType : uint16_t
     {
@@ -42,10 +44,10 @@ namespace mwmp
         PlayerMomentum      = 13,
         PlayerCellChange    = 14,
         PlayerCellState     = 15,  // Batch notify of loaded/unloaded cells
-        PlayerAnimFlags     = 16,
-        PlayerAnimPlay      = 17,
-        PlayerAttack        = 18,
-        PlayerCast          = 19,
+        PlayerAnimFlags     = 16,  // Unreliable, per-frame movement/action state
+        PlayerAnimPlay      = 17,  // Reliable one-shot animation trigger
+        PlayerAttack        = 18,  // Reliable attack event
+        PlayerCast          = 19,  // Reliable spell cast event
         PlayerAttribute     = 20,
         PlayerSkill         = 21,
         PlayerLevel         = 22,
@@ -53,7 +55,7 @@ namespace mwmp
         PlayerDeath         = 24,
         PlayerResurrect     = 25,
         PlayerEquipment     = 26,
-        PlayerInventory     = 27,
+        PlayerInventory     = 27,  // Inventory delta (Add/Remove/Set)
         PlayerItemUse       = 28,
         PlayerSpellbook     = 29,
         PlayerSpellsActive  = 30,
@@ -96,13 +98,13 @@ namespace mwmp
         ObjectActivate      = 90,
         ObjectAnimPlay      = 91,
         ObjectAttach        = 92,
-        ObjectDelete        = 93,
+        ObjectDelete        = 93,  // Remove a placed object by mpNum
         ObjectDialogueChoice= 94,
         ObjectHit           = 95,
         ObjectLock          = 96,
         ObjectMiscellaneous = 97,
-        ObjectMove          = 98,
-        ObjectPlace         = 99,
+        ObjectMove          = 98,  // Move/rotate a placed object
+        ObjectPlace         = 99,  // Place a new world object (server assigns mpNum)
         ObjectRestock       = 100,
         ObjectRotate        = 101,
         ObjectScale         = 102,
@@ -110,7 +112,7 @@ namespace mwmp
         ObjectSpawn         = 104,
         ObjectState         = 105,
         ObjectTrap          = 106,
-        Container           = 107,
+        Container           = 107, // Container inventory sync (Set/Add/Remove)
         DoorState           = 108,
         DoorDestination     = 109,
         ConsoleCommand      = 110,
@@ -131,6 +133,11 @@ namespace mwmp
         ClientScriptSettings= 137,
         CellReset           = 138,
         RecordDynamic       = 139,
+
+        // --- Lua bridge (7C+) ---
+        // IDs 150-199 reserved; exact assignments TBD in Phase 7C/7D.
+        PacketLuaEvent      = 150, // Bidirectional: named event with BinaryData payload
+        PacketLuaStorage    = 151, // Server→client global storage snapshot/delta
     };
 
 } // namespace mwmp

@@ -1591,6 +1591,17 @@ namespace MWWorld
         return physicActor && physicActor->getCollisionMode();
     }
 
+    void World::setOnGround(const MWWorld::Ptr& ptr, bool onGround)
+    {
+        // Directly set the physics actor's on-ground flag so the
+        // CharacterController sees the correct state next frame.
+        // Used by multiplayer to drive remote NPC jump animations
+        // without relying on the physics simulation (ported from TES3MP).
+        MWPhysics::Actor* physicActor = mPhysics->getActor(ptr);
+        if (physicActor)
+            physicActor->setOnGround(onGround);
+    }
+
     bool World::toggleCollisionMode()
     {
         if (mPhysics->toggleCollisionMode())

@@ -1,5 +1,6 @@
 #include "PlayerSync.hpp"
 
+#include <cmath>
 #include <cstring>
 
 #include <components/debug/debuglog.hpp>
@@ -22,6 +23,12 @@
 #include "../../mwmechanics/creaturestats.hpp"
 #include "../../mwworld/inventorystore.hpp"
 #include "../../mwworld/player.hpp"
+#include "../../mwworld/livecellref.hpp"
+#include <components/esm3/loadnpc.hpp>
+#include "../../mwmechanics/movement.hpp"
+#include <components/openmw-mp/Packets/Player/PacketPlayerAnimFlags.hpp>
+#include <components/openmw-mp/Packets/Player/PacketPlayerAttack.hpp>
+#include <components/openmw-mp/Packets/Player/PacketPlayerCast.hpp>
 
 namespace mwmp
 {
@@ -57,6 +64,22 @@ void PlayerSync::forceFullSync()
             mLocal.position.rot[0] = pos.rot[0];
             mLocal.position.rot[1] = pos.rot[1];
             mLocal.position.rot[2] = pos.rot[2];
+
+            // Snapshot velocity (zero for initial full sync)
+            mLocal.velocity.linear[0] = 0.f;
+            mLocal.velocity.linear[1] = 0.f;
+            mLocal.velocity.linear[2] = 0.f;
+
+            // Snapshot appearance — read directly from the player's ESM::NPC record
+            // so remote clients can construct a unique-looking NPC for this player.
+            if (const auto* npcRef = player.get<ESM::NPC>())
+            {
+                const ESM::NPC* npcBase = npcRef->mBase;
+                mLocal.race     = npcBase->mRace.serializeText();
+                mLocal.headMesh = npcBase->mHead.serializeText();
+                mLocal.hairMesh = npcBase->mHair.serializeText();
+                mLocal.isMale   = npcBase->isMale();
+            }
 
             // Snapshot cell
             if (const MWWorld::CellStore* cs = player.getCell())
@@ -115,9 +138,17 @@ void PlayerSync::update(float dt)
     if (mLocal.guid == 0)
         return;
 
-    // --- position / rotation ---
+    // --- position / rotation / velocity ---
     const auto& refData  = player.getRefData();
     const auto& pos      = refData.getPosition();
+
+    if (dt > 0.0001f)
+    {
+        mLocal.velocity.linear[0] = (pos.pos[0] - mLocal.position.pos[0]) / dt;
+        mLocal.velocity.linear[1] = (pos.pos[1] - mLocal.position.pos[1]) / dt;
+        mLocal.velocity.linear[2] = (pos.pos[2] - mLocal.position.pos[2]) / dt;
+    }
+
     mLocal.position.pos[0] = pos.pos[0];
     mLocal.position.pos[1] = pos.pos[1];
     mLocal.position.pos[2] = pos.pos[2];
@@ -149,6 +180,9 @@ void PlayerSync::update(float dt)
 
     tickPosition(dt);
     tickDynamicStats(dt);
+    sendAnimFlags();
+    sendAttack();
+    sendCast();
 
     // --- on-change checks ---
     if (cellChanged())
@@ -234,6 +268,161 @@ void PlayerSync::sendEquipment()
 }
 
 // ---------------------------------------------------------------------------
+// sendAnimFlags — unreliable, per-frame, delta-suppressed.
+//
+// Reads movement vector and CreatureStats flags from the live player Ptr,
+// encodes them into AnimFlags using the MF_* / AF_* constants from
+// BaseStructs.hpp, and sends unreliably at the same cadence as position.
+// No rate-limiting needed — the position timer already throttles the outer
+// update() to 20 Hz and we delta-suppress here as well.
+void PlayerSync::sendAnimFlags()
+{
+    MWBase::World* world = MWBase::Environment::get().getWorld();
+    if (!world) return;
+    MWWorld::Ptr player = world->getPlayerPtr();
+    if (player.isEmpty()) return;
+
+    const MWMechanics::Movement& mov
+        = player.getClass().getMovementSettings(player);
+    const MWMechanics::CreatureStats& stats
+        = player.getClass().getCreatureStats(player);
+
+    AnimFlags f{};
+
+    // movementType: prefer raw local input when it is present, because that
+    // preserves the intended forward/back/strafe direction exactly. Fall back
+    // to real world-space displacement only when input reads idle at this
+    // point in the frame.
+    float fwd = mov.mPosition[1];
+    float side = mov.mPosition[0];
+    if (std::abs(fwd) < 0.1f && std::abs(side) < 0.1f && mHaveLastAnimSample)
+    {
+        const float dx = mLocal.position.pos[0] - mLastAnimSample.pos[0];
+        const float dy = mLocal.position.pos[1] - mLastAnimSample.pos[1];
+
+        // Use the previous sample yaw for this interval. Projecting the whole
+        // displacement against the new yaw can misclassify movement while the
+        // player is turning, which shows up as moonwalking on the remote side.
+        const float yaw = mLastAnimSample.rot[2];
+        const float sinYaw = std::sin(yaw);
+        const float cosYaw = std::cos(yaw);
+
+        // CharacterController converts local movement to world movement with
+        // rotateVec2f(local, -yaw), so the inverse projection here must use
+        // +yaw. Using the wrong sign flips direction classification for some
+        // headings and produces apparent moonwalking remotely.
+        side = dx * cosYaw - dy * sinYaw;
+        fwd = dx * sinYaw + dy * cosYaw;
+    }
+
+    if      (fwd  >  0.1f) f.movementType = 0;  // forward
+    else if (fwd  < -0.1f) f.movementType = 1;  // backward
+    else if (side < -0.1f) f.movementType = 2;  // left
+    else if (side >  0.1f) f.movementType = 3;  // right
+    else                   f.movementType = -1; // idle
+
+    // movementFlags bitmask
+    if (stats.getMovementFlag(MWMechanics::CreatureStats::Flag_Run))
+        f.movementFlags |= AnimFlags::MF_RUN;
+    if (stats.getMovementFlag(MWMechanics::CreatureStats::Flag_Sneak))
+        f.movementFlags |= AnimFlags::MF_SNEAK;
+    // Use getPlayer().getJumping() — set by PhysicsSystem::handleJump() the same
+    // frame the jump impulse fires, before the actor physically leaves the ground.
+    // This matches when the local CharacterController starts the jump animation,
+    // removing the ~50ms delay that came from waiting for !isOnGround().
+    // Fallback: also catch free-falls (walking off a ledge) via !isOnGround(),
+    // but exclude swimming and flying which are non-jump airborne states.
+    const bool jumpingFlag = world->getPlayer().getJumping()
+        || (!world->isOnGround(player) && !world->isSwimming(player) && !world->isFlying(player));
+    if (jumpingFlag)
+        f.movementFlags |= AnimFlags::MF_JUMP;
+
+    if (mov.mIsStrafing)
+        f.movementFlags |= AnimFlags::MF_STRAFING;
+
+    // actionFlags bitmask
+    if (stats.getAttackingOrSpell())
+        f.actionFlags |= AnimFlags::AF_ATTACKING;
+    if (stats.getDrawState() == MWMechanics::DrawState::Weapon)
+        f.actionFlags |= AnimFlags::AF_WEAPON_DRAWN;
+    if (stats.getDrawState() == MWMechanics::DrawState::Spell)
+        f.actionFlags |= AnimFlags::AF_SPELL_READY;
+
+    std::memcpy(mLastAnimSample.pos, mLocal.position.pos, sizeof(mLastAnimSample.pos));
+    std::memcpy(mLastAnimSample.rot, mLocal.position.rot, sizeof(mLastAnimSample.rot));
+    mHaveLastAnimSample = true;
+
+    if (!animFlagsChanged() && f.movementFlags == mLastAnimFlags.movementFlags
+        && f.actionFlags  == mLastAnimFlags.actionFlags
+        && f.movementType == mLastAnimFlags.movementType)
+        return;
+
+    mLastAnimFlags    = f;
+    mLocal.animFlags  = f;
+
+    PacketPlayerAnimFlags pkt;
+    pkt.setPlayer(&mLocal);
+    mClient.sendUnreliable(pkt.encode(mSeqCounter++));
+}
+
+// ---------------------------------------------------------------------------
+// sendAttack — reliable, edge-triggered on pressed→true transition.
+void PlayerSync::sendAttack()
+{
+    MWBase::World* world = MWBase::Environment::get().getWorld();
+    if (!world) return;
+    MWWorld::Ptr player = world->getPlayerPtr();
+    if (player.isEmpty()) return;
+
+    const MWMechanics::CreatureStats& stats
+        = player.getClass().getCreatureStats(player);
+    const bool pressed = stats.getAttackingOrSpell();
+
+    // Only send on the rising edge (button press), not while held
+    if (pressed == mLastAttackPressed) return;
+    mLastAttackPressed = pressed;
+
+    mLocal.attack.pressed = pressed;
+    // target, hit, strength etc. are set by the combat system hooks
+    // (Phase 7E); for now we relay the press/release so the animation fires.
+
+    PacketPlayerAttack pkt;
+    pkt.setPlayer(&mLocal);
+    mClient.sendReliable(pkt.encode(mSeqCounter++));
+}
+
+// ---------------------------------------------------------------------------
+// sendCast — reliable, edge-triggered when a spell fires.
+void PlayerSync::sendCast()
+{
+    MWBase::World* world = MWBase::Environment::get().getWorld();
+    if (!world) return;
+    MWWorld::Ptr player = world->getPlayerPtr();
+    if (player.isEmpty()) return;
+
+    const MWMechanics::CreatureStats& stats
+        = player.getClass().getCreatureStats(player);
+
+    // Use the same AttackingOrSpell flag — the CharacterController sets it
+    // for both melee and spell actions.  We distinguish via attack.type:
+    // type 1 = magic (see BaseStructs Attack::type comment).
+    // Phase 7E will wire into the actual MWMechanics spell-cast callback for
+    // accurate spellId / target data.  For now we detect the flag edge.
+    const bool casting = stats.getAttackingOrSpell()
+        && (stats.getAttackType() == "cast"
+            || stats.getAttackType() == "spellcast");
+
+    if (casting == mLastCastingOrSpell) return;
+    mLastCastingOrSpell = casting;
+    if (!casting) return; // only send on the rising edge
+
+    mLocal.castSpell.success = true; // optimistic — Phase 7E validates
+    PacketPlayerCast pkt;
+    pkt.setPlayer(&mLocal);
+    mClient.sendReliable(pkt.encode(mSeqCounter++));
+}
+
+// ---------------------------------------------------------------------------
 // Change detection helpers
 bool PlayerSync::positionChanged() const
 {
@@ -286,6 +475,13 @@ bool PlayerSync::dynamicStatsChanged() const
     return std::abs(mLocal.dynamicStats.health.current  - mLastStats.hCur) > EPS
         || std::abs(mLocal.dynamicStats.magicka.current - mLastStats.mCur) > EPS
         || std::abs(mLocal.dynamicStats.fatigue.current - mLastStats.fCur) > EPS;
+}
+
+bool PlayerSync::animFlagsChanged() const
+{
+    return mLocal.animFlags.movementFlags != mLastAnimFlags.movementFlags
+        || mLocal.animFlags.actionFlags   != mLastAnimFlags.actionFlags
+        || mLocal.animFlags.movementType  != mLastAnimFlags.movementType;
 }
 
 // ---------------------------------------------------------------------------

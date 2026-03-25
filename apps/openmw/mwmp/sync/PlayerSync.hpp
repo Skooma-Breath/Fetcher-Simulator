@@ -50,6 +50,9 @@ namespace mwmp
         void sendPosition();
         void sendCellChange();
         void sendEquipment();
+        void sendAnimFlags();
+        void sendAttack();
+        void sendCast();
         void sendDynamicStats();
         void sendBaseInfo();
 
@@ -58,6 +61,7 @@ namespace mwmp
         bool cellChanged()        const;
         bool equipmentChanged()   const;
         bool dynamicStatsChanged() const;
+        bool animFlagsChanged()    const;
 
         // ---- utilities ----
         void snapshotPosition();
@@ -81,6 +85,8 @@ namespace mwmp
         // --- last-sent snapshots for delta detection ---
         struct PositionSnapshot { float pos[3]; float rot[3]; };
         PositionSnapshot mLastPos{};
+        PositionSnapshot mLastAnimSample{};
+        bool mHaveLastAnimSample = false;
 
         struct CellSnapshot { std::string cellName; bool isExterior; int gx; int gy; };
         CellSnapshot mLastCell{};
@@ -90,6 +96,12 @@ namespace mwmp
 
         struct StatsSnapshot { float hCur, mCur, fCur; };
         StatsSnapshot mLastStats{};
+
+        AnimFlags mLastAnimFlags{};
+
+        // Last attack pressed state — detect edge (false→true) for send
+        bool mLastAttackPressed = false;
+        bool mLastCastingOrSpell = false;
 
         uint32_t mSeqCounter = 0;
     };

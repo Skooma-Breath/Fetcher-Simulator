@@ -67,7 +67,9 @@ namespace mwmp
         // Combat / animation
         // ------------------------------------------------------------------
         AnimFlags   animFlags;
+        AnimPlay    animPlay;     // most recent one-shot anim (reliable)
         Attack      attack;
+        CastSpell   castSpell;
 
         // ------------------------------------------------------------------
         // Equipment (19 slots matching OpenMW InventoryStore slots)
@@ -98,7 +100,6 @@ namespace mwmp
         // ------------------------------------------------------------------
         // Active spells
         // ------------------------------------------------------------------
-        // (placeholder — detailed spell effect list added in Phase 2+)
         std::vector<std::string> activeSpellIds;
 
         // ------------------------------------------------------------------
@@ -106,7 +107,7 @@ namespace mwmp
         // ------------------------------------------------------------------
         int   bounty         = 0;
         int   reputation     = 0;
-        float charGenStage   = 0.f;  // 0..1 during character creation
+        float charGenStage   = 0.f;
         bool  charGenComplete = false;
 
         // ------------------------------------------------------------------
