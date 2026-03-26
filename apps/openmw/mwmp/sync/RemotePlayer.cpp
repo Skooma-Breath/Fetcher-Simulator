@@ -192,6 +192,21 @@ void RemotePlayer::applyAnimationStateToActor()
     // never fires — no spurious fatigue drain, no upward impulse.  The CC enters
     // JumpState_InAir purely from the !onGround branch, exactly as locally.
     const bool isJumping = (f.movementFlags & AnimFlags::MF_JUMP) != 0;
+
+    // IMPORTANT: write Flag_ForceJump onto CreatureStats BEFORE calling
+    // setOnGround().  On the rising edge (grounded→jumping), setOnGround(false)
+    // makes the CC immediately see an actor that is airborne but has not yet had
+    // its ForceJump flag set.  For that single frame the controller interprets
+    // the state as "just fell and landed" and plays the landing thud/sound.
+    // Committing the jump intent first means the CC always sees ForceJump=true
+    // at the same time it sees !onGround, matching the local jump path exactly.
+    // (These lines are moved up from below; the full stats block follows later.)
+    {
+        MWMechanics::CreatureStats& statsEarly = mNpcPtr.getClass().getCreatureStats(mNpcPtr);
+        statsEarly.setMovementFlag(MWMechanics::CreatureStats::Flag_ForceJump, isJumping);
+        statsEarly.setMovementFlag(MWMechanics::CreatureStats::Flag_ForceMoveJump, isJumping);
+    }
+
     if (isJumping != mWasJumping)
     {
         MWBase::Environment::get().getWorld()->setOnGround(mNpcPtr, !isJumping);
@@ -210,6 +225,8 @@ void RemotePlayer::applyAnimationStateToActor()
 
 
     MWMechanics::CreatureStats& stats = mNpcPtr.getClass().getCreatureStats(mNpcPtr);
+    // Flag_ForceJump / Flag_ForceMoveJump already set above (before setOnGround).
+    // Re-applying here is harmless but kept for clarity as the canonical stats block.
     stats.setMovementFlag(MWMechanics::CreatureStats::Flag_ForceJump, isJumping);
     stats.setMovementFlag(MWMechanics::CreatureStats::Flag_ForceMoveJump, isJumping);
     stats.setMovementFlag(MWMechanics::CreatureStats::Flag_Run,

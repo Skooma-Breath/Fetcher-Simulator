@@ -2238,6 +2238,23 @@ namespace MWMechanics
                     vec.y() *= factor;
                     vec.z() = 0.0f;
                 }
+                // MP remote-player path: ForceJump is held true for the entire remote jump arc,
+                // but mtphysics only honours our setOnGround(false) for a single frame before
+                // traceDown() wins and resets onGround=true.  Without this guard the CC would
+                // immediately fire the landing sound/animation on frame 2 of every remote jump.
+                // While ForceJump is set and we are already in JumpState_InAir, keep mInJump=true
+                // and suppress any vertical impulse — position is driven by the interpolator.
+                // When MF_JUMP=0 arrives we clear ForceJump, this branch stops firing, and the
+                // normal landing path below triggers correctly.
+                else if (mJumpState == JumpState_InAir
+                         && cls.getCreatureStats(mPtr).getMovementFlag(
+                                MWMechanics::CreatureStats::Flag_ForceJump))
+                {
+                    mInJump = true;
+                    jumpstate = JumpState_InAir;
+                    vec.z() = 0.f;
+                    movementSettings.mPosition[2] = 0;
+                }
                 // Started a jump.
                 else if (mJumpState != JumpState_InAir && vec.z() > 0.f)
                 {

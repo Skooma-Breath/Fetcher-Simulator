@@ -337,7 +337,17 @@ void PlayerSync::sendAnimFlags()
     if (jumpingFlag)
         f.movementFlags |= AnimFlags::MF_JUMP;
 
-    if (mov.mIsStrafing)
+    // Set MF_STRAFING whenever there is raw lateral input, not only when
+    // mov.mIsStrafing is true.  mov.mIsStrafing is only set by the CC for
+    // drawn-weapon strafing (~CC line 2099), so unarmed W+A / W+D diagonal
+    // movement arrives here with mIsStrafing=false and |side|>0 — the old
+    // single-condition check dropped the flag, causing the remote NPC to play
+    // walkforward instead of the correct strafe/diagonal group.
+    // movementType already encodes the dominant axis (fwd beats strafe in the
+    // cascade), so MF_STRAFING is the only channel that carries the lateral
+    // component during diagonal movement.  The receiver ORs both together:
+    //   mIsStrafing = isSideways || (MF_STRAFING != 0)
+    if (mov.mIsStrafing || std::abs(side) > 0.1f)
         f.movementFlags |= AnimFlags::MF_STRAFING;
 
     // actionFlags bitmask
