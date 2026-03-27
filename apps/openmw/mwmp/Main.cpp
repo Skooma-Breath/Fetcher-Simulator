@@ -172,12 +172,13 @@ void Main::frame(float dt)
 
     if (!mClient->isConnected()) return;
 
-    mChatWindow->update(dt);
     mPlayerSync->update(dt);
     mPlayerList->updateAll(dt);
     mActorSync->update(dt);
     mObjectSync->update(dt);
     mWorldStateSync->update(dt);
+
+    mChatWindow->update(dt);
 
     // ── Chargen completion watcher ──────────────────────────────────────────
     // Fires once when the player is in a cell after chargen dialogs are shown.

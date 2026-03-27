@@ -2095,7 +2095,14 @@ namespace MWMechanics
             const bool isBiped = mPtr.getClass().isBipedal(mPtr);
             if (!isBiped || !turnToMovementDirection || isFirstPersonPlayer)
             {
-                movementSettings.mIsStrafing = std::abs(vec.x()) > std::abs(vec.y()) * 2;
+                // Remote network-player NPCs (Flag_NetworkPlayerNpc): mIsStrafing is
+                // maintained with hysteresis by RemotePlayer::applyAnimationStateToActor.
+                // Don't overwrite it here — the vanilla 2x threshold fires every frame
+                // and causes strafe/walk flipping when body-camera lag contaminates vec.
+                const bool isNetworkNpc = !isPlayer && cls.isActor()
+                    && cls.getCreatureStats(mPtr).getMovementFlag(MWMechanics::CreatureStats::Flag_NetworkPlayerNpc);
+                if (!isNetworkNpc)
+                    movementSettings.mIsStrafing = std::abs(vec.x()) > std::abs(vec.y()) * 2;
                 stats.setSideMovementAngle(0);
             }
             else if (canMove)
@@ -2361,7 +2368,13 @@ namespace MWMechanics
                 {
                     // It seems only bipedal actors use turning animations.
                     // Also do not use turning animations in the first-person view and when sneaking.
-                    if (!sneak && !isFirstPersonPlayer && isBiped)
+                    // Exception: remote network NPCs (Flag_NetworkPlayerNpc) are flagged as
+                    // isFirstPersonPlayer for move-path reasons, but they DO need turn anims —
+                    // RemotePlayer::applyAnimationStateToActor feeds mRotation[2] specifically
+                    // to drive standing-turn detection here.
+                    const bool isNetworkNpcTurn = !isPlayer && cls.isActor()
+                        && cls.getCreatureStats(mPtr).getMovementFlag(MWMechanics::CreatureStats::Flag_NetworkPlayerNpc);
+                    if (!sneak && (!isFirstPersonPlayer || isNetworkNpcTurn) && isBiped)
                     {
                         if (effectiveRotation > 0.f)
                             movestate = inwater ? CharState_SwimTurnRight : CharState_TurnRight;
@@ -2448,7 +2461,9 @@ namespace MWMechanics
                     mAnimation->adjustSpeedMult(mCurrentMovement, std::min(maxSpeedMult, speedMult));
                     // Make sure the actual speed is the "expected" speed even though the animation is slower
                     if (isMovementAnimationControlled())
+                    {
                         scale *= std::max(1.f, speedMult / maxSpeedMult);
+                    }
 
 #ifdef BUILD_MULTIPLAYER
                     std::string mpName;

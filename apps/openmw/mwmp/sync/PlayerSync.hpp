@@ -85,8 +85,6 @@ namespace mwmp
         // --- last-sent snapshots for delta detection ---
         struct PositionSnapshot { float pos[3]; float rot[3]; };
         PositionSnapshot mLastPos{};
-        PositionSnapshot mLastAnimSample{};
-        bool mHaveLastAnimSample = false;
 
         struct CellSnapshot { std::string cellName; bool isExterior; int gx; int gy; };
         CellSnapshot mLastCell{};

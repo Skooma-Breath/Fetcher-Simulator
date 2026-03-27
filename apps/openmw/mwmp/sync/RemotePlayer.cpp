@@ -159,21 +159,64 @@ void RemotePlayer::applyAnimationStateToActor()
     MWMechanics::Movement& mov
         = mNpcPtr.getClass().getMovementSettings(mNpcPtr);
 
-    // Set movement axes directly from sender's body-relative floats.
-    // This is identical to what the local CC receives from a 1st-person player:
-    // mPosition[1]=fwd (+1=forward, -1=backward), mPosition[0]=side (±1=strafe).
-    // The vanilla CC then classifies animation groups itself from these values,
-    // so all edge cases (diagonal, crouch-strafe, etc.) are handled correctly
-    // without any encoding/decoding logic on either end.
-    mov.mPosition[1] = f.animFwd;
-    mov.mPosition[0] = f.animSide;
-    // Mirror vanilla CC strafe criterion (character.cpp): |x| > |y| * 2
-    mov.mIsStrafing = std::abs(f.animSide) > std::abs(f.animFwd) * 2.f;
+    // ── Dead-band clamp ────────────────────────────────────────────────────────
+    // The idle breathing/sway animation produces sub-threshold world-space
+    // velocity on the sender (~0.5–2 u/s). Even though PlayerSync::sendAnimFlags
+    // gates on 5 u/s before projecting, small residuals can still arrive as
+    // animFwd/animSide values in the 0.01–0.04 range after the scale step.
+    // Passing those directly into mPosition[0/1] is enough for the vanilla CC
+    // to start a partial leg stride that immediately snaps back — the visible
+    // "tick" during idle. Clamping to exactly 0 below the dead-band ensures the
+    // CC always sees a clean zero-input when the player is truly still.
+    // Threshold 0.08: well above idle sway (max ~0.04) and well below the
+    // slowest intentional sneak-strafe (~0.40 at 50 u/s / 120 u/s scale).
+    constexpr float DEAD_BAND = 0.08f;
+    const float effFwd  = (std::abs(f.animFwd)  > DEAD_BAND) ? f.animFwd  : 0.f;
+    const float effSide = (std::abs(f.animSide) > DEAD_BAND) ? f.animSide : 0.f;
+
+    mov.mPosition[1] = effFwd;
+    mov.mPosition[0] = effSide;
+
+    // ── Strafe hysteresis ──────────────────────────────────────────────────────
+    // Problem: during A/D crouch-strafe in 3rd-person, move360.lua produces
+    // a moderate diagonal (e.g. fwd=0.35, side=0.55). With a narrow hysteresis
+    // band the old (enter=2.5x, exit=1.5x) mIsStrafing flips multiple times per
+    // stride, causing the CC to restart the strafe anim mid-cycle — the "tripping"
+    // effect. Widening to enter=2.0x (vanilla) / exit=4.0x gives a large dead zone
+    // so a stride always completes before a state flip can occur.
+    //
+    // Pure-lateral guard: if fwd is at/below the dead-band but side is intentional,
+    // lock into strafing regardless of the ratio.  Covers direct A/D where fwd
+    // is genuinely 0 and the ratio test would need an infinite threshold.
+    //
+    // Full-stop reset: when both axes are zero, clear mIsStrafing so the next
+    // movement direction starts fresh with no stale strafe-lock.
+    const float absFwd  = std::abs(effFwd);
+    const float absSide = std::abs(effSide);
+    const bool bothZero = (absFwd < 0.001f && absSide < 0.001f);
+
+    if (bothZero)
+    {
+        mIsStrafing = false;
+    }
+    else if (mIsStrafing)
+    {
+        // Require Fwd to be 4x larger than Side to BREAK strafing.
+        if (absFwd > absSide * 4.0f)
+            mIsStrafing = false;
+    }
+    else
+    {
+        // Enter strafing: Side >= 2x Fwd (vanilla), OR pure lateral (fwd dead-banded).
+        if (absSide > absFwd * 2.0f || (absFwd < DEAD_BAND && absSide > DEAD_BAND))
+            mIsStrafing = true;
+    }
+    mov.mIsStrafing = mIsStrafing;
 
     // Pass the interpolated yaw delta so standing turn animations trigger
     mov.mRotation[0] = 0.f;
     mov.mRotation[1] = 0.f;
-    const bool isIdle = (f.animFwd == 0.f && f.animSide == 0.f);
+    const bool isIdle = (effFwd == 0.f && effSide == 0.f);
     if (isIdle && std::abs(mInterp.yawDelta) > 0.005f)
         mov.mRotation[2] = mInterp.yawDelta;
     else
@@ -616,10 +659,20 @@ void RemotePlayer::onPositionUpdate(const BasePlayer& state)
     mState.velocity = state.velocity;
 
     // Set new interpolation target; record raw received XY for drift cap.
-    mInterp.lastRecvX = state.position.pos[0];
-    mInterp.lastRecvY = state.position.pos[1];
-    mInterp.tx   = state.position.pos[0];
-    mInterp.ty   = state.position.pos[1];
+    // When the remote player is idle (both anim axes zero), suppress XY target
+    // updates: the sender's move360.lua yawChange causes tiny body rotations at
+    // standstill that induce micro-jitter in the sent position, which would make
+    // the NPC slide back and forth each packet.  Z and rotation are always kept
+    // so gravity/falling and standing-turn animations work correctly.
+    const bool isIdleAnim = (mState.animFlags.animFwd  == 0.f)
+                         && (mState.animFlags.animSide == 0.f);
+    if (!isIdleAnim)
+    {
+        mInterp.lastRecvX = state.position.pos[0];
+        mInterp.lastRecvY = state.position.pos[1];
+        mInterp.tx        = state.position.pos[0];
+        mInterp.ty        = state.position.pos[1];
+    }
     mInterp.tz   = state.position.pos[2];
     mInterp.trx  = state.position.rot[0];
     mInterp.try_ = state.position.rot[1];
@@ -896,14 +949,18 @@ void RemotePlayer::updateInterpolation(float dt)
     // When the authoritative state is idle, increase the catch-up speed so the
     // remote actor smoothly but rapidly closes the final gap instead of coasting.
     const bool isAirborne = (mState.animFlags.movementFlags & AnimFlags::MF_JUMP) != 0;
-    const bool isIdleGrounded = (mState.animFlags.animFwd == 0.f && mState.animFlags.animSide == 0.f) && !isAirborne;
+    // Use a larger epsilon (0.1) for idle detection to decisively filter wiggles
+    const bool isIdleGrounded = (std::abs(mState.animFlags.animFwd) < 0.1f && std::abs(mState.animFlags.animSide) < 0.1f) && !isAirborne;
 
     // Idle catch-up: faster XY convergence when standing still, but NOT during
     // a jump — the arc is a fast parabola and we don't want to fight it with
     // an inflated speed multiplier that makes the Z curve feel sluggish.
     float interpSpeed = POS_INTERP_SPEED;
     if (isIdleGrounded)
+    {
         interpSpeed *= 2.5f; // 15 * 2.5 = 37.5 u/s snap-to-stop on ground
+        Log(Debug::Info) << "[MPDBG] " << mName << " IdleGrounded speed=" << interpSpeed;
+    }
 
     const float posAlpha = std::min(1.f, dt * interpSpeed);
     mInterp.cx += (mInterp.tx - mInterp.cx) * posAlpha;
@@ -912,6 +969,8 @@ void RemotePlayer::updateInterpolation(float dt)
     // Z-axis: fast interpolation for the parabolic jump arc.
     const float zAlpha = std::min(1.f, dt * 60.f);
     mInterp.cz += (mInterp.tz - mInterp.cz) * zAlpha;
+
+    Log(Debug::Info) << "[MPDBG] " << mName << " Alpha pos=" << posAlpha << " z=" << zAlpha;
 
     // Idle ground snap: quickly close the last few units after movement stops
     // so the actor doesn't visibly coast to a halt.  Deliberately excluded
@@ -925,11 +984,15 @@ void RemotePlayer::updateInterpolation(float dt)
         const float dz = mInterp.tz - mInterp.cz;
         if (dx * dx + dy * dy < 25.f) // 5-unit XY radius
         {
+            Log(Debug::Info) << "[MPDBG] " << mName << " XY-Snap dist=" << std::sqrt(dx*dx + dy*dy);
             mInterp.cx = mInterp.tx;
             mInterp.cy = mInterp.ty;
         }
         if (std::abs(dz) < 3.f)
+        {
+            Log(Debug::Info) << "[MPDBG] " << mName << " Z-Snap dz=" << dz;
             mInterp.cz = mInterp.tz;
+        }
     }
 
     // Rotation: snappier — turns should feel responsive, not lag behind.
@@ -955,17 +1018,25 @@ void RemotePlayer::updateInterpolation(float dt)
     const float interpPlanarSpeed = dt > 0.f
         ? std::sqrt(interpStepX * interpStepX + interpStepY * interpStepY) / dt
         : 0.f;
-    const float netPlanarSpeed = std::sqrt(
+    const float netPlanarSpeedRaw = std::sqrt(
         mState.velocity.linear[0] * mState.velocity.linear[0]
         + mState.velocity.linear[1] * mState.velocity.linear[1]);
+    // Safety cap (450 u/s) to prevent massive network velocity spikes from causing jitter
+    const float netPlanarSpeed = std::min(netPlanarSpeedRaw, 450.f);
 
     // Override the animation cadence using `netPlanarSpeed` from the sender to
     // eliminate choppy footstep pacing. Only fall back to `interpPlanarSpeed`
     // when idle (snapping to stop). Cap to 200 so huge spawns don't trigger the 10x cap.
-    if (mState.animFlags.animFwd != 0.f || mState.animFlags.animSide != 0.f)
+    if (std::abs(mState.animFlags.animFwd) >= 0.1f || std::abs(mState.animFlags.animSide) >= 0.1f)
+    {
         mInterpPlanarSpeed = netPlanarSpeed;
+        Log(Debug::Info) << "[MPDBG] " << mName << " Cadence net=" << netPlanarSpeed;
+    }
     else
+    {
         mInterpPlanarSpeed = std::min(interpPlanarSpeed, 200.f);
+        Log(Debug::Info) << "[MPDBG] " << mName << " Cadence interp=" << mInterpPlanarSpeed;
+    }
 
     const bool movingOrSettling = (mState.animFlags.animFwd != 0.f || mState.animFlags.animSide != 0.f)
         || remainingPlanar > 1.f
