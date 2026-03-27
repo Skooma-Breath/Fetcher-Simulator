@@ -50,7 +50,7 @@ namespace mwmp
         void sendPosition();
         void sendCellChange();
         void sendEquipment();
-        void sendAnimFlags();
+        void sendAnimFlags(float dt);
         void sendAttack();
         void sendCast();
         void sendDynamicStats();
@@ -79,7 +79,7 @@ namespace mwmp
         float mPositionTimer    = 0.f;
         float mStatsTimer       = 0.f;
 
-        static constexpr float POSITION_RATE = 0.05f;  // 20 Hz
+        static constexpr float POSITION_RATE = 0.033f; // 30 Hz
         static constexpr float STATS_RATE    = 1.0f;   // 1 Hz
 
         // --- last-sent snapshots for delta detection ---
@@ -98,6 +98,12 @@ namespace mwmp
         StatsSnapshot mLastStats{};
 
         AnimFlags mLastAnimFlags{};
+
+        // Periodic full anim-flags resend — self-heals receiver stuck state
+        // caused by UDP packet loss (delta-suppress means the corrective
+        // packet never gets re-sent otherwise).
+        float mAnimRefreshTimer = 0.f;
+        static constexpr float ANIM_REFRESH_RATE = 2.0f;
 
         // Last attack pressed state — detect edge (false→true) for send
         bool mLastAttackPressed = false;

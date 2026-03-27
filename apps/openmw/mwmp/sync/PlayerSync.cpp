@@ -30,6 +30,7 @@
 #include <components/openmw-mp/Packets/Player/PacketPlayerAttack.hpp>
 #include <components/openmw-mp/Packets/Player/PacketPlayerCast.hpp>
 
+
 namespace mwmp
 {
 
@@ -180,7 +181,7 @@ void PlayerSync::update(float dt)
 
     tickPosition(dt);
     tickDynamicStats(dt);
-    sendAnimFlags();
+    sendAnimFlags(dt);
     sendAttack();
     sendCast();
 
@@ -275,7 +276,7 @@ void PlayerSync::sendEquipment()
 // BaseStructs.hpp, and sends unreliably at the same cadence as position.
 // No rate-limiting needed — the position timer already throttles the outer
 // update() to 20 Hz and we delta-suppress here as well.
-void PlayerSync::sendAnimFlags()
+void PlayerSync::sendAnimFlags(float dt)
 {
     MWBase::World* world = MWBase::Environment::get().getWorld();
     if (!world) return;
@@ -289,37 +290,110 @@ void PlayerSync::sendAnimFlags()
 
     AnimFlags f{};
 
-    // movementType: prefer raw local input when it is present, because that
-    // preserves the intended forward/back/strafe direction exactly. Fall back
-    // to real world-space displacement only when input reads idle at this
-    // point in the frame.
-    float fwd = mov.mPosition[1];
-    float side = mov.mPosition[0];
-    if (std::abs(fwd) < 0.1f && std::abs(side) < 0.1f && mHaveLastAnimSample)
+    // animFwd/animSide / MF_STRAFING: classify from world-space velocity projected
+    // into body-local axes.
+    //
+    // WHY NOT mPosition[0/1]:
+    //   In 3rd-person mode the engine Lua script (move360.lua) rotates the raw
+    //   WASD input by (cameraYaw − bodyYaw) before writing it back into
+    //   self.controls.sideMovement / controls.movement, which flow into mPosition
+    //   via actors.cpp.  While the body is catching up to the camera direction
+    //   (TurnToMovementDirection biped path), pressing W alone produces a large
+    //   sideMovement — we would encode strafe even though the player is walking
+    //   straight.  1st-person is unaffected because body == camera, so the same
+    //   bug manifested only after switching to 3rd-person.
+    //
+    // WHY world velocity:
+    //   mLocal.velocity.linear is computed from successive world-space positions
+    //   earlier in tickPosition and is completely camera-mode-agnostic.  Projecting
+    //   it onto the character body yaw gives identical body-local fwd/side values
+    //   in both 1st and 3rd person.
+    //
+    //   We always project onto body yaw — camera-mode-agnostic.
+    //   Camera yaw was tried previously but in 3rd-person Preview mode
+    //   (move360.lua forces Preview, not ThirdPerson) Camera::mYaw carries a
+    //   deferred-rotation component that floats independently of both body and
+    //   movement direction.  During slow crouch-walk turns it never fully settles,
+    //   producing a spurious lateral component and glitchy animation switching.
+    //
+    //   Body yaw is safe because move360.lua's TurnToMovementDirection keeps the
+    //   lag ≤ ±60° during normal play. At 60° lag: fwd=0.50, side=0.87 —
+    //   isTrulyStrafing requires |side|>|fwd|*2=1.0, not met → forward encodes
+    //   correctly. Hard spins (>2 rad/s) are caught by the yaw-rate guard below.
+    //   Result: identical 1st-person encoding behavior regardless of camera mode.
+    //
+    //   Projection (inverse of CharacterController's rotateVec2f(local, -yaw)):
+    //     body_side = world_x * cosYaw - world_y * sinYaw
+    //     body_fwd  = world_x * sinYaw + world_y * cosYaw
+    //
+    //   Result is normalised to [-1,1] so existing 0.1f thresholds are unchanged.
+    //   Turning in place: world speed ≈ 0 → idle for that frame; the receiver
+    //   holds the last non-idle animation state for ~33 ms, which is imperceptible.
+    float fwd = 0.f, side = 0.f;
     {
-        const float dx = mLocal.position.pos[0] - mLastAnimSample.pos[0];
-        const float dy = mLocal.position.pos[1] - mLastAnimSample.pos[1];
-
-        // Use the previous sample yaw for this interval. Projecting the whole
-        // displacement against the new yaw can misclassify movement while the
-        // player is turning, which shows up as moonwalking on the remote side.
-        const float yaw = mLastAnimSample.rot[2];
-        const float sinYaw = std::sin(yaw);
-        const float cosYaw = std::cos(yaw);
-
-        // CharacterController converts local movement to world movement with
-        // rotateVec2f(local, -yaw), so the inverse projection here must use
-        // +yaw. Using the wrong sign flips direction classification for some
-        // headings and produces apparent moonwalking remotely.
-        side = dx * cosYaw - dy * sinYaw;
-        fwd = dx * sinYaw + dy * cosYaw;
+        const float vx  = mLocal.velocity.linear[0];
+        const float vy  = mLocal.velocity.linear[1];
+        const float spd = std::sqrt(vx * vx + vy * vy);
+        // Threshold 0.3 u/s: filters sensor/float noise at rest while still
+        // catching the first frame of any intentional motion.  The previous
+        // 1.0 u/s caused a 1-frame idle stutter at the start of backward
+        // movement and on the landing frame of a running jump.
+        if (spd > 0.3f)
+        {
+            // Always project onto body yaw — camera-independent encoding.
+            //
+            // Why not camera yaw: in 3rd-person Preview mode (move360.lua forces
+            // Preview, not ThirdPerson), Camera::mYaw carries a deferred-rotation
+            // component that lags and floats independently of both the body and the
+            // intended movement direction.  During slow crouch-walk turns the
+            // deferred component doesn't fully settle, so -cam->getYaw() drifts
+            // and intermittently produces a spurious lateral component → glitchy
+            // animation switching.  Preview mode has no such guarantee.
+            //
+            // Why body yaw is safe: move360.lua's TurnToMovementDirection keeps the
+            // body-yaw lag well within ±60° during normal movement. At 60° lag,
+            // fwd=0.50 and side=0.87; isTrulyStrafing requires |side|>|fwd|*2 =1.0,
+            // which is not met → forward still encodes correctly.  Only a >63° body
+            // lag (unreachable during steady crouching or walking) would misfire,
+            // and the yaw-rate guard (2 rad/s) suppresses side during any hard spin
+            // that could momentarily reach that range.
+            //
+            // This makes the sender always behave as-if 1st-person for encoding
+            // purposes, which is what the remote CC expects.
+            const float yaw = mLocal.position.rot[2]; // body yaw — camera-mode-agnostic
+            const float sinYaw = std::sin(yaw);
+            const float cosYaw = std::cos(yaw);
+            side = (vx * cosYaw - vy * sinYaw) / spd;
+            fwd  = (vx * sinYaw + vy * cosYaw) / spd;
+        }
     }
 
-    if      (fwd  >  0.1f) f.movementType = 0;  // forward
-    else if (fwd  < -0.1f) f.movementType = 1;  // backward
-    else if (side < -0.1f) f.movementType = 2;  // left
-    else if (side >  0.1f) f.movementType = 3;  // right
-    else                   f.movementType = -1; // idle
+    // Yaw-rate guard: during fast turns (mouse spin, 180° reversal) the body
+    // rotates rapidly while the velocity vector still reflects the pre-turn
+    // direction.  Projecting that onto the mid-rotation body frame produces a
+    // large spurious lateral component even when only W is held.  Detect the
+    // per-frame yaw rate and zero side when it exceeds 2 rad/s (~115°/s).
+    //
+    // This threshold safely separates fast spins / quick reversals (≥180°/s)
+    // from normal walking turns and deliberate strafes (yaw ≈ 0 for pure A).
+    if (mHaveLastAnimSample && dt > 0.0001f)
+    {
+        constexpr float PI     = 3.14159265359f;
+        constexpr float TWO_PI = 6.28318530718f;
+        float yawDelta = mLocal.position.rot[2] - mLastAnimSample.rot[2];
+        while (yawDelta >  PI) yawDelta -= TWO_PI;
+        while (yawDelta < -PI) yawDelta += TWO_PI;
+        if (std::abs(yawDelta) / dt > 2.0f)
+            side = 0.f;
+    }
+
+    // Send raw body-relative axes — no classification on the sender.
+    // The receiver sets mPosition[0/1] directly so the remote CC runs its own
+    // strafe/forward/backward logic, identical to a local 1st-person player.
+    // Values are already normalised to [-1,1] from the velocity projection above
+    // (or 0,0 when below the speed threshold / during fast spins).
+    f.animFwd  = fwd;
+    f.animSide = side;
 
     // movementFlags bitmask
     if (stats.getMovementFlag(MWMechanics::CreatureStats::Flag_Run))
@@ -337,18 +411,17 @@ void PlayerSync::sendAnimFlags()
     if (jumpingFlag)
         f.movementFlags |= AnimFlags::MF_JUMP;
 
-    // Set MF_STRAFING whenever there is raw lateral input, not only when
-    // mov.mIsStrafing is true.  mov.mIsStrafing is only set by the CC for
-    // drawn-weapon strafing (~CC line 2099), so unarmed W+A / W+D diagonal
-    // movement arrives here with mIsStrafing=false and |side|>0 — the old
-    // single-condition check dropped the flag, causing the remote NPC to play
-    // walkforward instead of the correct strafe/diagonal group.
-    // movementType already encodes the dominant axis (fwd beats strafe in the
-    // cascade), so MF_STRAFING is the only channel that carries the lateral
-    // component during diagonal movement.  The receiver ORs both together:
-    //   mIsStrafing = isSideways || (MF_STRAFING != 0)
-    if (mov.mIsStrafing || std::abs(side) > 0.1f)
-        f.movementFlags |= AnimFlags::MF_STRAFING;
+    // MF_STRAFING is derived on the receiver from animFwd/animSide directly,
+    // mirroring the vanilla CC criterion — no need to encode it from the sender.
+
+    // Knockdown / knockout — sustained hit-states driven by vanilla CC.
+    // Encoding them in the regular unreliable stream means they self-clear
+    // as soon as the sender recovers, without any separate handshake.
+    if (stats.getKnockedDown())
+        f.movementFlags |= AnimFlags::MF_KNOCKED_DOWN;
+    // Knockout condition matches character.cpp: fatigue < 0 OR base == 0.
+    if (stats.getFatigue().getCurrent() < 0.f || stats.getFatigue().getBase() == 0.f)
+        f.movementFlags |= AnimFlags::MF_KNOCKED_OUT;
 
     // actionFlags bitmask
     if (stats.getAttackingOrSpell())
@@ -362,9 +435,20 @@ void PlayerSync::sendAnimFlags()
     std::memcpy(mLastAnimSample.rot, mLocal.position.rot, sizeof(mLastAnimSample.rot));
     mHaveLastAnimSample = true;
 
-    if (!animFlagsChanged() && f.movementFlags == mLastAnimFlags.movementFlags
-        && f.actionFlags  == mLastAnimFlags.actionFlags
-        && f.movementType == mLastAnimFlags.movementType)
+    // Periodic refresh: force send every ANIM_REFRESH_RATE seconds even with
+    // no delta, so a UDP-lost packet can't permanently strand the receiver.
+    mAnimRefreshTimer += dt;
+    const bool forceRefresh = (mAnimRefreshTimer >= ANIM_REFRESH_RATE);
+    if (forceRefresh)
+        mAnimRefreshTimer = 0.f;
+
+    // Float comparison for delta-suppression: treat change < 0.05 as no-change
+    // to avoid sending for tiny float noise while still catching real moves.
+    if (!forceRefresh
+        && f.movementFlags == mLastAnimFlags.movementFlags
+        && f.actionFlags   == mLastAnimFlags.actionFlags
+        && std::abs(f.animFwd  - mLastAnimFlags.animFwd)  < 0.05f
+        && std::abs(f.animSide - mLastAnimFlags.animSide) < 0.05f)
         return;
 
     mLastAnimFlags    = f;
@@ -491,7 +575,8 @@ bool PlayerSync::animFlagsChanged() const
 {
     return mLocal.animFlags.movementFlags != mLastAnimFlags.movementFlags
         || mLocal.animFlags.actionFlags   != mLastAnimFlags.actionFlags
-        || mLocal.animFlags.movementType  != mLastAnimFlags.movementType;
+        || std::abs(mLocal.animFlags.animFwd  - mLastAnimFlags.animFwd)  >= 0.05f
+        || std::abs(mLocal.animFlags.animSide - mLastAnimFlags.animSide) >= 0.05f;
 }
 
 // ---------------------------------------------------------------------------

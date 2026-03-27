@@ -240,7 +240,11 @@ namespace MWMechanics
             Flag_Run = 4,
             Flag_Sneak = 8,
             Flag_ForceJump = 16,
-            Flag_ForceMoveJump = 32
+            Flag_ForceMoveJump = 32,
+            // Remote multiplayer NPC: forces first-person CC movement semantics so that
+            // TurnToMovementDirection biped path, turn animations, and the NPC smooth-
+            // movement slowdown factor are never applied to network-driven remote players.
+            Flag_NetworkPlayerNpc = 64
         };
         enum Stance
         {

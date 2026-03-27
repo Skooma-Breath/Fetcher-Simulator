@@ -114,15 +114,25 @@ namespace mwmp
     {
         uint32_t movementFlags = 0;  // bitmask: Walk|Run|Sneak|Swim|Jump|Fly|Turn etc.
         uint32_t actionFlags   = 0;  // bitmask: Attack|Cast|Block|WeaponDrawn|SpellReady
-        int8_t   movementType  = 0;  // send path uses -1 for idle, 0=fwd,1=back,2=left,3=right,4=strafe-l,5=strafe-r
+        // Body-relative movement axes — projected from world velocity onto body yaw.
+        // Range [-1,1]. Replaces the old movementType integer so the receiver sets
+        // Movement::mPosition directly, letting the remote CC classify animation
+        // groups itself — identical to how a local 1st-person player is handled.
+        float    animFwd  = 0.f;  // mPosition[1]: +1=forward, -1=backward, 0=idle
+        float    animSide = 0.f;  // mPosition[0]: +1=strafe-right, -1=strafe-left
 
         // movementFlags bit constants — must match the encode side in PlayerSync
         static constexpr uint32_t MF_RUN   = (1u << 0);
         static constexpr uint32_t MF_SNEAK = (1u << 1);
         static constexpr uint32_t MF_SWIM  = (1u << 2);
         static constexpr uint32_t MF_JUMP  = (1u << 3);
-        static constexpr uint32_t MF_FLY   = (1u << 4);
-        static constexpr uint32_t MF_STRAFING = (1u << 5);
+        static constexpr uint32_t MF_FLY        = (1u << 4);
+        static constexpr uint32_t MF_STRAFING   = (1u << 5);
+        // Sustained hit-state flags — mirrored from CharacterController each frame
+        // so the receiver's CC can drive the correct knockdown/knockout anim group
+        // and looping behaviour without needing a separate reliable packet.
+        static constexpr uint32_t MF_KNOCKED_DOWN = (1u << 6);
+        static constexpr uint32_t MF_KNOCKED_OUT  = (1u << 7);
 
         // actionFlags bit constants
         static constexpr uint32_t AF_WEAPON_DRAWN = (1u << 0);

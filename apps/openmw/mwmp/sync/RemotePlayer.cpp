@@ -55,8 +55,10 @@ RemotePlayer::RemotePlayer(uint32_t guid, const std::string& name)
 {
     mState.guid = guid;
     mState.name = name;
-    mState.animFlags.movementType = -1;
-    mLastAppliedAnimFlags.movementType = -1;
+    mState.animFlags.animFwd  = 0.f;
+    mState.animFlags.animSide = 0.f;
+    mLastAppliedAnimFlags.animFwd  = 0.f;
+    mLastAppliedAnimFlags.animSide = 0.f;
     Log(Debug::Info) << "[MP] RemotePlayer created: " << name << " (guid=" << guid << ")";
 }
 
@@ -157,21 +159,22 @@ void RemotePlayer::applyAnimationStateToActor()
     MWMechanics::Movement& mov
         = mNpcPtr.getClass().getMovementSettings(mNpcPtr);
 
-    switch (f.movementType)
-    {
-        case 0:  mov.mPosition[1] =  1.f; mov.mPosition[0] =  0.f; break; // forward
-        case 1:  mov.mPosition[1] = -1.f; mov.mPosition[0] =  0.f; break; // backward
-        case 2:  mov.mPosition[0] = -1.f; mov.mPosition[1] =  0.f; break; // strafe left
-        case 3:  mov.mPosition[0] =  1.f; mov.mPosition[1] =  0.f; break; // strafe right
-        case 4:  mov.mPosition[0] = -1.f; mov.mPosition[1] =  0.f; break; // strafe-l (alias)
-        case 5:  mov.mPosition[0] =  1.f; mov.mPosition[1] =  0.f; break; // strafe-r (alias)
-        default: mov.mPosition[0] =  0.f; mov.mPosition[1] =  0.f; break; // idle / standing
-    }
+    // Set movement axes directly from sender's body-relative floats.
+    // This is identical to what the local CC receives from a 1st-person player:
+    // mPosition[1]=fwd (+1=forward, -1=backward), mPosition[0]=side (±1=strafe).
+    // The vanilla CC then classifies animation groups itself from these values,
+    // so all edge cases (diagonal, crouch-strafe, etc.) are handled correctly
+    // without any encoding/decoding logic on either end.
+    mov.mPosition[1] = f.animFwd;
+    mov.mPosition[0] = f.animSide;
+    // Mirror vanilla CC strafe criterion (character.cpp): |x| > |y| * 2
+    mov.mIsStrafing = std::abs(f.animSide) > std::abs(f.animFwd) * 2.f;
 
     // Pass the interpolated yaw delta so standing turn animations trigger
     mov.mRotation[0] = 0.f;
     mov.mRotation[1] = 0.f;
-    if (f.movementType < 0 && std::abs(mInterp.yawDelta) > 0.005f)
+    const bool isIdle = (f.animFwd == 0.f && f.animSide == 0.f);
+    if (isIdle && std::abs(mInterp.yawDelta) > 0.005f)
         mov.mRotation[2] = mInterp.yawDelta;
     else
         mov.mRotation[2] = 0.f;
@@ -207,21 +210,19 @@ void RemotePlayer::applyAnimationStateToActor()
         statsEarly.setMovementFlag(MWMechanics::CreatureStats::Flag_ForceMoveJump, isJumping);
     }
 
+    // In RemotePlayer.cpp, replace the landing edge block:
     if (isJumping != mWasJumping)
     {
+        if (!isJumping)
+        {
+            // Drain mFallHeight that mtphysics accumulated during the remote jump arc.
+            // Without this the landing path in character.cpp gets a spuriously large
+            // height value → fall damage → knockdown even when the sender landed safely.
+            mNpcPtr.getClass().getCreatureStats(mNpcPtr).land(false);
+        }
         MWBase::Environment::get().getWorld()->setOnGround(mNpcPtr, !isJumping);
         mWasJumping = isJumping;
     }
-    // The CharacterController only selects strafe animation groups (WalkLeft,
-    // RunRight, etc.) when mIsStrafing == true — it completely ignores mPosition[0]
-    // otherwise and falls back to WalkForward/WalkBack.  The sender's MF_STRAFING
-    // flag only fires for drawn-weapon strafing (CC line ~2099), so unarmed
-    // sideways walking (movementType 2/3/4/5) arrives with MF_STRAFING=0 and
-    // the remote NPC plays walkforward instead.  Always force mIsStrafing when
-    // the movementType tells us the actor is moving sideways.
-    const bool isSideways = (f.movementType == 2 || f.movementType == 3
-                          || f.movementType == 4 || f.movementType == 5);
-    mov.mIsStrafing = isSideways || (f.movementFlags & AnimFlags::MF_STRAFING) != 0;
 
 
     MWMechanics::CreatureStats& stats = mNpcPtr.getClass().getCreatureStats(mNpcPtr);
@@ -235,6 +236,49 @@ void RemotePlayer::applyAnimationStateToActor()
         (f.movementFlags & AnimFlags::MF_SNEAK) != 0);
     stats.setAttackingOrSpell(
         (f.actionFlags & AnimFlags::AF_ATTACKING) != 0 || mState.attack.pressed);
+
+    // ── Knockdown / knockout ───────────────────────────────────────────────────
+    // Mirror the sender's live CharacterController hit-state so the receiver's
+    // CC plays the correct anim group and recovers at the right time.
+    //
+    // MF_KNOCKED_OUT  → fatigue forced negative → CC enters looping KnockOut
+    // MF_KNOCKED_DOWN → stats.setKnockedDown    → CC enters brief KnockDown
+    // Neither flag    → both cleared; CC returns to normal locomotion
+    //
+    // When either flag is active we zero movement so the locomotion branch
+    // of the CC doesn't fight the hit-state anim.
+    const bool isKnockedOut  = (f.movementFlags & AnimFlags::MF_KNOCKED_OUT)  != 0;
+    const bool isKnockedDown = (f.movementFlags & AnimFlags::MF_KNOCKED_DOWN) != 0;
+
+    if (isKnockedOut || isKnockedDown)
+    {
+        // Zero movement so the CC's locomotion branch doesn't fight the hit anim
+        mov.mPosition[0] = 0.f;
+        mov.mPosition[1] = 0.f;
+        mov.mIsStrafing  = false;
+
+        stats.setKnockedDown(isKnockedDown && !isKnockedOut);
+
+        if (isKnockedOut)
+        {
+            // Drive CC into looping KnockOut by holding fatigue negative.
+            // DynamicStats sync never pushes fatigue back to the NPC's
+            // CreatureStats, so this write has no conflict with stats sync.
+            // When the flag clears, vanilla fatigue regen restores naturally.
+            MWMechanics::DynamicStat<float> fat = stats.getFatigue();
+            if (fat.getCurrent() >= 0.f)
+            {
+                fat.setCurrent(-1.f);
+                stats.setFatigue(fat);
+            }
+        }
+    }
+    else
+    {
+        // Recovery: clear knockdown flag so CC exits hit-state naturally.
+        // Do NOT touch fatigue here — let vanilla regen handle the restore.
+        stats.setKnockedDown(false);
+    }
 
     MWMechanics::DrawState ds = MWMechanics::DrawState::Nothing;
     if (f.actionFlags & AnimFlags::AF_WEAPON_DRAWN)
@@ -373,6 +417,15 @@ void RemotePlayer::trySpawn()
 
         // Clear all AI packages — remote players are driven by network, not AI
         mNpcPtr.getClass().getCreatureStats(mNpcPtr).getAiSequence().clear();
+
+        // Mark this NPC as a network-driven remote player so that CharacterController
+        // always takes the first-person movement code path (no TurnToMovementDirection
+        // biped logic, no turn animations, instant smooth-movement response). Without
+        // this the CC fights the anim flags we set in applyAnimationStateToActor and
+        // produces spurious strafing and turn animations when the remote client is in
+        // third-person (move360.lua rotates the input before it reaches mPosition).
+        mNpcPtr.getClass().getCreatureStats(mNpcPtr).setMovementFlag(
+            MWMechanics::CreatureStats::Flag_NetworkPlayerNpc, true);
 
         // Disable collision so remote players don't physically block the local player
         //world->setActorCollisionMode(mNpcPtr, false, false);
@@ -562,7 +615,9 @@ void RemotePlayer::onPositionUpdate(const BasePlayer& state)
     mState.position = state.position;
     mState.velocity = state.velocity;
 
-    // Set new interpolation target
+    // Set new interpolation target; record raw received XY for drift cap.
+    mInterp.lastRecvX = state.position.pos[0];
+    mInterp.lastRecvY = state.position.pos[1];
     mInterp.tx   = state.position.pos[0];
     mInterp.ty   = state.position.pos[1];
     mInterp.tz   = state.position.pos[2];
@@ -580,6 +635,8 @@ void RemotePlayer::onPositionUpdate(const BasePlayer& state)
         mInterp.crx    = mInterp.trx;
         mInterp.cry    = mInterp.try_;
         mInterp.crz    = mInterp.trz;
+        mInterp.lastRecvX  = mInterp.tx;
+        mInterp.lastRecvY  = mInterp.ty;
         mInterp.hasSnapped = true;
     }
 }
@@ -621,6 +678,8 @@ void RemotePlayer::onCellChange(const BasePlayer& state)
     mInterp.ty  = mInterp.cy;
     mInterp.tz  = mInterp.cz;
     mInterp.trz = mInterp.crz;
+    mInterp.lastRecvX  = mInterp.cx;
+    mInterp.lastRecvY  = mInterp.cy;
     mInterp.hasTarget  = true;
     mInterp.hasSnapped = true;
 
@@ -680,7 +739,8 @@ void RemotePlayer::onAnimFlagsUpdate(const BasePlayer& state)
     // Delta suppress — skip if nothing changed since last application
     if (f.movementFlags == mLastAppliedAnimFlags.movementFlags
         && f.actionFlags  == mLastAppliedAnimFlags.actionFlags
-        && f.movementType == mLastAppliedAnimFlags.movementType)
+        && f.animFwd      == mLastAppliedAnimFlags.animFwd
+        && f.animSide     == mLastAppliedAnimFlags.animSide)
         return;
 
     mLastAppliedAnimFlags = f;
@@ -836,7 +896,7 @@ void RemotePlayer::updateInterpolation(float dt)
     // When the authoritative state is idle, increase the catch-up speed so the
     // remote actor smoothly but rapidly closes the final gap instead of coasting.
     const bool isAirborne = (mState.animFlags.movementFlags & AnimFlags::MF_JUMP) != 0;
-    const bool isIdleGrounded = (mState.animFlags.movementType < 0) && !isAirborne;
+    const bool isIdleGrounded = (mState.animFlags.animFwd == 0.f && mState.animFlags.animSide == 0.f) && !isAirborne;
 
     // Idle catch-up: faster XY convergence when standing still, but NOT during
     // a jump — the arc is a fast parabola and we don't want to fight it with
@@ -902,18 +962,19 @@ void RemotePlayer::updateInterpolation(float dt)
     // Override the animation cadence using `netPlanarSpeed` from the sender to
     // eliminate choppy footstep pacing. Only fall back to `interpPlanarSpeed`
     // when idle (snapping to stop). Cap to 200 so huge spawns don't trigger the 10x cap.
-    if (mState.animFlags.movementType >= 0)
+    if (mState.animFlags.animFwd != 0.f || mState.animFlags.animSide != 0.f)
         mInterpPlanarSpeed = netPlanarSpeed;
     else
         mInterpPlanarSpeed = std::min(interpPlanarSpeed, 200.f);
 
-    const bool movingOrSettling = mState.animFlags.movementType >= 0
+    const bool movingOrSettling = (mState.animFlags.animFwd != 0.f || mState.animFlags.animSide != 0.f)
         || remainingPlanar > 1.f
         || std::abs(interpStepZ) > 0.1f;
     if (movingOrSettling && mFootstepDebugTimer <= 0.f)
     {
         Log(Debug::Info) << "[MPDBG] Interp " << mName
-                         << " moveType=" << int(mState.animFlags.movementType)
+                         << " fwd=" << mState.animFlags.animFwd
+                         << " side=" << mState.animFlags.animSide
                          << " run=" << ((mState.animFlags.movementFlags & AnimFlags::MF_RUN) != 0)
                          << " sneak=" << ((mState.animFlags.movementFlags & AnimFlags::MF_SNEAK) != 0)
                          << " netPlanar=" << netPlanarSpeed
@@ -928,6 +989,46 @@ void RemotePlayer::updateInterpolation(float dt)
     // Extrapolate Z target using last known vertical velocity
     if (isAirborne && mState.velocity.linear[2] != 0.f)
         mInterp.tz += mState.velocity.linear[2] * dt;
+
+    // XY dead reckoning: advance the target forward using the sender's last-known
+    // world-space velocity so the interpolator is always chasing a predicted future
+    // position rather than a stale past one.  This removes the systematic lag visible
+    // at 20 Hz (remoteplanar residuals of 5-9 units at packet arrival) and reduces
+    // correction snaps to near-zero at 30 Hz.
+    //
+    // Guards:
+    //   - Not idle (fwd/side != 0): no movement, no prediction needed.
+    //   - Not airborne: jump arc is handled by the Z path above; XY during a jump
+    //     is nearly flat and the position packet cadence is sufficient.
+    //   - Drift cap: limit total XY divergence from the last received position to
+    //     MAX_EXTRAP_DIST so a stale velocity (player stopped, packet delayed, or
+    //     direction changed) cannot walk the ghost arbitrarily far away.  The next
+    //     position packet resets lastRecvX/Y and corrects the target instantly.
+    if (!isAirborne && !isIdleGrounded)
+    {
+        const float vx = mState.velocity.linear[0];
+        const float vy = mState.velocity.linear[1];
+        if (vx != 0.f || vy != 0.f)
+        {
+            // Advance target
+            mInterp.tx += vx * dt;
+            mInterp.ty += vy * dt;
+
+            // Cap drift from last received packet position.
+            // 2 × max Morrowind run speed (~280 u/s) × 1 packet at 30 Hz ≈ 19 units.
+            // Use 24 units as a comfortable ceiling that handles a single dropped packet.
+            constexpr float MAX_EXTRAP_DIST = 24.f;
+            const float driftX = mInterp.tx - mInterp.lastRecvX;
+            const float driftY = mInterp.ty - mInterp.lastRecvY;
+            const float driftSq = driftX * driftX + driftY * driftY;
+            if (driftSq > MAX_EXTRAP_DIST * MAX_EXTRAP_DIST)
+            {
+                const float scale = MAX_EXTRAP_DIST / std::sqrt(driftSq);
+                mInterp.tx = mInterp.lastRecvX + driftX * scale;
+                mInterp.ty = mInterp.lastRecvY + driftY * scale;
+            }
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------

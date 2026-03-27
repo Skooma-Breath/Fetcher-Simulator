@@ -1983,7 +1983,13 @@ namespace MWMechanics
         updateMagicEffects();
 
         bool isPlayer = mPtr == MWMechanics::getPlayer();
-        bool isFirstPersonPlayer = isPlayer && MWBase::Environment::get().getWorld()->isFirstPerson();
+        // Remote player NPCs carry Flag_NetworkPlayerNpc so the CC always takes
+        // the first-person movement path: no TurnToMovementDirection biped logic,
+        // no turn-left/right animations, no NPC smooth-movement slowdown. This
+        // matches what the sender's CC did when they were in first-person and
+        // avoids the 3rd-person move360.lua input-rotation artefacts on the receiver.
+        bool isFirstPersonPlayer = (isPlayer && MWBase::Environment::get().getWorld()->isFirstPerson())
+            || (cls.isActor() && cls.getCreatureStats(mPtr).getMovementFlag(MWMechanics::CreatureStats::Flag_NetworkPlayerNpc));
         bool godmode = isPlayer && MWBase::Environment::get().getWorld()->getGodModeState();
 
         float scale = mPtr.getCellRef().getScale();

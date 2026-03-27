@@ -27,7 +27,8 @@ namespace mwmp
             ws.write(mPlayer->guid);
             ws.write(mPlayer->animFlags.movementFlags);
             ws.write(mPlayer->animFlags.actionFlags);
-            ws.write(mPlayer->animFlags.movementType);
+            ws.write(mPlayer->animFlags.animFwd);
+            ws.write(mPlayer->animFlags.animSide);
         }
 
         void unpack(ReadStream& rs) override
@@ -35,7 +36,8 @@ namespace mwmp
             rs.read(mPlayer->guid);
             rs.read(mPlayer->animFlags.movementFlags);
             rs.read(mPlayer->animFlags.actionFlags);
-            rs.read(mPlayer->animFlags.movementType);
+            rs.read(mPlayer->animFlags.animFwd);
+            rs.read(mPlayer->animFlags.animSide);
         }
     };
 
