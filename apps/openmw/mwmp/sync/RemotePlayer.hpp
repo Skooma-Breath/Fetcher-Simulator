@@ -136,6 +136,7 @@ namespace mwmp
         // because that feeds handleJump() in PhysicsSystem which imparts a real
         // upward velocity impulse every frame and fights the Z interpolator.
         bool mWasJumping = false;
+        bool mWasFlying  = false;
         // Hysteresis for animation grouping (prevents "tripping" look)
         bool mIsStrafing = false;
     };

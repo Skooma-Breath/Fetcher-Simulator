@@ -16,7 +16,9 @@
 // OpenMW world/player access
 #include "../../mwbase/environment.hpp"
 #include "../../mwbase/world.hpp"
+#include "../../mwbase/inputmanager.hpp"
 #include "../../mwrender/camera.hpp"
+#include "../../mwinput/actions.hpp"
 #include "../../mwworld/ptr.hpp"
 #include "../../mwworld/class.hpp"
 #include "../../mwworld/cellstore.hpp"
@@ -305,90 +307,67 @@ void PlayerSync::sendAnimFlags(float dt)
     // WHY NOT mPosition[0/1]:
     //   In 3rd-person mode the engine Lua script (move360.lua) rotates the raw
     //   WASD input by (cameraYaw − bodyYaw) before writing it back into
-    //   self.controls.sideMovement / controls.movement, which flow into mPosition
-    //   via actors.cpp.  While the body is catching up to the camera direction
-    //   (TurnToMovementDirection biped path), pressing W alone produces a large
-    //   sideMovement — we would encode strafe even though the player is walking
-    //   straight.  1st-person is unaffected because body == camera, so the same
-    //   bug manifested only after switching to 3rd-person.
+    //   self.controls.sideMovement / controls.movement.  While the body is
+    //   catching up (TurnToMovementDirection), pressing W alone produces a large
+    //   sideMovement — we would encode strafe. Always use world velocity instead.
     //
     // WHY world velocity:
     //   mLocal.velocity.linear is computed from successive world-space positions
-    //   earlier in tickPosition and is completely camera-mode-agnostic.
+    //   and is completely camera-mode-agnostic.
     //
-    // PROJECTION YAW — 1st vs 3rd person:
-    //   In 1st-person the body yaw == camera yaw, so either works.
+    // PROJECTION YAW — always body yaw:
+    //   Camera yaw was tried but causes a flip when Tab-orbiting while walking:
+    //   the camera rotates 180° while world-space velocity (W still held) stays
+    //   forward → camera-relative projection gives fwd=-1 → remote NPC walks
+    //   backward while the local player is still moving forward.
     //
-    //   In 3rd-person, the CharacterController's biped path (line ~2096) checks
-    //   Flag_NetworkPlayerNpc -> isFirstPersonPlayer=true, which causes it to
-    //   overwrite mIsStrafing every frame using:
-    //       mIsStrafing = |vec.x()| > |vec.y()| * 2
-    //   where vec comes from mPosition[0/1] (our sent animSide/animFwd).
-    //   For the strafe flag to fire on an A/D press we need |side| > |fwd| * 2.
+    //   Body yaw is now safe for strafe: the isNetworkNpc guard in character.cpp
+    //   prevents the CC from overwriting mIsStrafing each frame, so the receiver's
+    //   hysteresis (enter=2x, exit=4x) holds through any body-camera lag.  The
+    //   initial strafe entry fires cleanly (lag≈0 when A/D is first pressed).
     //
-    //   When projected onto body yaw with body-camera lag d, pressing pure A gives:
-    //       rawSide = cos(d),  rawFwd = -sin(d)
-    //   The strafe condition cos(d) > sin(d)*2 only holds for d < 26.6 deg.
-    //   Beyond that the lag contaminates fwd enough to flip back to walk, causing
-    //   the strafe tripping seen in 3rd-person crouch/walk.
+    // WASD GATE:
+    //   Tab orbit with no movement keys induces body displacement (~18–35 u/s)
+    //   above the velocity gate via move360.lua yawChange.  Zero axes when no
+    //   movement key is held so camera orbit never triggers a walk/strafe anim.
     //
-    //   Camera yaw is immune: pressing A always gives |side|>>|fwd| regardless of
-    //   how far the body lags the camera, because we're measuring in the player's
-    //   *intent* frame (camera-relative), not the body frame.
-    //   Body yaw is still used in 1st-person (camera==body, no lag).
-    //
-    //   Velocity gate is raised to 15 u/s in 3rd-person to absorb the
-    //   yawChange-induced micro-velocity from move360.lua's per-frame camera
-    //   pan (peaks ~10 u/s at normal rotation speeds). 5 u/s is kept for
-    //   1st-person where the artifact does not occur.
-    //
-    //   Projection (inverse of CharacterController's rotateVec2f(local, -yaw)):
-    //     side = world_x * cosYaw - world_y * sinYaw
-    //     fwd  = world_x * sinYaw + world_y * cosYaw
-    //
-    //   Result is normalised to [-1,1] so existing 0.1f thresholds are unchanged.
-    //   Turning in place: world speed ~0 -> idle for that frame; the receiver
-    //   holds the last non-idle animation state for ~33 ms, which is imperceptible.
+    // VELOCITY GATE:
+    //   15 u/s in 3rd-person kills yawChange micro-velocity from camera pans.
+    //   5 u/s for 1st-person where the artifact is absent.
     float fwd = 0.f, side = 0.f;
     {
+        // WASD gate — discard projection when no movement key is held.
+        bool hasMovementInput = true;
+        if (auto inputMgr = MWBase::Environment::get().getInputManager())
+        {
+            hasMovementInput =
+                inputMgr->actionIsActive(MWInput::A_MoveForward)   ||
+                inputMgr->actionIsActive(MWInput::A_MoveBackward)  ||
+                inputMgr->actionIsActive(MWInput::A_MoveLeft)      ||
+                inputMgr->actionIsActive(MWInput::A_MoveRight);
+        }
+
         const float vx  = mLocal.velocity.linear[0];
         const float vy  = mLocal.velocity.linear[1];
         const float spd = std::sqrt(vx * vx + vy * vy);
 
-        // Use camera yaw in 3rd-person so A/D always gives |side|>>|fwd| regardless
-        // of body-camera lag. Use body yaw in 1st-person (body == camera, no lag).
-        // Velocity gate: 5 u/s in 1st-person filters idle-sway wiggles; 15 u/s in
-        // 3rd-person also kills yawChange micro-velocity from move360.lua camera pans.
-        // NOTE: do NOT gate on mPosition[0/1] here. sendAnimFlags runs before
-        // synchronizedUpdate applies Lua WASD controls back into mPosition, so it is
-        // always zero during movement. The velocity gate alone is sufficient.
         const bool is3rdPerson = world->getCamera() && !world->isFirstPerson();
         const float velocityGate = is3rdPerson ? 15.0f : 5.0f;
 
-        if (spd > velocityGate)
+        if (hasMovementInput && spd > velocityGate)
         {
-            const float projYaw = is3rdPerson
-                ? -world->getCamera()->getYaw()  // camera stores -(world angle); negate to get true world yaw
-                : mLocal.position.rot[2];
-
+            // Always project onto body yaw — immune to camera-orbit direction flips.
+            const float projYaw = mLocal.position.rot[2];
             const float sinYaw = std::sin(projYaw);
             const float cosYaw = std::cos(projYaw);
 
-            // Project world velocity into camera-relative (3rd-person) or body-local (1st-person) axes.
             float rawSide = (vx * cosYaw - vy * sinYaw);
             float rawFwd  = (vx * sinYaw + vy * cosYaw);
 
-            // SCALE by speed instead of pure normalization:
-            // This ensures that small taps produce small animation intensities [0,1]
-            // instead of jumping straight to 1.0 magnitude.
-            // 120 u/s is a typical walk speed; 60 u/s is a sneak.
             const float walkSpeed = 120.f;
             const float scale = (spd < walkSpeed) ? (1.f / walkSpeed) : (1.f / spd);
             side = rawSide * scale;
             fwd  = rawFwd  * scale;
-
-            // No bias suppression needed: camera projection gives clean
-            // |side|>>|fwd| for A/D and clean |fwd|>>|side| for W/S.
         }
     }
 
@@ -424,6 +403,13 @@ void PlayerSync::sendAnimFlags(float dt)
         || (!world->isOnGround(player) && !world->isSwimming(player) && !world->isFlying(player));
     if (jumpingFlag)
         f.movementFlags |= AnimFlags::MF_JUMP;
+
+    // Levitation / flying — keep the remote NPC off the ground while airborne.
+    // Without this, the receiver's physics resets onGround=true every frame and
+    // the NPC gets shoved into the ground geometry, triggering the engine's
+    // "actor stuck" knockout path.
+    if (world->isFlying(player))
+        f.movementFlags |= AnimFlags::MF_FLY;
 
     // MF_STRAFING is derived on the receiver from animFwd/animSide directly,
     // mirroring the vanilla CC criterion — no need to encode it from the sender.

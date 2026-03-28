@@ -238,6 +238,7 @@ void RemotePlayer::applyAnimationStateToActor()
     // never fires — no spurious fatigue drain, no upward impulse.  The CC enters
     // JumpState_InAir purely from the !onGround branch, exactly as locally.
     const bool isJumping = (f.movementFlags & AnimFlags::MF_JUMP) != 0;
+    const bool isFlying  = (f.movementFlags & AnimFlags::MF_FLY)  != 0;
 
     // IMPORTANT: write Flag_ForceJump onto CreatureStats BEFORE calling
     // setOnGround().  On the rising edge (grounded→jumping), setOnGround(false)
@@ -253,8 +254,14 @@ void RemotePlayer::applyAnimationStateToActor()
         statsEarly.setMovementFlag(MWMechanics::CreatureStats::Flag_ForceMoveJump, isJumping);
     }
 
-    // In RemotePlayer.cpp, replace the landing edge block:
-    if (isJumping != mWasJumping)
+    // While flying/levitating, keep the actor off the ground so the physics
+    // engine doesn't snap them down and trigger the "stuck" knockout path.
+    // When both jumping and flying are false, restore normal ground contact.
+    if (isFlying && !isJumping)
+    {
+        MWBase::Environment::get().getWorld()->setOnGround(mNpcPtr, false);
+    }
+    else if (isJumping != mWasJumping)
     {
         if (!isJumping)
         {
@@ -266,6 +273,13 @@ void RemotePlayer::applyAnimationStateToActor()
         MWBase::Environment::get().getWorld()->setOnGround(mNpcPtr, !isJumping);
         mWasJumping = isJumping;
     }
+    else if (!isJumping && !isFlying && mWasFlying)
+    {
+        // Landing from levitation — restore ground contact and clear fall height.
+        mNpcPtr.getClass().getCreatureStats(mNpcPtr).land(false);
+        MWBase::Environment::get().getWorld()->setOnGround(mNpcPtr, true);
+    }
+    mWasFlying = isFlying;
 
 
     MWMechanics::CreatureStats& stats = mNpcPtr.getClass().getCreatureStats(mNpcPtr);
@@ -319,8 +333,17 @@ void RemotePlayer::applyAnimationStateToActor()
     else
     {
         // Recovery: clear knockdown flag so CC exits hit-state naturally.
-        // Do NOT touch fatigue here — let vanilla regen handle the restore.
         stats.setKnockedDown(false);
+        // Also restore fatigue we forced negative for MF_KNOCKED_OUT.
+        // Vanilla regen alone is too slow (~seconds) — the CC won't exit
+        // KnockOut state until fatigue >= 0, so explicitly restore it on
+        // the first frame the flag is clear.
+        MWMechanics::DynamicStat<float> fat = stats.getFatigue();
+        if (fat.getCurrent() < 0.f)
+        {
+            fat.setCurrent(1.f);
+            stats.setFatigue(fat);
+        }
     }
 
     MWMechanics::DrawState ds = MWMechanics::DrawState::Nothing;
