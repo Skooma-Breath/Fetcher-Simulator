@@ -280,13 +280,20 @@ void PlayerSync::sendEquipment()
 }
 
 // ---------------------------------------------------------------------------
-// sendAnimFlags — unreliable, per-frame, delta-suppressed.
+// sendAnimFlags — per-frame, delta-suppressed; jump edges sent reliably.
 //
-// Reads movement vector and CreatureStats flags from the live player Ptr,
-// encodes them into AnimFlags using the MF_* / AF_* constants from
-// BaseStructs.hpp, and sends unreliably at the same cadence as position.
-// No rate-limiting needed — the position timer already throttles the outer
-// update() to 20 Hz and we delta-suppress here as well.
+// Normal flow: unreliable send whenever any flag or axis crosses the 0.05
+// delta threshold.  Two special cases are ALWAYS sent reliably:
+//
+//   MF_JUMP rising  edge (0→1): ensures receiver enters JumpState_InAir
+//     even if the first in-air unreliable packet is dropped.
+//   MF_JUMP falling edge (1→0): the critical one for standstill landings.
+//     After a standstill jump the player is perfectly still, so all
+//     subsequent packets are identical — delta suppression fires nothing.
+//     The receiver stays frozen in JumpState_InAir / ForceJump=true until
+//     the 5-second force-refresh fires and the landing anim never plays.
+//     Sending the falling edge reliably guarantees the CC makes the
+//     JumpState_InAir → JumpState_Landing transition on the receiver.
 void PlayerSync::sendAnimFlags(float dt)
 {
     MWBase::World* world = MWBase::Environment::get().getWorld();
@@ -431,6 +438,17 @@ void PlayerSync::sendAnimFlags(float dt)
     if (stats.getDrawState() == MWMechanics::DrawState::Spell)
         f.actionFlags |= AnimFlags::AF_SPELL_READY;
 
+    // ── Jump edge detection ────────────────────────────────────────────────
+    // Must run BEFORE the delta-suppression early-return so edges are never
+    // silently dropped, even when the only thing that changed is the jump bit.
+    const bool wasJumping = (mLastAnimFlags.movementFlags & AnimFlags::MF_JUMP) != 0;
+    const bool nowJumping = (f.movementFlags             & AnimFlags::MF_JUMP) != 0;
+    const bool jumpEdge   = (wasJumping != nowJumping);
+    if (jumpEdge)
+        Log(Debug::Info) << "[MP] AnimFlags MF_JUMP "
+                         << (nowJumping ? "0->1 (rising)" : "1->0 (falling)")
+                         << " -- sending reliably";
+
     // Periodic refresh: force send every ANIM_REFRESH_RATE seconds even with
     // no delta, so a UDP-lost packet can't permanently strand the receiver.
     mAnimRefreshTimer += dt;
@@ -440,19 +458,24 @@ void PlayerSync::sendAnimFlags(float dt)
 
     // Float comparison for delta-suppression: treat change < 0.05 as no-change
     // to avoid sending for tiny float noise while still catching real moves.
-    if (!forceRefresh
+    // Jump edges bypass this guard — they must always be delivered.
+    if (!forceRefresh && !jumpEdge
         && f.movementFlags == mLastAnimFlags.movementFlags
         && f.actionFlags   == mLastAnimFlags.actionFlags
         && std::abs(f.animFwd  - mLastAnimFlags.animFwd)  < 0.05f
         && std::abs(f.animSide - mLastAnimFlags.animSide) < 0.05f)
         return;
 
-    mLastAnimFlags    = f;
-    mLocal.animFlags  = f;
+    mLastAnimFlags   = f;
+    mLocal.animFlags = f;
 
     PacketPlayerAnimFlags pkt;
     pkt.setPlayer(&mLocal);
-    mClient.sendUnreliable(pkt.encode(mSeqCounter++));
+    // Jump-state transitions are reliable; all other anim changes unreliable.
+    if (jumpEdge)
+        mClient.sendReliable(pkt.encode(mSeqCounter++));
+    else
+        mClient.sendUnreliable(pkt.encode(mSeqCounter++));
 }
 
 // ---------------------------------------------------------------------------
