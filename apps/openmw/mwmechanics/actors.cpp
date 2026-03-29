@@ -1724,8 +1724,16 @@ namespace MWMechanics
                 }
 
                 actor.getPtr().getRefData().getBaseNode()->setNodeMask(MWRender::Mask_Actor);
-                world->setActorCollisionMode(actor.getPtr(), true,
-                    !actor.getPtr().getClass().getCreatureStats(actor.getPtr()).isDeathAnimationFinished());
+                // Remote network-player NPCs have collision disabled at spawn and must not
+                // have it re-enabled here. This loop runs every frame for all non-player actors
+                // and would otherwise clobber the spawn-time setActorCollisionMode(false,false),
+                // causing wall-bounce oscillation despite the interpolator being sole position authority.
+                if (!actor.getPtr().getClass().getCreatureStats(actor.getPtr()).getMovementFlag(
+                        MWMechanics::CreatureStats::Flag_NetworkPlayerNpc))
+                {
+                    world->setActorCollisionMode(actor.getPtr(), true,
+                        !actor.getPtr().getClass().getCreatureStats(actor.getPtr()).isDeathAnimationFinished());
+                }
 
                 if (!actor.getPositionAdjusted())
                 {

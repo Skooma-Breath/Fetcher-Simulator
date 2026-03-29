@@ -103,6 +103,34 @@ namespace mwmp
         float mAnimRefreshTimer = 0.f;
         static constexpr float ANIM_REFRESH_RATE = 2.0f;
 
+        // Movement tap latch: holds the WASD gate open for a short window after the
+        // last real movement-key press (any stance — walk, run, or sneak).
+        // Quick taps release the key before sendAnimFlags runs, so by the time we
+        // project velocity the gate says "no key held" even though the body still
+        // has full momentum.  The latch keeps the projection alive until velocity
+        // naturally decays, ensuring the remote NPC always sees at least one
+        // non-zero fwd/side packet.  Applies to all stances so brief steps while
+        // standing or running are as reliable as the already-fixed sneak taps.
+        float mMoveLatch = 0.f;
+        static constexpr float MOVE_LATCH_TIME = 0.10f; // 100 ms
+
+        float mJumpGraceTimer = 0.f;
+        float mJumpStallTimer = 0.f;
+        float mCcJumpVisualLatch = 0.f;
+        static constexpr float JUMP_GRACE_TIME = 0.12f;
+        static constexpr float JUMP_STALL_TIME = 0.10f;
+        static constexpr float CC_JUMP_VISUAL_LATCH_TIME = 0.08f;
+
+        // Wall-block latch: once keys are held but velocity drops below the gate,
+        // stay in the raw-input (wall-fallback) code path for this many seconds.
+        // Prevents brief collision-slide residuals (~18–25 u/s) from flipping back
+        // to velocity-projection mid-stride and oscillating the remote fwd/side.
+        //float mWallBlockLatch = 0.f;
+        //static constexpr float WALL_BLOCK_LATCH_TIME = 0.15f; // 150 ms
+        // Previous-frame planar speed — needed to detect the above→below gate
+        // transition that actually means "just hit a wall" vs fresh key press.
+        //float mLastSpd = 0.f;
+
         // Last attack pressed state — detect edge (false→true) for send
         bool mLastAttackPressed = false;
         bool mLastCastingOrSpell = false;

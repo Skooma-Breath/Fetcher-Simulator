@@ -853,6 +853,9 @@ namespace MWMechanics
 
         // idle handled last as it can depend on the other states
         refreshIdleAnims(idle, force);
+
+        if (auto* baseNode = mPtr.getRefData().getBaseNode())
+            baseNode->setUserValue("mp_cc_jump_state", static_cast<int>(mJumpState));
     }
 
     void CharacterController::playDeath(float startpoint, CharacterState death)
@@ -2015,6 +2018,21 @@ namespace MWMechanics
             bool onground = world->isOnGround(mPtr);
             bool inwater = world->isSwimming(mPtr);
             bool flying = world->isFlying(mPtr);
+#ifdef BUILD_MULTIPLAYER
+            // Network-driven NPC levitation override.
+            // RemotePlayer sets "mp_fly" on the base node every frame while MF_FLY is
+            // active. We can't rely on magic effect injection because Actors::update()
+            // calls adjustMagicEffects() before ctrl.update(), wiping any injected
+            // Levitate magnitude before this code path runs. The base-node user-value
+            // persists across the full frame and is ordering-immune.
+            if (!flying)
+            {
+                bool mpFly = false;
+                if (auto* bn = mPtr.getRefData().getBaseNode())
+                    bn->getUserValue("mp_fly", mpFly);
+                flying = mpFly;
+            }
+#endif
             bool solid = world->isActorCollisionEnabled(mPtr);
             // Can't run and sneak while flying (see speed formula in Npc/Creature::getSpeed)
             bool sneak
@@ -2157,6 +2175,7 @@ namespace MWMechanics
             CharacterState movestate = CharState_None;
             CharacterState idlestate = CharState_None;
             JumpingState jumpstate = JumpState_None;
+            bool jumpVisualThisFrame = false;
 
             const MWWorld::Store<ESM::GameSetting>& gmst = world->getStore().get<ESM::GameSetting>();
             if (vec.x() != 0.f || vec.y() != 0.f)
@@ -2241,6 +2260,7 @@ namespace MWMechanics
                 {
                     mInJump = true;
                     jumpstate = JumpState_InAir;
+                    jumpVisualThisFrame = true;
 
                     static const float fJumpMoveBase = gmst.find("fJumpMoveBase")->mValue.getFloat();
                     static const float fJumpMoveMult = gmst.find("fJumpMoveMult")->mValue.getFloat();
@@ -2261,10 +2281,11 @@ namespace MWMechanics
                 // normal landing path below triggers correctly.
                 else if (mJumpState == JumpState_InAir
                          && cls.getCreatureStats(mPtr).getMovementFlag(
-                                MWMechanics::CreatureStats::Flag_ForceJump))
+                                 MWMechanics::CreatureStats::Flag_ForceJump))
                 {
                     mInJump = true;
                     jumpstate = JumpState_InAir;
+                    jumpVisualThisFrame = true;
                     vec.z() = 0.f;
                     movementSettings.mPosition[2] = 0;
                 }
@@ -2272,6 +2293,7 @@ namespace MWMechanics
                 else if (mJumpState != JumpState_InAir && vec.z() > 0.f)
                 {
                     mInJump = true;
+                    jumpVisualThisFrame = true;
                     if (vec.x() == 0 && vec.y() == 0)
                         vec.z() = jumpHeight;
                     else
@@ -2436,6 +2458,9 @@ namespace MWMechanics
 
             if (inwater)
                 idlestate = CharState_IdleSwim;
+
+            if (auto* baseNode = mPtr.getRefData().getBaseNode())
+                baseNode->setUserValue("mp_cc_jump_visual", jumpVisualThisFrame ? 1 : 0);
 
             if (!mSkipAnim)
             {

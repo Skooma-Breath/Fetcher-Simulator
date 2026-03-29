@@ -159,20 +159,12 @@ void RemotePlayer::applyAnimationStateToActor()
     MWMechanics::Movement& mov
         = mNpcPtr.getClass().getMovementSettings(mNpcPtr);
 
-    // ── Dead-band clamp ────────────────────────────────────────────────────────
-    // The idle breathing/sway animation produces sub-threshold world-space
-    // velocity on the sender (~0.5–2 u/s). Even though PlayerSync::sendAnimFlags
-    // gates on 5 u/s before projecting, small residuals can still arrive as
-    // animFwd/animSide values in the 0.01–0.04 range after the scale step.
-    // Passing those directly into mPosition[0/1] is enough for the vanilla CC
-    // to start a partial leg stride that immediately snaps back — the visible
-    // "tick" during idle. Clamping to exactly 0 below the dead-band ensures the
-    // CC always sees a clean zero-input when the player is truly still.
-    // Threshold 0.08: well above idle sway (max ~0.04) and well below the
-    // slowest intentional sneak-strafe (~0.40 at 50 u/s / 120 u/s scale).
-    constexpr float DEAD_BAND = 0.08f;
-    const float effFwd  = (std::abs(f.animFwd)  > DEAD_BAND) ? f.animFwd  : 0.f;
-    const float effSide = (std::abs(f.animSide) > DEAD_BAND) ? f.animSide : 0.f;
+    // Pass anim axes directly — no dead-band clamping needed.
+    // The sender's velocity gate (5/15 u/s) and WASD gate already ensure that
+    // sub-threshold idle sway never produces a non-zero fwd/side value, so
+    // a receiver-side clamp is redundant and was always a no-op at 0.00.
+    const float effFwd  = f.animFwd;
+    const float effSide = f.animSide;
 
     mov.mPosition[1] = effFwd;
     mov.mPosition[0] = effSide;
@@ -208,7 +200,7 @@ void RemotePlayer::applyAnimationStateToActor()
     else
     {
         // Enter strafing: Side >= 2x Fwd (vanilla), OR pure lateral (fwd dead-banded).
-        if (absSide > absFwd * 2.0f || (absFwd < DEAD_BAND && absSide > DEAD_BAND))
+        if (absSide > absFwd * 2.0f || (absFwd == 0.f && absSide > 0.f))
             mIsStrafing = true;
     }
     mov.mIsStrafing = mIsStrafing;
@@ -254,9 +246,34 @@ void RemotePlayer::applyAnimationStateToActor()
         statsEarly.setMovementFlag(MWMechanics::CreatureStats::Flag_ForceMoveJump, isJumping);
     }
 
-    // While flying/levitating, keep the actor off the ground so the physics
-    // engine doesn't snap them down and trigger the "stuck" knockout path.
-    // When both jumping and flying are false, restore normal ground contact.
+    // Levitation — fix the remote NPC showing the fall animation while levitating.
+    //
+    // world->isFlying() is what character.cpp queries each frame to decide whether
+    // to skip the jump/fall code path and play the walk animation instead.  It
+    // checks for the Levitate magic effect magnitude > 0 on the actor's stats.
+    // Remote NPCs have no active spells, so isFlying() always returns false for
+    // them — the CC sees (!onGround && !flying) and locks into JumpState_InAir /
+    // fall animation for the entire levitation.
+    //
+    // Fix: write an "mp_fly" user-value on the NPC's base node every frame.
+    // character.cpp reads this flag right after world->isFlying() and OR's it in,
+    // making the CC treat this NPC as flying regardless of its magic effect list.
+    //
+    // WHY NOT magic-effect injection:
+    //   Actors::update() calls adjustMagicEffects() (via updateActor()) in its
+    //   first per-actor loop, which rebuilds the effect magnitudes from active
+    //   spells and wipes anything we injected — all before the second loop where
+    //   ctrl.update() / world->isFlying() actually runs.  Edge-triggered injection
+    //   fires once but is guaranteed dead by the time the CC checks.  Continuous
+    //   injection every frame still loses the race because RemotePlayer::update()
+    //   runs before Actors::update(), so the wipe always happens last.
+    //   The base-node flag survives the full frame because OSG user-values are
+    //   never touched by the mechanics pipeline.
+    if (auto* bn = mNpcPtr.getRefData().getBaseNode())
+        bn->setUserValue("mp_fly", isFlying);
+
+    // Keep the actor physically off the ground while levitating or jumping so the
+    // physics engine doesn't snap them down and trigger the "stuck" knockout path.
     if (isFlying && !isJumping)
     {
         MWBase::Environment::get().getWorld()->setOnGround(mNpcPtr, false);
@@ -282,9 +299,9 @@ void RemotePlayer::applyAnimationStateToActor()
     mWasFlying = isFlying;
 
 
-    MWMechanics::CreatureStats& stats = mNpcPtr.getClass().getCreatureStats(mNpcPtr);
     // Flag_ForceJump / Flag_ForceMoveJump already set above (before setOnGround).
     // Re-applying here is harmless but kept for clarity as the canonical stats block.
+    MWMechanics::CreatureStats& stats = mNpcPtr.getClass().getCreatureStats(mNpcPtr);
     stats.setMovementFlag(MWMechanics::CreatureStats::Flag_ForceJump, isJumping);
     stats.setMovementFlag(MWMechanics::CreatureStats::Flag_ForceMoveJump, isJumping);
     stats.setMovementFlag(MWMechanics::CreatureStats::Flag_Run,
@@ -493,7 +510,15 @@ void RemotePlayer::trySpawn()
         mNpcPtr.getClass().getCreatureStats(mNpcPtr).setMovementFlag(
             MWMechanics::CreatureStats::Flag_NetworkPlayerNpc, true);
 
-        // Disable collision so remote players don't physically block the local player
+        // Disable physics collision for remote NPCs. Their position is fully
+        // authority-controlled by the interpolator (world->moveObject every frame),
+        // so geometry collision is counterproductive: the CC's locomotion (fwd=1.0
+        // → ~2 u/frame) would push the NPC into walls, physics springs it back, and
+        // the interpolator snaps it forward again — a visible oscillation at any wall
+        // the sender is standing against. With collision off the CC can push through
+        // geometry harmlessly and the interpolator is the sole position authority.
+        // Floors are safe: the interpolator always positions the NPC at the correct Z.
+        // Tradeoff: local player can walk through remote players (acceptable for now).
         //world->setActorCollisionMode(mNpcPtr, false, false);
 
 
@@ -689,13 +714,16 @@ void RemotePlayer::onPositionUpdate(const BasePlayer& state)
     // so gravity/falling and standing-turn animations work correctly.
     const bool isIdleAnim = (mState.animFlags.animFwd  == 0.f)
                          && (mState.animFlags.animSide == 0.f);
-    if (!isIdleAnim)
+    const bool isAirborneState = ((mState.animFlags.movementFlags & AnimFlags::MF_JUMP) != 0)
+        || std::abs(state.velocity.linear[2]) > 0.1f;
+    if (!isIdleAnim || isAirborneState)
     {
         mInterp.lastRecvX = state.position.pos[0];
         mInterp.lastRecvY = state.position.pos[1];
         mInterp.tx        = state.position.pos[0];
         mInterp.ty        = state.position.pos[1];
     }
+    mInterp.lastRecvZ = state.position.pos[2];
     mInterp.tz   = state.position.pos[2];
     mInterp.trx  = state.position.rot[0];
     mInterp.try_ = state.position.rot[1];
@@ -756,6 +784,7 @@ void RemotePlayer::onCellChange(const BasePlayer& state)
     mInterp.trz = mInterp.crz;
     mInterp.lastRecvX  = mInterp.cx;
     mInterp.lastRecvY  = mInterp.cy;
+    mInterp.lastRecvZ  = mInterp.cz;
     mInterp.hasTarget  = true;
     mInterp.hasSnapped = true;
 
@@ -816,7 +845,8 @@ void RemotePlayer::onAnimFlagsUpdate(const BasePlayer& state)
     if (f.movementFlags == mLastAppliedAnimFlags.movementFlags
         && f.actionFlags  == mLastAppliedAnimFlags.actionFlags
         && f.animFwd      == mLastAppliedAnimFlags.animFwd
-        && f.animSide     == mLastAppliedAnimFlags.animSide)
+        && f.animSide     == mLastAppliedAnimFlags.animSide
+        && f.blockedMoveSpeed == mLastAppliedAnimFlags.blockedMoveSpeed)
         return;
 
     mLastAppliedAnimFlags = f;
@@ -1047,18 +1077,45 @@ void RemotePlayer::updateInterpolation(float dt)
     // Safety cap (450 u/s) to prevent massive network velocity spikes from causing jitter
     const float netPlanarSpeed = std::min(netPlanarSpeedRaw, 450.f);
 
-    // Override the animation cadence using `netPlanarSpeed` from the sender to
-    // eliminate choppy footstep pacing. Only fall back to `interpPlanarSpeed`
-    // when idle (snapping to stop). Cap to 200 so huge spawns don't trigger the 10x cap.
-    if (std::abs(mState.animFlags.animFwd) >= 0.1f || std::abs(mState.animFlags.animSide) >= 0.1f)
+    // Animation cadence — set mInterpPlanarSpeed for CharacterController.
+    //
+    // Normal movement uses the sender's measured physics speed so footstep
+    // pacing matches the visual distance covered, including slow sneak-walk.
+    // Confirmed wall-block packets are the only exception: there the sender is
+    // holding movement keys but physics speed collapses toward zero, so using
+    // netPlanarSpeed would play the walk cycle in extreme slow motion.
     {
-        mInterpPlanarSpeed = netPlanarSpeed;
-        Log(Debug::Info) << "[MPDBG] " << mName << " Cadence net=" << netPlanarSpeed;
-    }
-    else
-    {
-        mInterpPlanarSpeed = std::min(interpPlanarSpeed, 200.f);
-        Log(Debug::Info) << "[MPDBG] " << mName << " Cadence interp=" << mInterpPlanarSpeed;
+        const float absFwdAnim  = std::abs(mState.animFlags.animFwd);
+        const float absSideAnim = std::abs(mState.animFlags.animSide);
+        const bool isMovingAnim = (absFwdAnim >= 0.1f || absSideAnim >= 0.1f);
+        const bool isWallBlocked = (mState.animFlags.movementFlags & AnimFlags::MF_WALL_BLOCKED) != 0;
+
+        if (isMovingAnim)
+        {
+            if (isWallBlocked)
+            {
+                // Confirmed wall contact: sender intent is "keep moving", but
+                // its physics speed is artificially tiny. Use the sender's
+                // actual expected pace for this stance so blocked sneak/walk/run
+                // keeps the same cadence as the local actor instead of falling
+                // back to a generic hardcoded speed.
+                const float blockedSpeed = mState.animFlags.blockedMoveSpeed;
+                mInterpPlanarSpeed = (blockedSpeed > 0.f)
+                    ? std::min(std::max(blockedSpeed, netPlanarSpeed), 450.f)
+                    : netPlanarSpeed;
+                Log(Debug::Info) << "[MPDBG] " << mName << " Cadence blocked=" << mInterpPlanarSpeed;
+            }
+            else
+            {
+                mInterpPlanarSpeed = netPlanarSpeed;
+                Log(Debug::Info) << "[MPDBG] " << mName << " Cadence net=" << netPlanarSpeed;
+            }
+        }
+        else
+        {
+            mInterpPlanarSpeed = std::min(interpPlanarSpeed, 200.f);
+            Log(Debug::Info) << "[MPDBG] " << mName << " Cadence interp=" << mInterpPlanarSpeed;
+        }
     }
 
     const bool movingOrSettling = (mState.animFlags.animFwd != 0.f || mState.animFlags.animSide != 0.f)
@@ -1071,6 +1128,8 @@ void RemotePlayer::updateInterpolation(float dt)
                          << " side=" << mState.animFlags.animSide
                          << " run=" << ((mState.animFlags.movementFlags & AnimFlags::MF_RUN) != 0)
                          << " sneak=" << ((mState.animFlags.movementFlags & AnimFlags::MF_SNEAK) != 0)
+                         << " wallBlocked=" << ((mState.animFlags.movementFlags & AnimFlags::MF_WALL_BLOCKED) != 0)
+                         << " blockedSpeed=" << mState.animFlags.blockedMoveSpeed
                          << " netPlanar=" << netPlanarSpeed
                          << " interpPlanar=" << interpPlanarSpeed
                          << " remainingPlanar=" << remainingPlanar
@@ -1080,9 +1139,23 @@ void RemotePlayer::updateInterpolation(float dt)
         mFootstepDebugTimer = 0.25f;
     }
 
-    // Extrapolate Z target using last known vertical velocity
+    // Extrapolate Z target using last known vertical velocity.
+    //
+    // Upward extrapolation is capped relative to the last authoritative Z so
+    // that hitting a ceiling (which kills the sender's vertical velocity before
+    // the correction packet arrives) can't push the target through solid
+    // geometry.  A cap of ~20 units (roughly one character height) is enough
+    // to hide a single dropped packet without allowing visible ceiling clips.
+    // Downward extrapolation is uncapped — falling into open air is safe.
     if (isAirborne && mState.velocity.linear[2] != 0.f)
+    {
         mInterp.tz += mState.velocity.linear[2] * dt;
+        if (mState.velocity.linear[2] > 0.f)
+        {
+            constexpr float MAX_Z_EXTRAP_UP = 10.f;
+            mInterp.tz = std::min(mInterp.tz, mInterp.lastRecvZ + MAX_Z_EXTRAP_UP);
+        }
+    }
 
     // XY dead reckoning: advance the target forward using the sender's last-known
     // world-space velocity so the interpolator is always chasing a predicted future

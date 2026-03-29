@@ -9,6 +9,7 @@
 #include <components/openmw-mp/Packets/Player/PacketPlayerStatsDynamic.hpp>
 #include <components/openmw-mp/Packets/Player/PacketPlayerBaseInfo.hpp>
 #include <components/openmw-mp/Packets/Player/PacketPlayerEquipment.hpp>
+#include <components/sceneutil/positionattitudetransform.hpp>
 
 #include "../network/Client.hpp"
 #include "../network/Protocol.hpp"
@@ -280,10 +281,10 @@ void PlayerSync::sendEquipment()
 }
 
 // ---------------------------------------------------------------------------
-// sendAnimFlags — per-frame, delta-suppressed; jump edges sent reliably.
+// sendAnimFlags — per-frame, delta-suppressed; edge packets sent reliably.
 //
 // Normal flow: unreliable send whenever any flag or axis crosses the 0.05
-// delta threshold.  Two special cases are ALWAYS sent reliably:
+// delta threshold.  Three special cases are ALWAYS sent reliably:
 //
 //   MF_JUMP rising  edge (0→1): ensures receiver enters JumpState_InAir
 //     even if the first in-air unreliable packet is dropped.
@@ -294,6 +295,10 @@ void PlayerSync::sendEquipment()
 //     the 5-second force-refresh fires and the landing anim never plays.
 //     Sending the falling edge reliably guarantees the CC makes the
 //     JumpState_InAir → JumpState_Landing transition on the receiver.
+//   Movement idle↔moving edge (any stance): a quick tap produces exactly
+//     1 start and 1 stop packet; UDP loss of either means the remote CC
+//     never transitions out of idle — no leg wiggle / walk anim.  Sending
+//     both boundaries reliably fixes this for walk, run, and sneak alike.
 void PlayerSync::sendAnimFlags(float dt)
 {
     MWBase::World* world = MWBase::Environment::get().getWorld();
@@ -337,33 +342,120 @@ void PlayerSync::sendAnimFlags(float dt)
     //   Tab orbit with no movement keys induces body displacement (~18–35 u/s)
     //   above the velocity gate via move360.lua yawChange.  Zero axes when no
     //   movement key is held so camera orbit never triggers a walk/strafe anim.
+    //   For sneak, a short latch extends the gate after key-up so quick taps
+    //   (press+release between two sendAnimFlags calls) still encode velocity.
     //
     // VELOCITY GATE:
     //   15 u/s in 3rd-person kills yawChange micro-velocity from camera pans.
     //   5 u/s for 1st-person where the artifact is absent.
+    // Detect jump / airborne state up front so movement encoding can preserve
+    // mid-air momentum after the key is released. Without this, a running jump
+    // that releases W mid-flight sends fwd/side=0 after the 100 ms tap latch
+    // expires even while planar speed is still ~200 u/s, making the remote actor
+    // freeze in place until the next input packet.
+    const bool jumpRequested = world->getPlayer().getJumping();
+    const bool physicallyAirborne = !world->isOnGround(player)
+        && !world->isSwimming(player)
+        && !world->isFlying(player);
+    int ccJumpState = -1;
+    int ccJumpVisual = 0;
+    bool hasCcJumpState = false;
+    bool hasCcJumpVisual = false;
+    if (auto* baseNode = player.getRefData().getBaseNode())
+    {
+        hasCcJumpState = baseNode->getUserValue("mp_cc_jump_state", ccJumpState);
+        hasCcJumpVisual = baseNode->getUserValue("mp_cc_jump_visual", ccJumpVisual);
+    }
+    const bool ccJumpInAir = hasCcJumpState && ccJumpState == 1;
+    const bool ccJumpVisualPulse = hasCcJumpVisual && ccJumpVisual != 0;
+    if (ccJumpVisualPulse)
+        mCcJumpVisualLatch = CC_JUMP_VISUAL_LATCH_TIME;
+    else if (mCcJumpVisualLatch > 0.f)
+        mCcJumpVisualLatch = std::max(0.f, mCcJumpVisualLatch - dt);
+    const bool ccJumpVisualLatched = mCcJumpVisualLatch > 0.f;
+    if (jumpRequested)
+        mJumpGraceTimer = JUMP_GRACE_TIME;
+    else if (mJumpGraceTimer > 0.f)
+        mJumpGraceTimer = std::max(0.f, mJumpGraceTimer - dt);
+
     float fwd = 0.f, side = 0.f;
+    bool wallBlocked = false;
+    bool rawHasMovementInput = false;
+    float planarSpeed = 0.f;
+    float velocityGate = 5.f;
+    float blockedMoveSpeed = 0.f;
     {
         // WASD gate — discard projection when no movement key is held.
-        bool hasMovementInput = true;
+        // Purpose: prevent camera-orbit (move360.lua yawChange ~18–35 u/s) from
+        // triggering walk/strafe anims when the player is only rotating the view.
+        bool kFwd = false, kBack = false, kLeft = false, kRight = false;
         if (auto inputMgr = MWBase::Environment::get().getInputManager())
         {
-            hasMovementInput =
-                inputMgr->actionIsActive(MWInput::A_MoveForward)   ||
-                inputMgr->actionIsActive(MWInput::A_MoveBackward)  ||
-                inputMgr->actionIsActive(MWInput::A_MoveLeft)      ||
-                inputMgr->actionIsActive(MWInput::A_MoveRight);
+            kFwd  = inputMgr->actionIsActive(MWInput::A_MoveForward);
+            kBack = inputMgr->actionIsActive(MWInput::A_MoveBackward);
+            kLeft = inputMgr->actionIsActive(MWInput::A_MoveLeft);
+            kRight= inputMgr->actionIsActive(MWInput::A_MoveRight);
+            rawHasMovementInput = kFwd || kBack || kLeft || kRight;
         }
+
+        // Movement tap latch: keep the WASD gate open for a short window after the
+        // last real key press (any stance — walk, run, or sneak).
+        //
+        // Problem: a quick directional tap (press+release between two sendAnimFlags
+        // calls, ~16 ms at 60 fps) leaves rawHasMovementInput==false by the time we
+        // run.  The WASD gate fires and zeroes fwd/side even though the body still has
+        // full momentum.  This applies to all stances, not only sneak — slow walking
+        // "inching" and quick non-sneak taps suffer the same blackout.
+        //
+        // Fix: on any real key press, charge the latch for MOVE_LATCH_TIME.  While the
+        // latch is live, keep the projection active so velocity naturally decays to zero
+        // rather than being gate-zeroed.  The camera-orbit false-trigger is harmless
+        // because the latch only opens after a genuine key press.
+        if (rawHasMovementInput)
+            mMoveLatch = MOVE_LATCH_TIME;
+        else if (mMoveLatch > 0.f)
+            mMoveLatch -= dt;
 
         const float vx  = mLocal.velocity.linear[0];
         const float vy  = mLocal.velocity.linear[1];
         const float spd = std::sqrt(vx * vx + vy * vy);
+        planarSpeed = spd;
 
         const bool is3rdPerson = world->getCamera() && !world->isFirstPerson();
-        const float velocityGate = is3rdPerson ? 15.0f : 5.0f;
+        // velocityGate: still used to filter camera-orbit body displacement when the
+        // movement latch is live but no real key is held (Tab-orbit produces ~18-35 u/s).
+        velocityGate = is3rdPerson ? 15.0f : 5.0f;
 
-        if (hasMovementInput && spd > velocityGate)
+        // Preserve airborne momentum even after key release.
+        // Locally, the jump continues to travel forward under inertia; encoding
+        // idle mid-flight makes the remote switch to pure fall and then snap to
+        // the next non-idle position. Camera-orbit false positives are not a
+        // concern here because this path is only active while truly airborne.
+        const bool preserveAirMomentum = (hasCcJumpState ? ccJumpInAir : (jumpRequested || physicallyAirborne))
+            && spd > velocityGate;
+        const bool hasMovementInput = rawHasMovementInput || (mMoveLatch > 0.f) || preserveAirMomentum;
+
+        // Wall-block detection: compare physics speed against the actor's real
+        // expected pace for the current movement state, not hardcoded 50/120 values.
+        //
+        // This fixes the crouch regression from the previous hardcoded threshold:
+        // a slow sneaking player might legitimately top out around 25 u/s, so
+        // comparing against a fixed 40 u/s tagged ordinary sneak-walk as "blocked"
+        // every frame. Using getMaxSpeed(player) keeps the threshold aligned with
+        // the sender's actual stats, stance, encumbrance, and settings.
+        const float expectedMoveSpeed = player.getClass().getMaxSpeed(player);
+        blockedMoveSpeed = expectedMoveSpeed;
+        const float wallSpeedThreshold = std::max(velocityGate, expectedMoveSpeed * 0.8f);
+        wallBlocked = rawHasMovementInput
+            && expectedMoveSpeed > velocityGate
+            && spd < wallSpeedThreshold;
+
+        if (hasMovementInput && spd > velocityGate && !wallBlocked)
         {
             // Always project onto body yaw — immune to camera-orbit direction flips.
+            // Divide by spd (not walkSpeed) so the output is a unit-direction vector
+            // in body-local space. wallBlocked already catches sub-walkspeed cases
+            // (wall contact, accel ramp) so any speed reaching here is >= 80% of walk.
             const float projYaw = mLocal.position.rot[2];
             const float sinYaw = std::sin(projYaw);
             const float cosYaw = std::cos(projYaw);
@@ -371,10 +463,23 @@ void PlayerSync::sendAnimFlags(float dt)
             float rawSide = (vx * cosYaw - vy * sinYaw);
             float rawFwd  = (vx * sinYaw + vy * cosYaw);
 
-            const float walkSpeed = 120.f;
-            const float scale = (spd < walkSpeed) ? (1.f / walkSpeed) : (1.f / spd);
-            side = rawSide * scale;
-            fwd  = rawFwd  * scale;
+            side = rawSide / spd;  // unit-direction component
+            fwd  = rawFwd  / spd;
+        }
+        else if (rawHasMovementInput)
+        {
+            // Wall-blocked (or below velocity gate with keys held).
+            // DO NOT use mov.mPosition[0/1] here — in 3rd-person move360 mode,
+            // mPosition is computed from world-space velocity / camera direction by
+            // Lua, so it collapses toward zero whenever the physics collision kills
+            // the velocity (e.g. pressing into a wall). The remote NPC would see
+            // fwd=0/side=0 and play idle animation despite keys being held.
+            //
+            // Instead, derive axes directly from which keys are physically pressed.
+            // This is completely immune to physics, Lua, and camera-mode artifacts:
+            // the sender's intent (key held = moving) is always transmitted correctly.
+            fwd = kFwd ? 1.f : (kBack ? -1.f : 0.f);
+            side = kRight ? 1.f : (kLeft ? -1.f : 0.f);
         }
     }
 
@@ -382,14 +487,40 @@ void PlayerSync::sendAnimFlags(float dt)
     // The receiver sets mPosition[0/1] directly so the remote CC runs its own
     // strafe/forward/backward logic, identical to a local 1st-person player.
     // Values are already normalised to [-1,1] from the velocity projection above.
+    const float verticalSpeed = std::abs(mLocal.velocity.linear[2]);
+    const bool stalledCornerJump = physicallyAirborne
+        && rawHasMovementInput
+        && wallBlocked
+        && planarSpeed < velocityGate
+        && verticalSpeed < 10.f;
+    if (stalledCornerJump)
+        mJumpStallTimer += dt;
+    else
+        mJumpStallTimer = 0.f;
+
+    const bool suppressJumpForCornerStall = (mJumpGraceTimer <= 0.f)
+        && (mJumpStallTimer >= JUMP_STALL_TIME);
+    const bool cornerPinnedJump = rawHasMovementInput
+        && wallBlocked
+        && planarSpeed < velocityGate
+        && verticalSpeed < 25.f;
+    const bool jumpingFlag = (hasCcJumpState || hasCcJumpVisual)
+        ? (ccJumpInAir || ccJumpVisualLatched)
+        : ((jumpRequested || physicallyAirborne)
+            && !cornerPinnedJump
+            && !suppressJumpForCornerStall);
+
     f.animFwd  = fwd;
     f.animSide = side;
+    f.blockedMoveSpeed = wallBlocked ? blockedMoveSpeed : 0.f;
 
     // movementFlags bitmask
     if (stats.getMovementFlag(MWMechanics::CreatureStats::Flag_Run))
         f.movementFlags |= AnimFlags::MF_RUN;
     if (stats.getMovementFlag(MWMechanics::CreatureStats::Flag_Sneak))
         f.movementFlags |= AnimFlags::MF_SNEAK;
+    if (wallBlocked)
+        f.movementFlags |= AnimFlags::MF_WALL_BLOCKED;
 
     {
         const float spd = std::sqrt(mLocal.velocity.linear[0]*mLocal.velocity.linear[0] + mLocal.velocity.linear[1]*mLocal.velocity.linear[1]);
@@ -397,6 +528,12 @@ void PlayerSync::sendAnimFlags(float dt)
         {
             Log(Debug::Info) << "[MPDBG] Sender Flags: fwd=" << f.animFwd << " side=" << f.animSide 
                              << " spd=" << spd << " sneak=" << ((f.movementFlags & AnimFlags::MF_SNEAK) != 0)
+                             << " wallBlocked=" << ((f.movementFlags & AnimFlags::MF_WALL_BLOCKED) != 0)
+                             << " blockedSpeed=" << f.blockedMoveSpeed
+                              << " ccJump=" << ccJumpState
+                             << " ccJumpVisual=" << ccJumpVisual
+                             << " ccJumpLatch=" << mCcJumpVisualLatch
+                             << " vz=" << mLocal.velocity.linear[2]
                              << " mode=" << (int)world->getCamera()->getMode();
         }
     }
@@ -406,8 +543,6 @@ void PlayerSync::sendAnimFlags(float dt)
     // removing the ~50ms delay that came from waiting for !isOnGround().
     // Fallback: also catch free-falls (walking off a ledge) via !isOnGround(),
     // but exclude swimming and flying which are non-jump airborne states.
-    const bool jumpingFlag = world->getPlayer().getJumping()
-        || (!world->isOnGround(player) && !world->isSwimming(player) && !world->isFlying(player));
     if (jumpingFlag)
         f.movementFlags |= AnimFlags::MF_JUMP;
 
@@ -449,6 +584,26 @@ void PlayerSync::sendAnimFlags(float dt)
                          << (nowJumping ? "0->1 (rising)" : "1->0 (falling)")
                          << " -- sending reliably";
 
+    // ── Movement edge detection ────────────────────────────────────────────────
+    // Any idle↔moving boundary packet is promoted to reliable, regardless of
+    // stance.  The same UDP-loss race that was fixed for sneak also affects
+    // upright walking and running: a quick tap produces exactly 1 start and 1
+    // stop packet; if either is dropped the remote CC never sees the motion.
+    //
+    // Removing the `isSneak &&` guard makes the fix universal.  In-between
+    // packets during sustained movement remain unreliable — no bandwidth
+    // regression.  "Moving" is defined as either axis being non-zero after
+    // the velocity gate and WASD gate above; exactly 0.f means truly idle.
+    const bool wasMoving = (mLastAnimFlags.animFwd != 0.f || mLastAnimFlags.animSide != 0.f);
+    const bool nowMoving = (f.animFwd != 0.f || f.animSide != 0.f);
+    const bool moveEdge  = (wasMoving != nowMoving);
+    if (moveEdge)
+        Log(Debug::Info) << "[MP] AnimFlags move edge "
+                         << (nowMoving ? "idle->moving" : "moving->idle")
+                         << " sneak=" << ((f.movementFlags & AnimFlags::MF_SNEAK) != 0)
+                         << " fwd=" << f.animFwd << " side=" << f.animSide
+                         << " -- sending reliably";
+
     // Periodic refresh: force send every ANIM_REFRESH_RATE seconds even with
     // no delta, so a UDP-lost packet can't permanently strand the receiver.
     mAnimRefreshTimer += dt;
@@ -458,12 +613,13 @@ void PlayerSync::sendAnimFlags(float dt)
 
     // Float comparison for delta-suppression: treat change < 0.05 as no-change
     // to avoid sending for tiny float noise while still catching real moves.
-    // Jump edges bypass this guard — they must always be delivered.
-    if (!forceRefresh && !jumpEdge
+    // Jump edges and movement edges bypass this guard — they must always be delivered.
+    if (!forceRefresh && !jumpEdge && !moveEdge
         && f.movementFlags == mLastAnimFlags.movementFlags
         && f.actionFlags   == mLastAnimFlags.actionFlags
         && std::abs(f.animFwd  - mLastAnimFlags.animFwd)  < 0.05f
-        && std::abs(f.animSide - mLastAnimFlags.animSide) < 0.05f)
+        && std::abs(f.animSide - mLastAnimFlags.animSide) < 0.05f
+        && std::abs(f.blockedMoveSpeed - mLastAnimFlags.blockedMoveSpeed) < 1.f)
         return;
 
     mLastAnimFlags   = f;
@@ -471,8 +627,9 @@ void PlayerSync::sendAnimFlags(float dt)
 
     PacketPlayerAnimFlags pkt;
     pkt.setPlayer(&mLocal);
-    // Jump-state transitions are reliable; all other anim changes unreliable.
-    if (jumpEdge)
+    // Jump-state transitions and movement edges (idle↔moving) are reliable;
+    // all other anim changes are unreliable.
+    if (jumpEdge || moveEdge)
         mClient.sendReliable(pkt.encode(mSeqCounter++));
     else
         mClient.sendUnreliable(pkt.encode(mSeqCounter++));
@@ -595,7 +752,8 @@ bool PlayerSync::animFlagsChanged() const
     return mLocal.animFlags.movementFlags != mLastAnimFlags.movementFlags
         || mLocal.animFlags.actionFlags   != mLastAnimFlags.actionFlags
         || std::abs(mLocal.animFlags.animFwd  - mLastAnimFlags.animFwd)  >= 0.05f
-        || std::abs(mLocal.animFlags.animSide - mLastAnimFlags.animSide) >= 0.05f;
+        || std::abs(mLocal.animFlags.animSide - mLastAnimFlags.animSide) >= 0.05f
+        || std::abs(mLocal.animFlags.blockedMoveSpeed - mLastAnimFlags.blockedMoveSpeed) >= 1.f;
 }
 
 // ---------------------------------------------------------------------------

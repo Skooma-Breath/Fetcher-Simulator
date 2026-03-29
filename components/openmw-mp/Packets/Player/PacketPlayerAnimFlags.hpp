@@ -29,6 +29,7 @@ namespace mwmp
             ws.write(mPlayer->animFlags.actionFlags);
             ws.write(mPlayer->animFlags.animFwd);
             ws.write(mPlayer->animFlags.animSide);
+            ws.write(mPlayer->animFlags.blockedMoveSpeed);
         }
 
         void unpack(ReadStream& rs) override
@@ -38,6 +39,7 @@ namespace mwmp
             rs.read(mPlayer->animFlags.actionFlags);
             rs.read(mPlayer->animFlags.animFwd);
             rs.read(mPlayer->animFlags.animSide);
+            rs.read(mPlayer->animFlags.blockedMoveSpeed);
         }
     };
 

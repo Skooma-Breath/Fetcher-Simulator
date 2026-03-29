@@ -108,7 +108,7 @@ namespace mwmp
             float tx = 0.f, ty = 0.f, tz = 0.f;
             // Last position received from network — used to cap XY dead-reckoning
             // drift so a stale velocity can't walk the target off indefinitely.
-            float lastRecvX = 0.f, lastRecvY = 0.f;
+            float lastRecvX = 0.f, lastRecvY = 0.f, lastRecvZ = 0.f;
             float crx = 0.f, cry = 0.f, crz = 0.f;
             float trx = 0.f, try_ = 0.f, trz = 0.f;
             float yawDelta = 0.f;

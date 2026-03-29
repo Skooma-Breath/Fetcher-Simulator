@@ -120,6 +120,7 @@ namespace mwmp
         // groups itself — identical to how a local 1st-person player is handled.
         float    animFwd  = 0.f;  // mPosition[1]: +1=forward, -1=backward, 0=idle
         float    animSide = 0.f;  // mPosition[0]: +1=strafe-right, -1=strafe-left
+        float    blockedMoveSpeed = 0.f; // sender-side expected pace for wall-blocked movement
 
         // movementFlags bit constants — must match the encode side in PlayerSync
         static constexpr uint32_t MF_RUN   = (1u << 0);
@@ -133,6 +134,10 @@ namespace mwmp
         // and looping behaviour without needing a separate reliable packet.
         static constexpr uint32_t MF_KNOCKED_DOWN = (1u << 6);
         static constexpr uint32_t MF_KNOCKED_OUT  = (1u << 7);
+        // Sender confirmed that movement is key-held but physically wall-blocked.
+        // Receiver uses this to swap in stance-speed cadence only for true
+        // blocked-contact frames, avoiding global sneak/walk footstep desync.
+        static constexpr uint32_t MF_WALL_BLOCKED = (1u << 8);
 
         // actionFlags bit constants
         static constexpr uint32_t AF_WEAPON_DRAWN = (1u << 0);
