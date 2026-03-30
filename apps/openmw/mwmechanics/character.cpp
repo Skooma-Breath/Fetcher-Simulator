@@ -2019,18 +2019,20 @@ namespace MWMechanics
             bool inwater = world->isSwimming(mPtr);
             bool flying = world->isFlying(mPtr);
 #ifdef BUILD_MULTIPLAYER
-            // Network-driven NPC levitation override.
-            // RemotePlayer sets "mp_fly" on the base node every frame while MF_FLY is
-            // active. We can't rely on magic effect injection because Actors::update()
-            // calls adjustMagicEffects() before ctrl.update(), wiping any injected
-            // Levitate magnitude before this code path runs. The base-node user-value
-            // persists across the full frame and is ordering-immune.
-            if (!flying)
+            // Network-driven overrides for locomotion flags.
+            // When a remote player spam-jumps, their visual Z coordinate may be physically in
+            // mid-air while their sequence demands a landing frame. A simple setOnGround(true)
+            // is destroyed by traceDown raycasts before CC evaluates it. We inject the forced
+            // ground state explicitly here to break infinite fall-animation loops.
+            if (auto* bn = mPtr.getRefData().getBaseNode())
             {
+                bool mpForceGrounded = false;
+                if (bn->getUserValue("mp_force_grounded", mpForceGrounded) && mpForceGrounded)
+                    onground = true;
+
                 bool mpFly = false;
-                if (auto* bn = mPtr.getRefData().getBaseNode())
-                    bn->getUserValue("mp_fly", mpFly);
-                flying = mpFly;
+                if (!flying && bn->getUserValue("mp_fly", mpFly))
+                    flying = mpFly;
             }
 #endif
             bool solid = world->isActorCollisionEnabled(mPtr);

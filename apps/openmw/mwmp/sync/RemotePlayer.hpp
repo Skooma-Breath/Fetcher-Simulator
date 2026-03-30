@@ -137,6 +137,7 @@ namespace mwmp
         // upward velocity impulse every frame and fights the Z interpolator.
         bool mWasJumping = false;
         bool mWasFlying  = false;
+        float mJumpLandingTimer = 0.f;
         // Hysteresis for animation grouping (prevents "tripping" look)
         bool mIsStrafing = false;
     };

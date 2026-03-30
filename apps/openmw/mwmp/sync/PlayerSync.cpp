@@ -159,7 +159,17 @@ void PlayerSync::update(float dt)
     {
         mLocal.velocity.linear[0] = (pos.pos[0] - mLocal.position.pos[0]) / dt;
         mLocal.velocity.linear[1] = (pos.pos[1] - mLocal.position.pos[1]) / dt;
-        mLocal.velocity.linear[2] = (pos.pos[2] - mLocal.position.pos[2]) / dt;
+
+        // Z velocity: smooth with EMA to tame stair-geometry spikes.
+        // Raw per-frame Z deltas on stairs alternate between large (step up)
+        // and zero (flat tread), producing a spiky signal that makes the
+        // receiver's Z dead-reckoning jitter.  The EMA averages this into
+        // a steady vertical speed that matches the visual smoothness the
+        // local client sees (physics + rendering already smooth the local
+        // actor's Z position via collision response and scene graph update).
+        const float rawVz = (pos.pos[2] - mLocal.position.pos[2]) / dt;
+        mSmoothedVz = mSmoothedVz + VZ_SMOOTH_ALPHA * (rawVz - mSmoothedVz);
+        mLocal.velocity.linear[2] = mSmoothedVz;
     }
 
     mLocal.position.pos[0] = pos.pos[0];
@@ -367,8 +377,15 @@ void PlayerSync::sendAnimFlags(float dt)
         hasCcJumpVisual = baseNode->getUserValue("mp_cc_jump_visual", ccJumpVisual);
     }
     const bool ccJumpInAir = hasCcJumpState && ccJumpState == 1;
-    const bool ccJumpVisualPulse = hasCcJumpVisual && ccJumpVisual != 0;
-    if (ccJumpVisualPulse)
+    const bool ccJumpVisualActive = hasCcJumpVisual && ccJumpVisual != 0;
+    
+    // The jump visual latch exists purely to bridge the 1-2 frame "Takeoff gap" where
+    // a local player initiates a jump but the physics engine hasn't actually lifted
+    // them off the ground yet (delaying ccJumpInAir). 
+    // We only charge the latch if ccJumpInAir is false (i.e. we are grounded).
+    // If we charge it while already Airborne, the latch stays maxed out during the entire 
+    // fall arc, swallowing the true falling edge if a bunny hop lands on the next frame!
+    if (ccJumpVisualActive && !ccJumpInAir)
         mCcJumpVisualLatch = CC_JUMP_VISUAL_LATCH_TIME;
     else if (mCcJumpVisualLatch > 0.f)
         mCcJumpVisualLatch = std::max(0.f, mCcJumpVisualLatch - dt);

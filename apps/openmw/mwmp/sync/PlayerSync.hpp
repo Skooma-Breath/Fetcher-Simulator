@@ -136,6 +136,13 @@ namespace mwmp
         bool mLastCastingOrSpell = false;
 
         uint32_t mSeqCounter = 0;
+
+        // Smoothed Z velocity — raw per-frame Z deltas are very spiky on stairs
+        // (discrete step geometry produces alternating large/zero Z displacement).
+        // An EMA smooths this into a steady signal so the receiver's Z dead-
+        // reckoning produces smooth stair movement matching the local client.
+        float mSmoothedVz = 0.f;
+        static constexpr float VZ_SMOOTH_ALPHA = 0.25f; // EMA weight per frame
     };
 
 } // namespace mwmp
