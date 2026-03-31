@@ -787,11 +787,10 @@ namespace mwmp
             // airborne height immediately instead of slowly lerping up from the ground.
             // The un-primed window held tz at ground level (currentVz=0), so cz is still
             // near ground while tz is now at the sender's real airborne position.
-            // Without this snap, the lerp catch-up gap would trigger the hard-snap path
-            // (>80 units) or produce visible upward acceleration through geometry.
+            // Without this snap, we would produce visible upward acceleration through geometry.
             mInterp.cz = mInterp.tz;
-            Log(Debug::Info) << "[MP] RemotePlayer " << mName << ": jump arc primed — cz snapped to tz=" << mInterp.tz
-                             << " vz=" << state.velocity.linear[2];
+            Log(Debug::Verbose) << "[MP] RemotePlayer " << mName << ": jump arc primed — cz snapped to tz=" << mInterp.tz
+                                << " vz=" << state.velocity.linear[2];
         }
 
         // Snap current pos to target on first update (avoid lerping from origin)
@@ -1150,23 +1149,13 @@ namespace mwmp
         if (isIdleGrounded)
         {
             interpSpeed *= 2.5f; // 15 * 2.5 = 37.5 u/s snap-to-stop on ground
-            Log(Debug::Info) << "[MPDBG] " << mName << " IdleGrounded speed=" << interpSpeed;
+            Log(Debug::Verbose) << "[MP] " << mName << " IdleGrounded speed=" << interpSpeed;
         }
 
         const float posAlpha = 1.0f - std::exp(-dt * interpSpeed);
         mInterp.cx += (mInterp.tx - mInterp.cx) * posAlpha;
         mInterp.cy += (mInterp.ty - mInterp.cy) * posAlpha;
 
-        // Z-axis lerp — TES3MP approach: hard snap when gap > 80 units, smooth lerp otherwise.
-        //
-        // Without dead-reckoning the tz holds at each received position packet and advances
-        // only when new packets arrive (30 Hz). A fast lerp keeps the NPC close.
-        // The hard snap prevents slow catch-up from sliding through geometry on superjumps
-        // where the sender may be 100+ units above the NPC's last position — the same
-        // maxInterpolationDistance=80 threshold used in TES3MP DedicatedPlayer::move().
-        //
-        // zMultiplier 3.0 (airborne) vs 1.5 (grounded): keeps Z snappier than XY so
-        // slope/stair altitude changes and jumps track position packets crisply.
         // Z-axis lerp: we rely on the explicit mState.position.isTeleporting flag 
         // to handle hard-snaps during coc/teleport. For regular movement (including
         // 1000+ Acrobatics jumps), we allow the exponential decay to stay smooth.
@@ -1190,7 +1179,7 @@ namespace mwmp
             }
         }
 
-        Log(Debug::Info) << "[MPDBG] " << mName << " Alpha pos=" << posAlpha
+        Log(Debug::Verbose) << "[MP] " << mName << " Alpha pos=" << posAlpha
                          << " zGap=" << std::abs(mInterp.tz - mInterp.cz);
 
         // Idle ground snap: quickly close the last few units after movement stops
@@ -1205,13 +1194,13 @@ namespace mwmp
             const float dz = mInterp.tz - mInterp.cz;
             if (dx * dx + dy * dy < 4.f) // 2-unit XY radius
             {
-                Log(Debug::Info) << "[MPDBG] " << mName << " XY-Snap dist=" << std::sqrt(dx * dx + dy * dy);
+                Log(Debug::Verbose) << "[MP] " << mName << " XY-Snap dist=" << std::sqrt(dx * dx + dy * dy);
                 mInterp.cx = mInterp.tx;
                 mInterp.cy = mInterp.ty;
             }
             if (std::abs(dz) < 3.f)
             {
-                Log(Debug::Info) << "[MPDBG] " << mName << " Z-Snap dz=" << dz;
+                Log(Debug::Verbose) << "[MP] " << mName << " Z-Snap dz=" << dz;
                 mInterp.cz = mInterp.tz;
             }
         }
@@ -1281,7 +1270,7 @@ namespace mwmp
                     // static network velocity, but should not drop below the network velocity
                     // to maintain fluid footsteps.
                     mInterpPlanarSpeed = std::min(std::max(netPlanarSpeed, interpPlanarSpeed), 800.f);
-                    Log(Debug::Info) << "[MPDBG] " << mName << " Cadence blend=" << mInterpPlanarSpeed;
+                    Log(Debug::Verbose) << "[MP] " << mName << " Cadence blend=" << mInterpPlanarSpeed;
                 }
             }
             else
@@ -1290,7 +1279,7 @@ namespace mwmp
                 // grounded actor should not play movement animations. Zeroing the speed
                 // immediately kills the CharacterController's footstep cadence.
                 mInterpPlanarSpeed = isIdleGrounded ? 0.f : std::min(interpPlanarSpeed, 200.f);
-                Log(Debug::Info) << "[MPDBG] " << mName << " Cadence interp=" << mInterpPlanarSpeed;
+                Log(Debug::Verbose) << "[MP] " << mName << " Cadence interp=" << mInterpPlanarSpeed;
             }
         }
 
@@ -1298,7 +1287,7 @@ namespace mwmp
             || remainingPlanar > 1.f || std::abs(interpStepZ) > 0.1f;
         if (movingOrSettling && mFootstepDebugTimer <= 0.f)
         {
-            Log(Debug::Info) << "[MPDBG] Interp " << mName << " fwd=" << mState.animFlags.animFwd
+            Log(Debug::Verbose) << "[MP] Interp " << mName << " fwd=" << mState.animFlags.animFwd
                              << " side=" << mState.animFlags.animSide
                              << " run=" << ((mState.animFlags.movementFlags & AnimFlags::MF_RUN) != 0)
                              << " sneak=" << ((mState.animFlags.movementFlags & AnimFlags::MF_SNEAK) != 0)
