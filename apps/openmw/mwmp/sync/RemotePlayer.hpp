@@ -111,6 +111,7 @@ namespace mwmp
             float lastRecvX = 0.f, lastRecvY = 0.f, lastRecvZ = 0.f;
             float crx = 0.f, cry = 0.f, crz = 0.f;
             float trx = 0.f, try_ = 0.f, trz = 0.f;
+            float targetVz = 0.f;
             float yawDelta = 0.f;
             bool  hasTarget  = false;
             bool  hasSnapped = false;
@@ -138,6 +139,11 @@ namespace mwmp
         bool mWasJumping = false;
         bool mWasFlying  = false;
         float mJumpLandingTimer = 0.f;
+        // True once the first position packet carrying a meaningful vz (>30 u/s) has
+        // arrived since the jump rising edge.  Pseudo-gravity is suppressed until primed
+        // so that a zero-seeded targetVz (from the EMA-lagged AnimFlags jumpVz field)
+        // cannot immediately drag the arc downward before physics data arrives.
+        bool mJumpArcPrimed = false;
         // Hysteresis for animation grouping (prevents "tripping" look)
         bool mIsStrafing = false;
     };

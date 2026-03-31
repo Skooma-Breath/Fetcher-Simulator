@@ -14,6 +14,7 @@ namespace mwmp
     {
         float pos[3] = { 0.f, 0.f, 0.f };  // x, y, z
         float rot[3] = { 0.f, 0.f, 0.f };  // rx, ry, rz (radians)
+        bool isTeleporting = false;
     };
 
     struct Velocity
@@ -121,6 +122,7 @@ namespace mwmp
         float    animFwd  = 0.f;  // mPosition[1]: +1=forward, -1=backward, 0=idle
         float    animSide = 0.f;  // mPosition[0]: +1=strafe-right, -1=strafe-left
         float    blockedMoveSpeed = 0.f; // sender-side expected pace for wall-blocked movement
+        float    jumpVz = 0.f;           // launch velocity for remote jump arcs
 
         // movementFlags bit constants — must match the encode side in PlayerSync
         static constexpr uint32_t MF_RUN   = (1u << 0);

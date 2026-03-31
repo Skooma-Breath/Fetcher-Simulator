@@ -167,8 +167,17 @@ void PlayerSync::update(float dt)
         // a steady vertical speed that matches the visual smoothness the
         // local client sees (physics + rendering already smooth the local
         // actor's Z position via collision response and scene graph update).
+        //
+        // Airborne exception: use a much faster alpha (0.75) while physically in the air.
+        // Stair noise doesn't exist during flight, so the slow stair-smoothing alpha
+        // severely underestimates jump launch velocity (e.g. 25% of real vz on first frame).
+        // The receiver primes its arc from the first position packet with |vz| > 30 u/s
+        // — a faster EMA means that packet arrives within 1-2 frames (~16-33 ms) of takeoff
+        // rather than 5-8 frames (~80-130 ms), keeping the cz snap distance small.
         const float rawVz = (pos.pos[2] - mLocal.position.pos[2]) / dt;
-        mSmoothedVz = mSmoothedVz + VZ_SMOOTH_ALPHA * (rawVz - mSmoothedVz);
+        const bool airborne = !world->isOnGround(player) && !world->isSwimming(player) && !world->isFlying(player);
+        const float vzAlpha = airborne ? 0.75f : VZ_SMOOTH_ALPHA;
+        mSmoothedVz = mSmoothedVz + vzAlpha * (rawVz - mSmoothedVz);
         mLocal.velocity.linear[2] = mSmoothedVz;
     }
 
@@ -178,6 +187,16 @@ void PlayerSync::update(float dt)
     mLocal.position.rot[0] = pos.rot[0];
     mLocal.position.rot[1] = pos.rot[1];
     mLocal.position.rot[2] = pos.rot[2];
+
+    // Capture teleport flag from OpenMW engine (coc, scripts, doors)
+    // We bitwise-OR it so if a teleport happens between 33ms network ticks, 
+    // it's strictly captured for the next outgoing packet.
+    if (MWWorld::Player* p = &world->getPlayer())
+    {
+        mLocal.position.isTeleporting |= p->wasTeleported();
+        if (p->wasTeleported())
+            p->setTeleported(false); // Consume engine flag
+    }
 
     // --- dynamic stats ---
     const auto& cstats = player.getClass().getCreatureStats(player);
@@ -258,6 +277,9 @@ void PlayerSync::sendPosition()
     PacketPlayerPosition pkt;
     pkt.setPlayer(&mLocal);
     mClient.sendUnreliable(pkt.encode(mSeqCounter++));
+
+    // Reset teleport flag after encoding so it doesn't persist to the next tick.
+    mLocal.position.isTeleporting = false;
 }
 
 void PlayerSync::sendCellChange()
@@ -530,6 +552,11 @@ void PlayerSync::sendAnimFlags(float dt)
     f.animFwd  = fwd;
     f.animSide = side;
     f.blockedMoveSpeed = wallBlocked ? blockedMoveSpeed : 0.f;
+    // Jump launch velocity: only set on the rising edge so the receiver seeds its
+    // parabolic arc from the real vz at the moment the jump impulse fires.
+    // For all other frames this stays 0 to keep packet semantics clean.
+    const bool wasJumpingPrev = (mLastAnimFlags.movementFlags & AnimFlags::MF_JUMP) != 0;
+    f.jumpVz = (!wasJumpingPrev && jumpingFlag) ? mLocal.velocity.linear[2] : 0.f;
 
     // movementFlags bitmask
     if (stats.getMovementFlag(MWMechanics::CreatureStats::Flag_Run))
@@ -715,6 +742,10 @@ bool PlayerSync::positionChanged() const
 {
     constexpr float POS_THRESHOLD = 0.5f;
     constexpr float ROT_THRESHOLD = 0.02f; // ~1.1 degrees — catches mouse-look turns
+
+    // Force send if a teleport happened, even if delta is technically small.
+    if (mLocal.position.isTeleporting)
+        return true;
 
     for (int i = 0; i < 3; ++i)
         if (std::abs(mLocal.position.pos[i] - mLastPos.pos[i]) > POS_THRESHOLD)

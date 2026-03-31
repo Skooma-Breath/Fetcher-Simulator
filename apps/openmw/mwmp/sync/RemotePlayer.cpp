@@ -722,6 +722,33 @@ namespace mwmp
         mState.position = state.position;
         mState.velocity = state.velocity;
 
+        // --- Explicit Teleport Snap ---
+        // If the sender explicitly flagged this movement as a teleport (coc, scripts, doors),
+        // we hard-snap all interpolation state immediately. There is no need for 
+        // distance heuristics or smoothing in this path.
+        if (state.position.isTeleporting)
+        {
+            mInterp.cx = state.position.pos[0];
+            mInterp.cy = state.position.pos[1];
+            mInterp.cz = state.position.pos[2];
+            mInterp.crx = state.position.rot[0];
+            mInterp.cry = state.position.rot[1];
+            mInterp.crz = state.position.rot[2];
+            mInterp.tx = mInterp.cx;
+            mInterp.ty = mInterp.cy;
+            mInterp.tz = mInterp.cz;
+            mInterp.trx = mInterp.crx;
+            mInterp.try_ = mInterp.cry;
+            mInterp.trz = mInterp.crz;
+            mInterp.lastRecvX = mInterp.cx;
+            mInterp.lastRecvY = mInterp.cy;
+            mInterp.lastRecvZ = mInterp.cz;
+            mInterp.hasTarget = true;
+            mInterp.hasSnapped = true;
+            Log(Debug::Info) << "[MP] RemotePlayer " << mName << " teleported: hard-snapping.";
+            return;
+        }
+
         // Set new interpolation target; record raw received XY for drift cap.
         // When the remote player is idle (both anim axes zero), suppress XY target
         // updates: the sender's move360.lua yawChange causes tiny body rotations at
@@ -743,7 +770,29 @@ namespace mwmp
         mInterp.trx = state.position.rot[0];
         mInterp.try_ = state.position.rot[1];
         mInterp.trz = state.position.rot[2];
+        mInterp.targetVz = state.velocity.linear[2];
         mInterp.hasTarget = true;
+
+        // Prime the jump arc dead-reckoning once we see a real airborne vz.
+        // The AnimFlags jumpVz field is always ≈ 0 at the rising edge (EMA lag),
+        // so gravity is suspended (mJumpArcPrimed=false) until this path fires.
+        // The threshold of 30 u/s filters out stair/slope noise while catching
+        // any genuine jump trajectory (normal jumps start at ~100–200 u/s).
+        const bool currentlyJumping = (mState.animFlags.movementFlags & AnimFlags::MF_JUMP) != 0;
+        if (currentlyJumping && !mJumpArcPrimed && std::abs(state.velocity.linear[2]) > 30.f)
+        {
+            mJumpArcPrimed = true;
+            mInterp.targetVz = state.velocity.linear[2];
+            // Snap cz directly to the sender's current Z so the NPC appears at the correct
+            // airborne height immediately instead of slowly lerping up from the ground.
+            // The un-primed window held tz at ground level (currentVz=0), so cz is still
+            // near ground while tz is now at the sender's real airborne position.
+            // Without this snap, the lerp catch-up gap would trigger the hard-snap path
+            // (>80 units) or produce visible upward acceleration through geometry.
+            mInterp.cz = mInterp.tz;
+            Log(Debug::Info) << "[MP] RemotePlayer " << mName << ": jump arc primed — cz snapped to tz=" << mInterp.tz
+                             << " vz=" << state.velocity.linear[2];
+        }
 
         // Snap current pos to target on first update (avoid lerping from origin)
         if (!mInterp.hasSnapped)
@@ -856,8 +905,34 @@ namespace mwmp
 
         const bool wasJumping = (mLastAppliedAnimFlags.movementFlags & AnimFlags::MF_JUMP) != 0;
         const bool isJumping = (f.movementFlags & AnimFlags::MF_JUMP) != 0;
+
+        // Rising edge: suspend pseudo-gravity until a position packet with real vz arrives.
+        //
+        // WHY NOT use f.jumpVz here:
+        //   jumpVz is captured from mSmoothedVz at the moment the CC jump visual fires.
+        //   That moment is 1-2 frames BEFORE the physics impulse propagates to a position
+        //   delta, so the EMA hasn't seen the jump yet — jumpVz is always ≈ 0 for
+        //   straight-up jumps where the player was standing still beforehand.
+        //   Setting targetVz = 0 and then running pseudo-gravity makes the NPC fall
+        //   immediately while the sender is actually going UP.
+        //
+        // SOLUTION: set mJumpArcPrimed = false on the rising edge. updateInterpolation
+        //   skips pseudo-gravity while unprimed and just holds tz at the last received Z.
+        //   onPositionUpdate primes the arc (mJumpArcPrimed = true) the moment the first
+        //   position packet arrives with |vz| > 30 u/s — that packet has the real launch
+        //   velocity and sets mInterp.targetVz before gravity runs.
+        if (!wasJumping && isJumping)
+        {
+            mJumpArcPrimed = false;
+            mInterp.targetVz = 0.f; // will be overwritten by first real position packet
+            Log(Debug::Info) << "[MP] RemotePlayer " << mName
+                             << ": jump rising edge — arc suspended, awaiting position vz";
+        }
+
         if (wasJumping && !isJumping)
         {
+            mJumpArcPrimed = false; // reset for next jump
+
             // Jump ended, snap Z to target to prevent feet clipping into the floor
             mInterp.cz = mInterp.tz;
             // Force the CC to see at least a brief grounded state to break fall-loop
@@ -1016,7 +1091,7 @@ namespace mwmp
         const bool isFlying = (mState.animFlags.movementFlags & AnimFlags::MF_FLY) != 0;
         const bool isAirborne = isJumping || isFlying;
         const float netVerticalSpeed = mState.velocity.linear[2];
-        const bool hasVerticalMotion = std::abs(netVerticalSpeed) > 0.1f;
+        const bool hasVerticalMotion = std::abs(netVerticalSpeed) > 0.1f || isAirborne;
         // Use a larger epsilon (0.1) for idle detection to decisively filter wiggles.
         // Any real vertical motion must break the idle-grounded path or levitation and
         // stair movement get misclassified as "standing still".
@@ -1039,14 +1114,32 @@ namespace mwmp
         // time saw Z stuck at the cap.  16 matches XY's proportional headroom.
         if (!isIdleGrounded && hasVerticalMotion)
         {
-            mInterp.tz += netVerticalSpeed * dt;
+            float currentVz = netVerticalSpeed;
+            if (isAirborne && !isFlying)
+            {
+                // TES3MP lesson: pseudo-gravity dead-reckoning is unreliable because
+                // the EMA significantly underestimates superjump launch velocity
+                // (alpha=0.25 → only 25% of real vz captured on first frame).
+                // Seeding with the wrong initial vz produces an arc that peaks too early
+                // and then fights position packet corrections, causing floor/ceiling clips.
+                //
+                // Instead, track position packets directly (no Z prediction during jumps).
+                // The lerp + gap-snap below produce smooth, clip-free arcs that match the
+                // TES3MP proven approach. Pseudo-gravity is preserved for ground movement
+                // (slopes, stairs) where the EMA is accurate.
+                //
+                // Slide the anchor each frame so the drift cap follows received Z rather
+                // than clamping against stale ground level across the whole flight.
+                currentVz = 0.f;
+                mInterp.lastRecvZ = mInterp.tz;
+            }
 
-            // For purely vertical jumps (no XY motion), don't extrapolate Z at all.
-            // This prevents the predictor from driving the head through low ceilings
-            // while waiting for the apex velocity packet to arrive.
-            const bool isPureVertical = (std::abs(mState.animFlags.animFwd) < 0.1f && std::abs(mState.animFlags.animSide) < 0.1f);
-            const float maxZExtrap = (isAirborne && isPureVertical) ? 0.f : (isAirborne ? 24.f : 8.f);
-            
+            mInterp.tz += currentVz * dt;
+
+            // Scale drift cap dynamically based on velocity instead of a fixed 24u limit
+            // so extreme speeds (e.g. jump spells) don't stall extrapolation.
+            const float maxZExtrap = isAirborne ? std::max(80.f, std::abs(currentVz) * 0.1f) : 8.f;
+
             mInterp.tz = std::clamp(mInterp.tz, mInterp.lastRecvZ - maxZExtrap, mInterp.lastRecvZ + maxZExtrap);
         }
 
@@ -1060,21 +1153,45 @@ namespace mwmp
             Log(Debug::Info) << "[MPDBG] " << mName << " IdleGrounded speed=" << interpSpeed;
         }
 
-        const float posAlpha = std::min(1.f, dt * interpSpeed);
+        const float posAlpha = 1.0f - std::exp(-dt * interpSpeed);
         mInterp.cx += (mInterp.tx - mInterp.cx) * posAlpha;
         mInterp.cy += (mInterp.ty - mInterp.cy) * posAlpha;
 
-        // Z-axis: use the same prediction-aware alpha as XY now that Z has proper
-        // dead-reckoning.  The old zAlpha=60 band-aid was needed to quickly snap
-        // to stale targets — with prediction the target is close, so a gentler
-        // alpha produces smooth curves (slopes, stairs) and clean jump arcs.
-        // A larger multiplier (3.0 vs 1.5) keeps Z snappier than XY to track
-        // jump parabolas and levitation altitude changes crisply without clipping.
-        const float zMultiplier = isAirborne ? 3.0f : 1.5f;
-        const float zAlpha = std::min(1.f, dt * interpSpeed * zMultiplier);
-        mInterp.cz += (mInterp.tz - mInterp.cz) * zAlpha;
+        // Z-axis lerp — TES3MP approach: hard snap when gap > 80 units, smooth lerp otherwise.
+        //
+        // Without dead-reckoning the tz holds at each received position packet and advances
+        // only when new packets arrive (30 Hz). A fast lerp keeps the NPC close.
+        // The hard snap prevents slow catch-up from sliding through geometry on superjumps
+        // where the sender may be 100+ units above the NPC's last position — the same
+        // maxInterpolationDistance=80 threshold used in TES3MP DedicatedPlayer::move().
+        //
+        // zMultiplier 3.0 (airborne) vs 1.5 (grounded): keeps Z snappier than XY so
+        // slope/stair altitude changes and jumps track position packets crisply.
+        // Z-axis lerp: we rely on the explicit mState.position.isTeleporting flag 
+        // to handle hard-snaps during coc/teleport. For regular movement (including
+        // 1000+ Acrobatics jumps), we allow the exponential decay to stay smooth.
+        // A very large fallback snap (2000u) is kept only for extreme desync safety.
+        {
+            const float zGap = std::abs(mInterp.tz - mInterp.cz);
+            if (zGap > 2000.f)
+            {
+                mInterp.cz = mInterp.tz;
+                Log(Debug::Info) << "[MP] " << mName << " Safety Hard-Snap gap=" << zGap;
+            }
+            else
+            {
+                // Reduced multipliers (was 3.0 : 1.5) to fix 60 FPS lurch-and-pause stutter.
+                // At 60 FPS (dt=0.0166), an airborne multiplier of 1.5 yields an
+                // alpha of ~0.37 (37% distance closed per frame). This perfectly
+                // emulates the smooth pacing we observed at 120 FPS previously.
+                const float zMultiplier = isAirborne ? 1.5f : 1.0f;
+                const float zAlpha = 1.0f - std::exp(-dt * interpSpeed * zMultiplier);
+                mInterp.cz += (mInterp.tz - mInterp.cz) * zAlpha;
+            }
+        }
 
-        Log(Debug::Info) << "[MPDBG] " << mName << " Alpha pos=" << posAlpha << " z=" << zAlpha;
+        Log(Debug::Info) << "[MPDBG] " << mName << " Alpha pos=" << posAlpha
+                         << " zGap=" << std::abs(mInterp.tz - mInterp.cz);
 
         // Idle ground snap: quickly close the last few units after movement stops
         // so the actor doesn't visibly coast to a halt.  Deliberately excluded
@@ -1101,7 +1218,7 @@ namespace mwmp
 
         // Rotation: snappier — turns should feel responsive, not lag behind.
         // lerpAngle handles the 0/2π wrap so we always take the short path.
-        const float rotAlpha = std::min(1.f, dt * ROT_INTERP_SPEED);
+        const float rotAlpha = 1.0f - std::exp(-dt * ROT_INTERP_SPEED);
         const float oldCrz = mInterp.crz;
         mInterp.crx = lerpAngle(mInterp.crx, mInterp.trx, rotAlpha);
         mInterp.cry = lerpAngle(mInterp.cry, mInterp.try_, rotAlpha);
@@ -1207,7 +1324,7 @@ namespace mwmp
         //     MAX_EXTRAP_DIST so a stale velocity (player stopped, packet delayed, or
         //     direction changed) cannot walk the ghost arbitrarily far away.  The next
         //     position packet resets lastRecvX/Y and corrects the target instantly.
-        if (!isAirborne && !isIdleGrounded)
+        if (!isIdleGrounded)
         {
             const float vx = mState.velocity.linear[0];
             const float vy = mState.velocity.linear[1];
@@ -1217,16 +1334,17 @@ namespace mwmp
                 mInterp.tx += vx * dt;
                 mInterp.ty += vy * dt;
 
-                // Cap drift from last received packet position.
-                // 2 × max Morrowind run speed (~280 u/s) × 1 packet at 30 Hz ≈ 19 units.
-                // Use 24 units as a comfortable ceiling that handles a single dropped packet.
-                constexpr float MAX_EXTRAP_DIST = 24.f;
+                // Cap drift dynamically based on velocity instead of a fixed 24u limit
+                // so extreme speeds (e.g. jump spells) don't hit the interpolation ceiling.
+                const float speedSq = vx * vx + vy * vy;
+                const float maxExtrapDist = std::max(24.f, std::sqrt(speedSq) * 0.1f);
+
                 const float driftX = mInterp.tx - mInterp.lastRecvX;
                 const float driftY = mInterp.ty - mInterp.lastRecvY;
                 const float driftSq = driftX * driftX + driftY * driftY;
-                if (driftSq > MAX_EXTRAP_DIST * MAX_EXTRAP_DIST)
+                if (driftSq > maxExtrapDist * maxExtrapDist)
                 {
-                    const float scale = MAX_EXTRAP_DIST / std::sqrt(driftSq);
+                    const float scale = maxExtrapDist / std::sqrt(driftSq);
                     mInterp.tx = mInterp.lastRecvX + driftX * scale;
                     mInterp.ty = mInterp.lastRecvY + driftY * scale;
                 }

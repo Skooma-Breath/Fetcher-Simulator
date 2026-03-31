@@ -79,6 +79,8 @@ namespace mwmp
         float mPositionTimer    = 0.f;
         float mStatsTimer       = 0.f;
 
+        //60 Hz breaks footstep cadence...need to test with Lerping
+        //static constexpr float POSITION_RATE = 0.166f; // 60 Hz
         static constexpr float POSITION_RATE = 0.033f; // 30 Hz
         static constexpr float STATS_RATE    = 1.0f;   // 1 Hz
 

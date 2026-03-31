@@ -15,6 +15,7 @@ namespace mwmp
         {
             ws.write(mPlayer->guid);
             packPosition(ws, mPlayer->position);
+            ws.write(mPlayer->position.isTeleporting);
             ws.write(mPlayer->velocity.linear[0]);
             ws.write(mPlayer->velocity.linear[1]);
             ws.write(mPlayer->velocity.linear[2]);
@@ -24,6 +25,7 @@ namespace mwmp
         {
             rs.read(mPlayer->guid);
             unpackPosition(rs, mPlayer->position);
+            rs.read(mPlayer->position.isTeleporting);
             rs.read(mPlayer->velocity.linear[0]);
             rs.read(mPlayer->velocity.linear[1]);
             rs.read(mPlayer->velocity.linear[2]);
