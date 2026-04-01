@@ -176,6 +176,11 @@ namespace mwmp
         bool        knocked = false;
         float       strength = 0.f;
         int         type    = 0;    // 0=melee,1=magic,2=bow,3=throw
+        // Animation group chosen by the sender's CharacterController at wind-up time.
+        // "chop" / "slash" / "thrust" for melee; "shoot" for ranged.
+        // Mirrors TES3MP attack.attackAnimation — lets the receiver's CC play the
+        // exact same sub-animation instead of always defaulting to a random type.
+        std::string attackAnimation;
     };
 
     // -----------------------------------------------------------------------
@@ -187,6 +192,12 @@ namespace mwmp
         uint32_t    targetGuid  = 0;    // mp guid of target player (0 = world object)
         std::string targetRefId;        // refId of world object target
         bool        success     = false;
+        // Range-type animation key prefix for the spellcast group.
+        // Values: "self", "touch", "target" (from ESM::ENAMstruct::mRange).
+        // Used by the receiver as: startKey = castAnimation + " start"
+        // Mirrors the mAttackType string the sender's CC writes at
+        // UpperBodyState::Casting entry — same pattern as attackAnimation on Attack.
+        std::string castAnimation;
     };
 
 } // namespace mwmp

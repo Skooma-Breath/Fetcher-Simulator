@@ -47,7 +47,7 @@ namespace mwmp
         void tickDynamicStats(float dt);
 
         // ---- send helpers ----
-        void sendPosition();
+        void sendPosition(bool reliable);
         void sendCellChange();
         void sendEquipment();
         void sendAnimFlags(float dt);
@@ -85,7 +85,7 @@ namespace mwmp
         static constexpr float STATS_RATE    = 1.0f;   // 1 Hz
 
         // --- last-sent snapshots for delta detection ---
-        struct PositionSnapshot { float pos[3]; float rot[3]; };
+        struct PositionSnapshot { float pos[3]; float rot[3]; float velocity[3]; };
         PositionSnapshot mLastPos{};
 
         struct CellSnapshot { std::string cellName; bool isExterior; int gx; int gy; };

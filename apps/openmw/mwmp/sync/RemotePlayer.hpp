@@ -146,6 +146,8 @@ namespace mwmp
         bool mJumpArcPrimed = false;
         // Hysteresis for animation grouping (prevents "tripping" look)
         bool mIsStrafing = false;
+        // Tracking age of last position packet for extrapolation braking
+        float mTimeSinceLastPosUpdate = 0.f;
     };
 
     // -----------------------------------------------------------------------

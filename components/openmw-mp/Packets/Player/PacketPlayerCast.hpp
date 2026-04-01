@@ -31,6 +31,7 @@ namespace mwmp
             ws.write(mPlayer->castSpell.targetGuid);
             ws.writeString(mPlayer->castSpell.targetRefId);
             ws.write(mPlayer->castSpell.success);
+            ws.writeString(mPlayer->castSpell.castAnimation);
         }
 
         void unpack(ReadStream& rs) override
@@ -40,6 +41,7 @@ namespace mwmp
             rs.read(mPlayer->castSpell.targetGuid);
             mPlayer->castSpell.targetRefId = rs.readString();
             rs.read(mPlayer->castSpell.success);
+            mPlayer->castSpell.castAnimation = rs.readString();
         }
     };
 

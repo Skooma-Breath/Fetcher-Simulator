@@ -25,7 +25,6 @@
 #include "../../mwworld/cellstore.hpp"
 #include "../../mwworld/cell.hpp"
 #include "../../mwmechanics/creaturestats.hpp"
-#include "../../mwworld/inventorystore.hpp"
 #include "../../mwworld/player.hpp"
 #include "../../mwworld/livecellref.hpp"
 #include <components/esm3/loadnpc.hpp>
@@ -161,19 +160,6 @@ void PlayerSync::update(float dt)
         mLocal.velocity.linear[1] = (pos.pos[1] - mLocal.position.pos[1]) / dt;
 
         // Z velocity: smooth with EMA to tame stair-geometry spikes.
-        // Raw per-frame Z deltas on stairs alternate between large (step up)
-        // and zero (flat tread), producing a spiky signal that makes the
-        // receiver's Z dead-reckoning jitter.  The EMA averages this into
-        // a steady vertical speed that matches the visual smoothness the
-        // local client sees (physics + rendering already smooth the local
-        // actor's Z position via collision response and scene graph update).
-        //
-        // Airborne exception: use a much faster alpha (0.75) while physically in the air.
-        // Stair noise doesn't exist during flight, so the slow stair-smoothing alpha
-        // severely underestimates jump launch velocity (e.g. 25% of real vz on first frame).
-        // The receiver primes its arc from the first position packet with |vz| > 30 u/s
-        // — a faster EMA means that packet arrives within 1-2 frames (~16-33 ms) of takeoff
-        // rather than 5-8 frames (~80-130 ms), keeping the cz snap distance small.
         const float rawVz = (pos.pos[2] - mLocal.position.pos[2]) / dt;
         const bool airborne = !world->isOnGround(player) && !world->isSwimming(player) && !world->isFlying(player);
         const float vzAlpha = airborne ? 0.75f : VZ_SMOOTH_ALPHA;
@@ -251,8 +237,14 @@ void PlayerSync::tickPosition(float dt)
     if (!positionChanged())
         return;
 
+    // Velocity-Stop edge: if velocity just dropped to zero, send reliably to
+    // ensure the "Stop" signal reaches the receiver immediately.
+    const bool wasMovingVel = (mLastPos.velocity[0] != 0.f || mLastPos.velocity[1] != 0.f || mLastPos.velocity[2] != 0.f);
+    const bool nowMovingVel = (mLocal.velocity.linear[0] != 0.f || mLocal.velocity.linear[1] != 0.f || mLocal.velocity.linear[2] != 0.f);
+    const bool reliableStop = wasMovingVel && !nowMovingVel;
+
     snapshotPosition();
-    sendPosition();
+    sendPosition(reliableStop);
 }
 
 // ---------------------------------------------------------------------------
@@ -272,11 +264,14 @@ void PlayerSync::tickDynamicStats(float dt)
 }
 
 // ---------------------------------------------------------------------------
-void PlayerSync::sendPosition()
+void PlayerSync::sendPosition(bool reliable)
 {
     PacketPlayerPosition pkt;
     pkt.setPlayer(&mLocal);
-    mClient.sendUnreliable(pkt.encode(mSeqCounter++));
+    if (reliable)
+        mClient.sendReliable(pkt.encode(mSeqCounter++));
+    else
+        mClient.sendUnreliable(pkt.encode(mSeqCounter++));
 
     // Reset teleport flag after encoding so it doesn't persist to the next tick.
     mLocal.position.isTeleporting = false;
@@ -428,14 +423,19 @@ void PlayerSync::sendAnimFlags(float dt)
         // Purpose: prevent camera-orbit (move360.lua yawChange ~18–35 u/s) from
         // triggering walk/strafe anims when the player is only rotating the view.
         bool kFwd = false, kBack = false, kLeft = false, kRight = false;
+        bool kJump = false, kSneak = false;
         if (auto inputMgr = MWBase::Environment::get().getInputManager())
         {
             kFwd  = inputMgr->actionIsActive(MWInput::A_MoveForward);
             kBack = inputMgr->actionIsActive(MWInput::A_MoveBackward);
             kLeft = inputMgr->actionIsActive(MWInput::A_MoveLeft);
-            kRight= inputMgr->actionIsActive(MWInput::A_MoveRight);
+            kRight = inputMgr->actionIsActive(MWInput::A_MoveRight);
+            kJump = inputMgr->actionIsActive(MWInput::A_Jump);
+            kSneak = inputMgr->actionIsActive(MWInput::A_Sneak);
             rawHasMovementInput = kFwd || kBack || kLeft || kRight;
         }
+
+        const bool rawHasVerticalInput = kJump || kSneak;
 
         // Movement tap latch: keep the WASD gate open for a short window after the
         // last real key press (any stance — walk, run, or sneak).
@@ -519,6 +519,31 @@ void PlayerSync::sendAnimFlags(float dt)
             // the sender's intent (key held = moving) is always transmitted correctly.
             fwd = kFwd ? 1.f : (kBack ? -1.f : 0.f);
             side = kRight ? 1.f : (kLeft ? -1.f : 0.f);
+        }
+        else // No real input, mMoveLatch dead
+        {
+            fwd = 0.f;  // Snap to idle
+            side = 0.f;
+
+            // Zero-Velocity Snap (Ground/XY): forcefully zero transmitted XY velocity
+            // to prevent physics "drift tails" from being broadcast after a stop.
+            mLocal.velocity.linear[0] = 0.f;
+            mLocal.velocity.linear[1] = 0.f;
+        }
+
+        // Zero-Velocity Snap (Vertical/Z): if levitating/swimming and no vertical input
+        // is active, force Z velocity to zero and reset the EMA to prevent drift tails.
+        if (!physicallyAirborne && !rawHasVerticalInput)
+        {
+            // Reset Z-axis smoothing immediately on levitation stop.
+            mSmoothedVz = 0.f;
+            mLocal.velocity.linear[2] = 0.f;
+        }
+        else if (!rawHasVerticalInput && (world->isFlying(player) || world->isSwimming(player)))
+        {
+            // Force zero vertical drift even if the physics engine has a decay tail.
+            mSmoothedVz = 0.f;
+            mLocal.velocity.linear[2] = 0.f;
         }
     }
 
@@ -692,13 +717,26 @@ void PlayerSync::sendAttack()
         = player.getClass().getCreatureStats(player);
     const bool pressed = stats.getAttackingOrSpell();
 
-    // Only send on the rising edge (button press), not while held
+    // Only send on edge transitions (press and release both matter: press triggers
+    // the wind-up animation; release tells the receiver to end it)
     if (pressed == mLastAttackPressed) return;
     mLastAttackPressed = pressed;
 
     mLocal.attack.pressed = pressed;
-    // target, hit, strength etc. are set by the combat system hooks
-    // (Phase 7E); for now we relay the press/release so the animation fires.
+
+    // On the rising edge, capture the animation type chosen by CharacterController.
+    // The CC writes "mp_attack_type" to the base node just before startKey is built
+    // (character.cpp send hook), so it's always fresh when we get here.
+    if (pressed)
+    {
+        std::string atkType;
+        if (auto* bn = player.getRefData().getBaseNode();
+            bn && bn->getUserValue("mp_attack_type", atkType))
+        {
+            mLocal.attack.attackAnimation = atkType;
+            Log(Debug::Verbose) << "[MP] PlayerSync::sendAttack pressed=true type=" << atkType;
+        }
+    }
 
     PacketPlayerAttack pkt;
     pkt.setPlayer(&mLocal);
@@ -714,23 +752,35 @@ void PlayerSync::sendCast()
     MWWorld::Ptr player = world->getPlayerPtr();
     if (player.isEmpty()) return;
 
-    const MWMechanics::CreatureStats& stats
-        = player.getClass().getCreatureStats(player);
+    // character.cpp writes "mp_cast_pending" = true and "mp_cast_spell_id" to the
+    // base node the frame the spellcast animation begins — the same trigger point
+    // TES3MP uses (localCast->shouldSend = true inside UpperBodyState::Casting entry).
+    // We read-and-clear the flag here so each cast produces exactly one packet.
+    auto* bn = player.getRefData().getBaseNode();
+    if (!bn) return;
 
-    // Use the same AttackingOrSpell flag — the CharacterController sets it
-    // for both melee and spell actions.  We distinguish via attack.type:
-    // type 1 = magic (see BaseStructs Attack::type comment).
-    // Phase 7E will wire into the actual MWMechanics spell-cast callback for
-    // accurate spellId / target data.  For now we detect the flag edge.
-    const bool casting = stats.getAttackingOrSpell()
-        && (stats.getAttackType() == "cast"
-            || stats.getAttackType() == "spellcast");
+    bool castPending = false;
+    if (!bn->getUserValue("mp_cast_pending", castPending) || !castPending)
+        return;
 
-    if (casting == mLastCastingOrSpell) return;
-    mLastCastingOrSpell = casting;
-    if (!casting) return; // only send on the rising edge
+    // Clear immediately so we don't double-send if update() runs twice before
+    // the base node is refreshed (shouldn't happen, but be defensive).
+    bn->setUserValue("mp_cast_pending", false);
 
-    mLocal.castSpell.success = true; // optimistic — Phase 7E validates
+    std::string spellId;
+    bn->getUserValue("mp_cast_spell_id", spellId);
+
+    mLocal.castSpell.spellId  = spellId;
+    mLocal.castSpell.success  = true; // optimistic; Phase 7E will validate
+    mLocal.castSpell.targetGuid   = 0;
+    mLocal.castSpell.targetRefId.clear();
+
+    std::string castAnim;
+    bn->getUserValue("mp_cast_anim", castAnim);
+    mLocal.castSpell.castAnimation = castAnim;
+
+    Log(Debug::Info) << "[MP] PlayerSync::sendCast spellId='" << spellId << "'";
+
     PacketPlayerCast pkt;
     pkt.setPlayer(&mLocal);
     mClient.sendReliable(pkt.encode(mSeqCounter++));
@@ -740,30 +790,39 @@ void PlayerSync::sendCast()
 // Change detection helpers
 bool PlayerSync::positionChanged() const
 {
-    constexpr float POS_THRESHOLD = 0.5f;
-    constexpr float ROT_THRESHOLD = 0.02f; // ~1.1 degrees — catches mouse-look turns
+    constexpr float posThreshold = 0.5f;
+    constexpr float rotThreshold = 0.02f; // ~1.1 degrees — catches mouse-look turns
 
     // Force send if a teleport happened, even if delta is technically small.
     if (mLocal.position.isTeleporting)
         return true;
 
     for (int i = 0; i < 3; ++i)
-        if (std::abs(mLocal.position.pos[i] - mLastPos.pos[i]) > POS_THRESHOLD)
+        if (std::abs(mLocal.position.pos[i] - mLastPos.pos[i]) > posThreshold)
             return true;
 
     // Rotation: compare with wrap-around so the 0/2π boundary doesn't cause
     // false negatives when the player is facing near north/south.
-    constexpr float TWO_PI = 6.28318530718f;
-    constexpr float PI     = 3.14159265359f;
+    constexpr float twoPi = 6.28318530718f;
+    constexpr float pi     = 3.14159265359f;
     for (int i = 0; i < 3; ++i)
     {
         float diff = mLocal.position.rot[i] - mLastPos.rot[i];
         // Normalise diff to [-π, π]
-        while (diff >  PI) diff -= TWO_PI;
-        while (diff < -PI) diff += TWO_PI;
-        if (std::abs(diff) > ROT_THRESHOLD)
+        while (diff >  pi) diff -= twoPi;
+        while (diff < -pi) diff += twoPi;
+        if (std::abs(diff) > rotThreshold)
             return true;
     }
+
+    // Velocity-Delta Sync: force a sync if the velocity dropped to zero, even if
+    // the position change is below the threshold. This ensures the "Stop" signal
+    // is broadcast immediately, preventing remote NPC overshoot drift.
+    const bool wasMovingVel = (mLastPos.velocity[0] != 0.f || mLastPos.velocity[1] != 0.f || mLastPos.velocity[2] != 0.f);
+    const bool nowMovingVel = (mLocal.velocity.linear[0] != 0.f || mLocal.velocity.linear[1] != 0.f || mLocal.velocity.linear[2] != 0.f);
+    if (wasMovingVel && !nowMovingVel)
+        return true;
+
     return false;
 }
 
@@ -789,10 +848,10 @@ bool PlayerSync::equipmentChanged() const
 
 bool PlayerSync::dynamicStatsChanged() const
 {
-    constexpr float EPS = 0.01f;
-    return std::abs(mLocal.dynamicStats.health.current  - mLastStats.hCur) > EPS
-        || std::abs(mLocal.dynamicStats.magicka.current - mLastStats.mCur) > EPS
-        || std::abs(mLocal.dynamicStats.fatigue.current - mLastStats.fCur) > EPS;
+    constexpr float eps = 0.01f;
+    return std::abs(mLocal.dynamicStats.health.current  - mLastStats.hCur) > eps
+        || std::abs(mLocal.dynamicStats.magicka.current - mLastStats.mCur) > eps
+        || std::abs(mLocal.dynamicStats.fatigue.current - mLastStats.fCur) > eps;
 }
 
 bool PlayerSync::animFlagsChanged() const
@@ -809,6 +868,7 @@ void PlayerSync::snapshotPosition()
 {
     std::memcpy(mLastPos.pos, mLocal.position.pos, sizeof(mLastPos.pos));
     std::memcpy(mLastPos.rot, mLocal.position.rot, sizeof(mLastPos.rot));
+    std::memcpy(mLastPos.velocity, mLocal.velocity.linear, sizeof(mLastPos.velocity));
 }
 void PlayerSync::snapshotCell()
 {

@@ -15,6 +15,7 @@
 #include "../../mwgui/mode.hpp"
 #include "../../mwmechanics/aisetting.hpp"
 #include "../../mwmechanics/character.hpp"
+#include "../../mwmechanics/spellcasting.hpp"
 #include "../../mwmechanics/creaturestats.hpp"
 #include "../../mwmechanics/movement.hpp"
 #include "../../mwrender/animation.hpp"
@@ -28,6 +29,11 @@
 #include "../../mwworld/manualref.hpp"
 #include "../../mwworld/ptr.hpp"
 #include <components/esm3/loadnpc.hpp>
+#include <components/esm3/loadspel.hpp>
+#include <components/esm3/loadmgef.hpp>
+#include <components/esm3/loadstat.hpp>
+#include <components/misc/resourcehelpers.hpp>
+#include <components/vfs/pathutil.hpp>
 #include <components/sceneutil/positionattitudetransform.hpp>
 
 namespace mwmp
@@ -718,6 +724,13 @@ namespace mwmp
                             << " knownCell='" << mState.cell.cellName << "'"
                             << " ext=" << mState.cell.isExterior << " grid=(" << mState.cell.gridX << ","
                             << mState.cell.gridY << ")";
+
+        mTimeSinceLastPosUpdate = 0.f;
+
+        const float oldVx = mState.velocity.linear[0];
+        const float oldVy = mState.velocity.linear[1];
+        const float oldVz = mState.velocity.linear[2];
+
         // intentionally NOT touching mState.cell
         mState.position = state.position;
         mState.velocity = state.velocity;
@@ -772,6 +785,32 @@ namespace mwmp
         mInterp.trz = state.position.rot[2];
         mInterp.targetVz = state.velocity.linear[2];
         mInterp.hasTarget = true;
+
+        // --- Immediate Stop Snap (Fix: Overshoot & Snap Back) ---
+        // If the sender just reached a hard stop (velocity zero) and we were previously moving
+        // at high speed (especially during levitation), check if our extrapolation-driven
+        // visual position (cx/cy/cz) has overshot the authoritative target (tx/ty/tz).
+        // If so, snap visually to the target immediately. This eliminates the visual 
+        // reverse-jerk since we 'settle' the error in a single frame.
+        const bool isStoppingNow = (mState.velocity.linear[0] == 0.f && mState.velocity.linear[1] == 0.f && mState.velocity.linear[2] == 0.f);
+        const bool wasMovingFast = (oldVx * oldVx + oldVy * oldVy + oldVz * oldVz) > 10000.f; // ~100 u/s threshold
+        if (isStoppingNow && wasMovingFast && mInterp.hasSnapped)
+        {
+            const float dx = mInterp.cx - mInterp.tx;
+            const float dy = mInterp.cy - mInterp.ty;
+            const float dz = mInterp.cz - mInterp.tz;
+            const float overshootDistSq = dx * dx + dy * dy + dz * dz;
+
+            // If we've drifted past the stop point, snap immediately.
+            // 400 units (20 units distance) is a reasonable buffer for a one-frame snap.
+            if (overshootDistSq > 1.0f && overshootDistSq < 1600.f)
+            {
+                mInterp.cx = mInterp.tx;
+                mInterp.cy = mInterp.ty;
+                mInterp.cz = mInterp.tz;
+                Log(Debug::Info) << "[MP] RemotePlayer " << mName << " stop overshoot suppressed (snap dist=" << std::sqrt(overshootDistSq) << ")";
+            }
+        }
 
         // Prime the jump arc dead-reckoning once we see a real airborne vz.
         // The AnimFlags jumpVz field is always ≈ 0 at the rising edge (EMA lag),
@@ -974,8 +1013,17 @@ namespace mwmp
             return;
         }
 
-        anim->play(ap.groupName, MWRender::AnimPriority(ap.priority), MWRender::BlendMask_All,
-            /*autodisable=*/false,
+        int blendMask = MWRender::BlendMask_All;
+        if (ap.groupName == "spellcast" || ap.groupName == "attack")
+        {
+            // Always allow independent leg movement during spellcast and attack groups.
+            // This avoids 'locked feet' if the animation started while the NPC was idle
+            // but then began moving before the cast/attack finished.
+            blendMask = MWRender::BlendMask_UpperBody;
+        }
+
+        anim->play(ap.groupName, MWRender::AnimPriority(ap.priority), blendMask,
+            /*autodisable=*/true,
             /*speedmult=*/1.f, ap.startKey, ap.stopKey,
             /*startpoint=*/0.f,
             /*loops=*/static_cast<uint32_t>(std::max(0, ap.loops)));
@@ -993,9 +1041,21 @@ namespace mwmp
         mState.attack = state.attack;
         const Attack& atk = state.attack;
 
-        Log(Debug::Info) << "[MP] RemotePlayer " << mName << ": onAttack hit=" << atk.hit << " block=" << atk.block
-                         << " miss=" << atk.miss << " type=" << atk.type << " target='" << atk.target << "'"
+        Log(Debug::Info) << "[MP] RemotePlayer " << mName << ": onAttack"
+                         << " pressed=" << atk.pressed
+                         << " hit=" << atk.hit << " block=" << atk.block
+                         << " miss=" << atk.miss << " type=" << atk.type
+                         << " anim='" << atk.attackAnimation << "'"
+                         << " target='" << atk.target << "'"
                          << " targetMpNum=" << atk.targetMpNum;
+
+        // Push the animation type onto the NPC's base node so the CC receive hook
+        // in character.cpp (Flag_NetworkPlayerNpc branch) reads it when it enters
+        // the attack wind-up.  This is the exact pattern TES3MP uses:
+        //   dedicatedAttack->attackAnimation → mAttackType in character.cpp.
+        if (!atk.attackAnimation.empty())
+            if (auto* bn = mNpcPtr.getRefData().getBaseNode())
+                bn->setUserValue("mp_attack_type", atk.attackAnimation);
 
         // Tell the CharacterController the actor is attacking so it transitions
         // into the correct attack animation group on its own.  We set the flag
@@ -1016,18 +1076,72 @@ namespace mwmp
         mState.castSpell = state.castSpell;
         const CastSpell& cs = state.castSpell;
 
-        Log(Debug::Info) << "[MP] RemotePlayer " << mName << ": onCast spellId='" << cs.spellId << "'"
-                         << " success=" << cs.success << " targetGuid=" << cs.targetGuid;
+        const std::string range = cs.castAnimation.empty() ? "self" : cs.castAnimation;
 
-        // Play the standard spell-cast animation on the caster's NPC.
-        // "spellcast" is the vanilla Morrowind animation group name for this.
+        Log(Debug::Info) << "[MP] RemotePlayer " << mName << ": onCast"
+                         << " spellId='" << cs.spellId << "'"
+                         << " range='" << range << "'"
+                         << " success=" << cs.success
+                         << " targetGuid=" << cs.targetGuid;
+
+        MWBase::World* world = MWBase::Environment::get().getWorld();
+        if (!world) return;
+
+        // ── 1. Play the skeleton animation (spellcast group, range-typed keys) ──────
         BasePlayer animState;
         animState.animPlay.groupName = "spellcast";
-        animState.animPlay.priority = 5;
-        animState.animPlay.loops = 0;
-        animState.animPlay.startKey = "start";
-        animState.animPlay.stopKey = "stop";
+        animState.animPlay.priority  = 7;
+        animState.animPlay.loops     = 0;
+        animState.animPlay.startKey  = range + " start";
+        animState.animPlay.stopKey   = range + " stop";
         onAnimPlay(animState);
+
+        // ── 2. VFX_Hands glow on both hand bones (mirrors character.cpp CC path) ──
+        // character.cpp adds this from the *last* effect's particle texture.
+        // We replicate it using the same ESM lookup the CC uses.
+        if (!cs.spellId.empty())
+        {
+            const MWWorld::ESMStore& store = world->getStore();
+            const ESM::Spell* spell = store.get<ESM::Spell>().search(
+                ESM::RefId::stringRefId(cs.spellId));
+
+            if (spell && !spell->mEffects.mList.empty())
+            {
+                // VFX_Hands — coloured glow driven by the last effect's particle texture
+                const ESM::MagicEffect* lastEffect = store.get<ESM::MagicEffect>().find(
+                    spell->mEffects.mList.back().mData.mEffectID);
+
+                const ESM::Static* handsStatic = store.get<ESM::Static>().find(
+                    ESM::RefId::stringRefId("VFX_Hands"));
+
+                MWRender::Animation* anim = world->getAnimation(mNpcPtr);
+                if (anim && handsStatic && !handsStatic->mModel.empty())
+                {
+                    const VFS::Path::Normalized model
+                        = Misc::ResourceHelpers::correctMeshPath(
+                            VFS::Path::Normalized(handsStatic->mModel));
+
+                    anim->addEffect(model.value(), "", false, "Bip01 L Hand", lastEffect->mParticle);
+                    anim->addEffect(model.value(), "", false, "Bip01 R Hand", lastEffect->mParticle);
+                }
+
+                // ── 3. Per-effect casting VFX + sound via playSpellCastingEffects ──
+                // This is the same call the CC makes; it plays the casting mesh on the
+                // caster (e.g. VFX_DefaultCast or the effect-specific casting mesh) and
+                // the per-school or per-effect casting sound.
+                MWMechanics::CastSpell cast(mNpcPtr, MWWorld::Ptr(),
+                    /*isProjectile=*/false, /*scriptedSpell=*/false);
+                cast.playSpellCastingEffects(spell);
+
+                Log(Debug::Verbose) << "[MP] RemotePlayer " << mName
+                                    << ": cast VFX+sound applied for spellId='" << cs.spellId << "'";
+            }
+            else
+            {
+                Log(Debug::Warning) << "[MP] RemotePlayer " << mName
+                                    << ": spell '" << cs.spellId << "' not found in ESM store — no VFX";
+            }
+        }
 
         // Phase 7E: resolve target and apply spell effects via MWMechanics.
     }
@@ -1078,6 +1192,8 @@ namespace mwmp
         if (!mInterp.hasTarget)
             return;
 
+        mTimeSinceLastPosUpdate += dt;
+
         const float prevCx = mInterp.cx;
         const float prevCy = mInterp.cy;
         const float prevCz = mInterp.cz;
@@ -1090,12 +1206,22 @@ namespace mwmp
         const bool isFlying = (mState.animFlags.movementFlags & AnimFlags::MF_FLY) != 0;
         const bool isAirborne = isJumping || isFlying;
         const float netVerticalSpeed = mState.velocity.linear[2];
-        const bool hasVerticalMotion = std::abs(netVerticalSpeed) > 0.1f || isAirborne;
+        const bool hasVerticalMotion = std::abs(netVerticalSpeed) > 0.1f;
         // Use a larger epsilon (0.1) for idle detection to decisively filter wiggles.
-        // Any real vertical motion must break the idle-grounded path or levitation and
-        // stair movement get misclassified as "standing still".
-        const bool isIdleGrounded
-            = (std::abs(mState.animFlags.animFwd) < 0.1f && std::abs(mState.animFlags.animSide) < 0.1f) && !isAirborne;
+        // Input Idle: both movement axes were let go, regardless of being grounded or airborne.
+        // We exclude jumps from this check because jump arcs are physically-driven without 
+        // manual input but should not be snapped prematurely.
+        const bool isInputIdle = (std::abs(mState.animFlags.animFwd) < 0.1f && std::abs(mState.animFlags.animSide) < 0.1f) && !isJumping;
+
+        // Extrapolation Braking: if a packet is late, decay current velocity.
+        // This ensures the ghost NPC 'coasts' to a halt during delay instead of 
+        // flying at full speed indefinitely.
+        float brakeFactor = 1.0f;
+        if (mTimeSinceLastPosUpdate > 0.033f)
+        {
+            const float delay = mTimeSinceLastPosUpdate - 0.033f;
+            brakeFactor = std::exp(-delay * 15.f); // half-life ~46ms
+        }
 
         // Z dead-reckoning: advance the Z target using the sender's smoothed
         // vertical velocity, exactly as we do for XY.  This covers slopes, stairs,
@@ -1106,14 +1232,10 @@ namespace mwmp
         // `hasVerticalMotion` gate (|vz| > 0.1) was too narrow — on gentle slopes
         // and stair treads the per-frame Z velocity oscillates near zero, stalling
         // prediction while XY kept advancing smoothly.  Using the same idle check
-        // as XY ensures consistent treatment.
-        //
-        // Drift cap: 16 units grounded (was 8), 24 airborne (was 18).  The old 8
-        // only covered ~80 ms at 100 u/s Z velocity — any additional inter-packet
-        // time saw Z stuck at the cap.  16 matches XY's proportional headroom.
-        if (!isIdleGrounded && hasVerticalMotion)
+        // Same idle check as XY ensures consistent treatment.
+        if (!isInputIdle && hasVerticalMotion)
         {
-            float currentVz = netVerticalSpeed;
+            float currentVz = netVerticalSpeed * brakeFactor;
             if (isAirborne && !isFlying)
             {
                 // TES3MP lesson: pseudo-gravity dead-reckoning is unreliable because
@@ -1142,14 +1264,12 @@ namespace mwmp
             mInterp.tz = std::clamp(mInterp.tz, mInterp.lastRecvZ - maxZExtrap, mInterp.lastRecvZ + maxZExtrap);
         }
 
-        // Idle catch-up: faster XY convergence when standing still, but NOT during
-        // a jump — the arc is a fast parabola and we don't want to fight it with
-        // an inflated speed multiplier that makes the Z curve feel sluggish.
+        // Idle catch-up: faster XY convergence when standing still.
         float interpSpeed = POS_INTERP_SPEED;
-        if (isIdleGrounded)
+        if (isInputIdle)
         {
-            interpSpeed *= 2.5f; // 15 * 2.5 = 37.5 u/s snap-to-stop on ground
-            Log(Debug::Verbose) << "[MP] " << mName << " IdleGrounded speed=" << interpSpeed;
+            interpSpeed *= 2.5f; // 15 * 2.5 = 37.5 u/s snap-to-stop
+            Log(Debug::Verbose) << "[MP] " << mName << " InputIdle speed=" << interpSpeed;
         }
 
         const float posAlpha = 1.0f - std::exp(-dt * interpSpeed);
@@ -1182,12 +1302,12 @@ namespace mwmp
         Log(Debug::Verbose) << "[MP] " << mName << " Alpha pos=" << posAlpha
                          << " zGap=" << std::abs(mInterp.tz - mInterp.cz);
 
-        // Idle ground snap: quickly close the last few units after movement stops
-        // so the actor doesn't visibly coast to a halt.  Deliberately excluded
-        // when airborne — during a jump the Z delta oscillates through small values
-        // at packet boundaries, and snapping would cause the erratic zStep jitter
-        // seen in logs (e.g. +3.8, -11.6, +8.3 in consecutive frames).
-        if (isIdleGrounded)
+        // Idle snap: quickly close the last few units after movement stops
+        // so the actor doesn't visibly coast to a halt.
+        // We now include airborne/levitating cases if the sender has sent an
+        // absolute zero velocity (signaling a clean stop).
+        const bool isStopping = (mState.velocity.linear[0] == 0.f && mState.velocity.linear[1] == 0.f && mState.velocity.linear[2] == 0.f);
+        if (isInputIdle || (isAirborne && isStopping))
         {
             const float dx = mInterp.tx - mInterp.cx;
             const float dy = mInterp.ty - mInterp.cy;
@@ -1229,11 +1349,23 @@ namespace mwmp
         const float interpStepZ = mInterp.cz - prevCz;
         const float interpPlanarSpeed
             = dt > 0.f ? std::sqrt(interpStepX * interpStepX + interpStepY * interpStepY) / dt : 0.f;
+        const float interpTotalSpeed
+            = dt > 0.f ? std::sqrt(interpStepX * interpStepX + interpStepY * interpStepY + interpStepZ * interpStepZ) / dt : 0.f;
+
         const float netPlanarSpeedRaw = std::sqrt(mState.velocity.linear[0] * mState.velocity.linear[0]
             + mState.velocity.linear[1] * mState.velocity.linear[1]);
-        // Safety cap (800 u/s instead of 450) to prevent massive network velocity spikes
-        // from causing jitter, while accommodating high Athletics/Acrobatics sprint speeds
-        const float netPlanarSpeed = std::min(netPlanarSpeedRaw, 800.f);
+        const float netTotalSpeedRaw = std::sqrt(mState.velocity.linear[0] * mState.velocity.linear[0]
+            + mState.velocity.linear[1] * mState.velocity.linear[1]
+            + mState.velocity.linear[2] * mState.velocity.linear[2]);
+
+        // Animation cadence — set mInterpPlanarSpeed for CharacterController.
+        // Drive animations from the ACTUAL visual movement (interpolation speed)
+        // rather than solely relying on the sender's physics velocity. This
+        // ensures the footsteps match the visual displacement perfectly.
+        // We use the 3D total speed for levitation so climbing/descending
+        // scales the walk cadence correctly.
+        const float visualPlanarSpeed = std::min(interpPlanarSpeed, 4000.f);
+        const float visualTotalSpeed = std::min(interpTotalSpeed, 4000.f);
 
         // Animation cadence — set mInterpPlanarSpeed for CharacterController.
         //
@@ -1258,28 +1390,26 @@ namespace mwmp
                     // keeps the same cadence as the local actor instead of falling
                     // back to a generic hardcoded speed.
                     const float blockedSpeed = mState.animFlags.blockedMoveSpeed;
-                    mInterpPlanarSpeed = (blockedSpeed > 0.f) ? std::min(std::max(blockedSpeed, netPlanarSpeed), 800.f)
-                                                              : netPlanarSpeed;
+                    mInterpPlanarSpeed = (blockedSpeed > 0.f) ? std::min(std::max(blockedSpeed, visualPlanarSpeed), 4000.f)
+                                                              : visualPlanarSpeed;
                     Log(Debug::Info) << "[MPDBG] " << mName << " Cadence blocked=" << mInterpPlanarSpeed;
                 }
                 else
                 {
-                    // To prevent "ice skating" when the interpolator is catching up over
-                    // a large distance (e.g. at start of sprint), the cadence must track the
-                    // actual visual speed of the actor (interpPlanarSpeed) if it exceeds the
-                    // static network velocity, but should not drop below the network velocity
-                    // to maintain fluid footsteps.
-                    mInterpPlanarSpeed = std::min(std::max(netPlanarSpeed, interpPlanarSpeed), 800.f);
-                    Log(Debug::Verbose) << "[MP] " << mName << " Cadence blend=" << mInterpPlanarSpeed;
+                    // Driving cadence from visual displacement (interpolation) guarantees the
+                    // animation rate matches the distance covered on the ground/air.
+                    // If airborne (levitating), use the total 3D displacement (XYZ).
+                    mInterpPlanarSpeed = isAirborne ? visualTotalSpeed : visualPlanarSpeed;
+                    Log(Debug::Verbose) << "[MP] " << mName << " Cadence visual=" << mInterpPlanarSpeed;
                 }
             }
             else
             {
                 // Even if the interpolator is still settling the remaining error, an idle
-                // grounded actor should not play movement animations. Zeroing the speed
+                // actor should not play movement animations. Zeroing the speed
                 // immediately kills the CharacterController's footstep cadence.
-                mInterpPlanarSpeed = isIdleGrounded ? 0.f : std::min(interpPlanarSpeed, 200.f);
-                Log(Debug::Verbose) << "[MP] " << mName << " Cadence interp=" << mInterpPlanarSpeed;
+                mInterpPlanarSpeed = isInputIdle ? 0.f : std::min(interpPlanarSpeed, 1000.f);
+                Log(Debug::Verbose) << "[MP] " << mName << " Cadence settling=" << mInterpPlanarSpeed;
             }
         }
 
@@ -1292,7 +1422,7 @@ namespace mwmp
                              << " run=" << ((mState.animFlags.movementFlags & AnimFlags::MF_RUN) != 0)
                              << " sneak=" << ((mState.animFlags.movementFlags & AnimFlags::MF_SNEAK) != 0)
                              << " wallBlocked=" << ((mState.animFlags.movementFlags & AnimFlags::MF_WALL_BLOCKED) != 0)
-                             << " blockedSpeed=" << mState.animFlags.blockedMoveSpeed << " netPlanar=" << netPlanarSpeed
+                             << " blockedSpeed=" << mState.animFlags.blockedMoveSpeed << " visualPlanar=" << visualPlanarSpeed
                              << " interpPlanar=" << interpPlanarSpeed << " remainingPlanar=" << remainingPlanar
                              << " posAlpha=" << posAlpha << " zStep=" << interpStepZ
                              << " jump=" << ((mState.animFlags.movementFlags & AnimFlags::MF_JUMP) != 0);
@@ -1307,17 +1437,13 @@ namespace mwmp
         //
         // Guards:
         //   - Not idle (fwd/side != 0): no movement, no prediction needed.
-        //   - Not airborne: jump arc is handled by the Z path above; XY during a jump
-        //     is nearly flat and the position packet cadence is sufficient.
-        //   - Drift cap: limit total XY divergence from the last received position to
-        //     MAX_EXTRAP_DIST so a stale velocity (player stopped, packet delayed, or
-        //     direction changed) cannot walk the ghost arbitrarily far away.  The next
-        //     position packet resets lastRecvX/Y and corrects the target instantly.
-        if (!isIdleGrounded)
+        if (!isInputIdle)
         {
-            const float vx = mState.velocity.linear[0];
-            const float vy = mState.velocity.linear[1];
-            if (vx != 0.f || vy != 0.f)
+            const float vx = mState.velocity.linear[0] * brakeFactor;
+            const float vy = mState.velocity.linear[1] * brakeFactor;
+            // Jitter gate: ignore packet velocity below 1.0 unit/sec to prevent
+            // sub-pixel physics noise from causing constant micro-drifts.
+            if (vx * vx + vy * vy > 1.0f)
             {
                 // Advance target
                 mInterp.tx += vx * dt;

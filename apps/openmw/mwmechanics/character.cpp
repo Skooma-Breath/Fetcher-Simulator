@@ -1669,6 +1669,19 @@ namespace MWMechanics
                             playBlendedAnimation(mCurrentWeapon, priorityWeapon, MWRender::BlendMask_All, false, 1,
                                 startKey, stopKey, 0.0f, 0);
                             mUpperBodyState = UpperBodyState::Casting;
+                            // [mp] Cast send hook: flag the pending cast for PlayerSync to pick up.
+                            // We write at animation-start (not the "release" key) so the send mirrors
+                            // the animation trigger — identical to TES3MP's localCast->shouldSend path.
+                            if (mPtr == getPlayer())
+                            {
+                                if (auto* bn = mPtr.getRefData().getBaseNode())
+                                {
+                                    bn->setUserValue("mp_cast_pending", true);
+                                    bn->setUserValue("mp_cast_spell_id", spellid.serializeText());
+                                    // mAttackType at this point is "self", "touch", or "target"
+                                    bn->setUserValue("mp_cast_anim", std::string(mAttackType));
+                                }
+                            }
                         }
                     }
                 }
@@ -1711,7 +1724,27 @@ namespace MWMechanics
                                 mAttackType = getRandomAttackType();
                         }
 
-                        // else if (mPtr != getPlayer()) use mAttackType set by AiCombat
+                        // [mp] Attack animation sync hooks
+                        // Send side: local player records the chosen type so PlayerSync
+                        // can include it in the next PacketPlayerAttack.
+                        // Receive side: network NPC reads the type sent by the remote
+                        // client so it plays the same chop/slash/thrust sub-animation.
+                        if (mPtr == getPlayer())
+                        {
+                            if (auto* bn = mPtr.getRefData().getBaseNode())
+                                bn->setUserValue("mp_attack_type", std::string(mAttackType));
+                        }
+                        else if (cls.isActor() && cls.getCreatureStats(mPtr).getMovementFlag(
+                            MWMechanics::CreatureStats::Flag_NetworkPlayerNpc))
+                        {
+                            std::string mpType;
+                            auto* bn = mPtr.getRefData().getBaseNode();
+                            if (bn && bn->getUserValue("mp_attack_type", mpType) && !mpType.empty())
+                                mAttackType = mpType;
+                            else
+                                mAttackType = getRandomAttackType();
+                        }
+                        // else: active AI NPC → mAttackType already set by AiCombat above
                         startKey = mAttackType + ' ' + startKey;
                         stopKey = mAttackType + " max attack";
                     }
@@ -2164,8 +2197,21 @@ namespace MWMechanics
             {
                 float mpSpeed = 0.f;
                 auto* bn = mPtr.getRefData().getBaseNode();
-                if (bn && bn->getUserValue("mp_interp_speed", mpSpeed) && mpSpeed > 0.f)
-                    speed = mpSpeed;
+                if (bn && bn->getUserValue("mp_interp_speed", mpSpeed))
+                {
+                    if (mpSpeed > 0.001f)
+                    {
+                        // De-scale the physics speed back to base units (scale 1.0) so it matches
+                        // the mMovementAnimSpeed derived from the raw NIF model.
+                        if (scale > 0.f)
+                            speed = mpSpeed / scale;
+                        else
+                            speed = mpSpeed;
+
+                        if (mMpDebugTimer <= 0.f)
+                            Log(Debug::Info) << "[MPDBG] Applied speed override: " << mpSpeed << " -> " << speed;
+                    }
+                }
             }
 #endif
             vec.x() *= speed;
