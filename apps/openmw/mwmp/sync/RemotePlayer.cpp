@@ -19,6 +19,7 @@
 #include "../../mwmechanics/creaturestats.hpp"
 #include "../../mwmechanics/movement.hpp"
 #include "../../mwrender/animation.hpp"
+#include "../../mwrender/npcanimation.hpp"
 #include "../../mwrender/animationpriority.hpp"
 #include "../../mwrender/blendmask.hpp"
 #include "../../mwworld/cell.hpp"
@@ -35,6 +36,9 @@
 #include <components/misc/resourcehelpers.hpp>
 #include <components/vfs/pathutil.hpp>
 #include <components/sceneutil/positionattitudetransform.hpp>
+
+#include "../Main.hpp"
+#include "PlayerSync.hpp"
 
 namespace mwmp
 {
@@ -331,7 +335,7 @@ namespace mwmp
         stats.setMovementFlag(MWMechanics::CreatureStats::Flag_ForceMoveJump, isJumping);
         stats.setMovementFlag(MWMechanics::CreatureStats::Flag_Run, (f.movementFlags & AnimFlags::MF_RUN) != 0);
         stats.setMovementFlag(MWMechanics::CreatureStats::Flag_Sneak, (f.movementFlags & AnimFlags::MF_SNEAK) != 0);
-        stats.setAttackingOrSpell((f.actionFlags & AnimFlags::AF_ATTACKING) != 0 || mState.attack.pressed);
+        stats.setAttackingOrSpell(mState.attack.pressed);
 
         // ── Knockdown / knockout ───────────────────────────────────────────────────
         // Mirror the sender's live CharacterController hit-state so the receiver's
@@ -345,22 +349,26 @@ namespace mwmp
         // of the CC doesn't fight the hit-state anim.
         const bool isKnockedOut = (f.movementFlags & AnimFlags::MF_KNOCKED_OUT) != 0;
         const bool isKnockedDown = (f.movementFlags & AnimFlags::MF_KNOCKED_DOWN) != 0;
+        const bool isRecovering = (f.movementFlags & AnimFlags::MF_RECOVERY) != 0;
+        const uint32_t currentHitFlags
+            = f.movementFlags & (AnimFlags::MF_KNOCKED_DOWN | AnimFlags::MF_KNOCKED_OUT | AnimFlags::MF_RECOVERY);
+        const bool hitFlagsChanged = (currentHitFlags != mAppliedHitFlags);
 
-        if (isKnockedOut || isKnockedDown)
+        if (isKnockedOut || isKnockedDown || isRecovering)
         {
             // Zero movement so the CC's locomotion branch doesn't fight the hit anim
             mov.mPosition[0] = 0.f;
             mov.mPosition[1] = 0.f;
             mov.mIsStrafing = false;
 
-            stats.setKnockedDown(isKnockedDown && !isKnockedOut);
-
-            if (isKnockedOut)
+            if (hitFlagsChanged && isKnockedOut)
             {
                 // Drive CC into looping KnockOut by holding fatigue negative.
                 // DynamicStats sync never pushes fatigue back to the NPC's
                 // CreatureStats, so this write has no conflict with stats sync.
                 // When the flag clears, vanilla fatigue regen restores naturally.
+                stats.setKnockedDown(true);
+                stats.setHitRecovery(false);
                 MWMechanics::DynamicStat<float> fat = stats.getFatigue();
                 if (fat.getCurrent() >= 0.f)
                 {
@@ -368,11 +376,22 @@ namespace mwmp
                     stats.setFatigue(fat);
                 }
             }
+            else if (hitFlagsChanged && isKnockedDown)
+            {
+                stats.setKnockedDown(true);
+                stats.setHitRecovery(false);
+            }
+            else if (hitFlagsChanged)
+            {
+                stats.setKnockedDown(false);
+                stats.setHitRecovery(true);
+            }
         }
-        else
+        else if (hitFlagsChanged)
         {
             // Recovery: clear knockdown flag so CC exits hit-state naturally.
             stats.setKnockedDown(false);
+            stats.setHitRecovery(false);
             // Also restore fatigue we forced negative for MF_KNOCKED_OUT.
             // Vanilla regen alone is too slow (~seconds) — the CC won't exit
             // KnockOut state until fatigue >= 0, so explicitly restore it on
@@ -384,6 +403,7 @@ namespace mwmp
                 stats.setFatigue(fat);
             }
         }
+        mAppliedHitFlags = currentHitFlags;
 
         MWMechanics::DrawState ds = MWMechanics::DrawState::Nothing;
         if (f.actionFlags & AnimFlags::AF_WEAPON_DRAWN)
@@ -562,6 +582,7 @@ namespace mwmp
             if (auto* baseNode = mNpcPtr.getRefData().getBaseNode())
             {
                 baseNode->setUserValue("mp_player_name", mName);
+                baseNode->setUserValue("mp_player_guid", static_cast<int>(mGuid));
                 mNameplate = std::make_unique<Nameplate>(baseNode, mName);
             }
             else
@@ -569,6 +590,8 @@ namespace mwmp
 
             Log(Debug::Info) << "[MP] RemotePlayer " << mName << ": spawned in world at (" << pos.pos[0] << ", "
                              << pos.pos[1] << ", " << pos.pos[2] << ")";
+
+            onEquipmentUpdate(mState);
         }
         catch (const std::exception& e)
         {
@@ -601,6 +624,7 @@ namespace mwmp
         mNpcPtr = MWWorld::Ptr();
         mIsSpawned = false;
         mMechanicsRegistered = false;
+        mAppliedHitFlags = 0;
         mWasJumping = false; // reset so re-spawn doesn't skip the first jump edge
         mSpawnRetryTimer = SPAWN_RETRY_RATE; // attempt immediately on next update
         Log(Debug::Info) << "[MP] RemotePlayer " << mName << ": despawned from world";
@@ -758,7 +782,7 @@ namespace mwmp
             mInterp.lastRecvZ = mInterp.cz;
             mInterp.hasTarget = true;
             mInterp.hasSnapped = true;
-            Log(Debug::Info) << "[MP] RemotePlayer " << mName << " teleported: hard-snapping.";
+            Log(Debug::Verbose) << "[MP] RemotePlayer " << mName << " teleported: hard-snapping.";
             return;
         }
 
@@ -808,7 +832,7 @@ namespace mwmp
                 mInterp.cx = mInterp.tx;
                 mInterp.cy = mInterp.ty;
                 mInterp.cz = mInterp.tz;
-                Log(Debug::Info) << "[MP] RemotePlayer " << mName << " stop overshoot suppressed (snap dist=" << std::sqrt(overshootDistSq) << ")";
+                Log(Debug::Verbose) << "[MP] RemotePlayer " << mName << " stop overshoot suppressed (snap dist=" << std::sqrt(overshootDistSq) << ")";
             }
         }
 
@@ -851,8 +875,50 @@ namespace mwmp
     void RemotePlayer::onEquipmentUpdate(const BasePlayer& state)
     {
         mState.equipment = state.equipment;
-        Log(Debug::Verbose) << "[MP] RemotePlayer " << mName << ": equipment updated";
-        // Phase 3: update visible equipment on NPC
+        if (!mIsSpawned || mNpcPtr.isEmpty())
+            return;
+
+        MWWorld::InventoryStore& inv = mNpcPtr.getClass().getInventoryStore(mNpcPtr);
+        for (int slot = 0; slot < BasePlayer::NUM_EQUIPMENT_SLOTS; ++slot)
+        {
+            const std::string& targetRefId = state.equipment[slot].item.refId;
+            MWWorld::ContainerStoreIterator current = inv.getSlot(slot);
+
+            if (current != inv.end())
+            {
+                if (current->getCellRef().getRefId().serializeText() == targetRefId)
+                    continue;
+
+                inv.unequipSlot(slot);
+            }
+
+            if (targetRefId.empty())
+                continue;
+
+            const ESM::RefId itemId = ESM::RefId::deserializeText(targetRefId);
+            MWWorld::ContainerStoreIterator found = inv.end();
+            for (auto it = inv.begin(); it != inv.end(); ++it)
+            {
+                if (it->getCellRef().getRefId() == itemId)
+                {
+                    found = it;
+                    break;
+                }
+            }
+
+            if (found == inv.end())
+                found = inv.MWWorld::ContainerStore::add(itemId, 1);
+
+            if (found != inv.end())
+                inv.equip(slot, found);
+        }
+
+        MWBase::World* world = MWBase::Environment::get().getWorld();
+        if (world)
+        {
+            if (auto* anim = dynamic_cast<MWRender::NpcAnimation*>(world->getAnimation(mNpcPtr)))
+                anim->equipmentChanged();
+        }
     }
 
     // ---------------------------------------------------------------------------
@@ -963,8 +1029,8 @@ namespace mwmp
         {
             mJumpArcPrimed = false;
             mInterp.targetVz = 0.f; // will be overwritten by first real position packet
-            Log(Debug::Info) << "[MP] RemotePlayer " << mName
-                             << ": jump rising edge — arc suspended, awaiting position vz";
+            Log(Debug::Verbose) << "[MP] RemotePlayer " << mName
+                                << ": jump rising edge — arc suspended, awaiting position vz";
         }
 
         if (wasJumping && !isJumping)
@@ -1064,7 +1130,52 @@ namespace mwmp
         MWMechanics::CreatureStats& stats = mNpcPtr.getClass().getCreatureStats(mNpcPtr);
         stats.setAttackingOrSpell(atk.pressed);
 
-        // Phase 7E: resolve target Ptr and apply damage via MWMechanics combat.
+        if (!atk.pressed)
+        {
+            if (auto* bn = mNpcPtr.getRefData().getBaseNode())
+                bn->setUserValue("mp_attack_knocked", atk.knocked);
+        }
+
+        if (atk.hit && !atk.pressed)
+        {
+            MWBase::World* world = MWBase::Environment::get().getWorld();
+            if (!world)
+                return;
+
+            MWWorld::Ptr targetPtr;
+            if (atk.targetMpNum != 0)
+            {
+                if (atk.targetMpNum == Main::get().getPlayerSync().localPlayer().guid)
+                    targetPtr = world->getPlayerPtr();
+                else if (auto* rp = Main::get().getPlayerList().getPlayer(atk.targetMpNum))
+                    targetPtr = rp->getNpcPtr();
+            }
+
+            if (targetPtr.isEmpty() && !atk.target.empty())
+            {
+                try
+                {
+                    targetPtr = world->getPtr(ESM::RefId::stringRefId(atk.target), false);
+                }
+                catch (...) {}
+            }
+
+            if (!targetPtr.isEmpty())
+            {
+                std::map<std::string, float> damages;
+                damages[atk.healthDamage ? "health" : "fatigue"] = atk.damage;
+                targetPtr.getClass().onHit(
+                    targetPtr, damages, ESM::RefId(), mNpcPtr, true, MWMechanics::DamageSourceType::Melee);
+            }
+
+            if (auto* bn = mNpcPtr.getRefData().getBaseNode())
+                bn->setUserValue("mp_attack_knocked", false);
+        }
+        else if (!atk.pressed)
+        {
+            if (auto* bn = mNpcPtr.getRefData().getBaseNode())
+                bn->setUserValue("mp_attack_knocked", false);
+        }
     }
 
     // ---------------------------------------------------------------------------
@@ -1285,7 +1396,7 @@ namespace mwmp
             if (zGap > 2000.f)
             {
                 mInterp.cz = mInterp.tz;
-                Log(Debug::Info) << "[MP] " << mName << " Safety Hard-Snap gap=" << zGap;
+                Log(Debug::Verbose) << "[MP] " << mName << " Safety Hard-Snap gap=" << zGap;
             }
             else
             {
@@ -1392,7 +1503,7 @@ namespace mwmp
                     const float blockedSpeed = mState.animFlags.blockedMoveSpeed;
                     mInterpPlanarSpeed = (blockedSpeed > 0.f) ? std::min(std::max(blockedSpeed, visualPlanarSpeed), 4000.f)
                                                               : visualPlanarSpeed;
-                    Log(Debug::Info) << "[MPDBG] " << mName << " Cadence blocked=" << mInterpPlanarSpeed;
+                    Log(Debug::Verbose) << "[MPDBG] " << mName << " Cadence blocked=" << mInterpPlanarSpeed;
                 }
                 else
                 {

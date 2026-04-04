@@ -136,10 +136,11 @@ namespace mwmp
         // and looping behaviour without needing a separate reliable packet.
         static constexpr uint32_t MF_KNOCKED_DOWN = (1u << 6);
         static constexpr uint32_t MF_KNOCKED_OUT  = (1u << 7);
+        static constexpr uint32_t MF_RECOVERY     = (1u << 8);
         // Sender confirmed that movement is key-held but physically wall-blocked.
         // Receiver uses this to swap in stance-speed cadence only for true
         // blocked-contact frames, avoiding global sneak/walk footstep desync.
-        static constexpr uint32_t MF_WALL_BLOCKED = (1u << 8);
+        static constexpr uint32_t MF_WALL_BLOCKED = (1u << 9);
 
         // actionFlags bit constants
         static constexpr uint32_t AF_WEAPON_DRAWN = (1u << 0);
@@ -174,7 +175,9 @@ namespace mwmp
         bool        miss    = false;
         bool        pressed = false;
         bool        knocked = false;
+        bool        healthDamage = false;
         float       strength = 0.f;
+        float       damage  = 0.f;
         int         type    = 0;    // 0=melee,1=magic,2=bow,3=throw
         // Animation group chosen by the sender's CharacterController at wind-up time.
         // "chop" / "slash" / "thrust" for melee; "shoot" for ranged.

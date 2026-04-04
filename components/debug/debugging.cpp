@@ -390,7 +390,7 @@ namespace Debug
         if (const char* env = getenv("OPENMW_DEBUG_LEVEL"))
             return toLevel(env);
 
-        return Verbose;
+        return Info;
     }
 
     Level getRecastMaxLogLevel()

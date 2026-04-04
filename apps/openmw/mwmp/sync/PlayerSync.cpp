@@ -13,17 +13,20 @@
 
 #include "../network/Client.hpp"
 #include "../network/Protocol.hpp"
+#include "../Main.hpp"
 
 // OpenMW world/player access
 #include "../../mwbase/environment.hpp"
 #include "../../mwbase/world.hpp"
 #include "../../mwbase/inputmanager.hpp"
+#include "../../mwbase/mechanicsmanager.hpp"
 #include "../../mwrender/camera.hpp"
 #include "../../mwinput/actions.hpp"
 #include "../../mwworld/ptr.hpp"
 #include "../../mwworld/class.hpp"
 #include "../../mwworld/cellstore.hpp"
 #include "../../mwworld/cell.hpp"
+#include "../../mwworld/inventorystore.hpp"
 #include "../../mwmechanics/creaturestats.hpp"
 #include "../../mwworld/player.hpp"
 #include "../../mwworld/livecellref.hpp"
@@ -40,6 +43,8 @@ namespace mwmp
 PlayerSync::PlayerSync(NetworkClient& client, Protocol& protocol)
     : mClient(client), mProtocol(protocol)
 {
+    for (int i = 0; i < BasePlayer::NUM_EQUIPMENT_SLOTS; ++i)
+        mLocal.equipment[i].slot = i;
 }
 
 // ---------------------------------------------------------------------------
@@ -105,6 +110,8 @@ void PlayerSync::forceFullSync()
                     mLocal.cell.gridY = ci->getGridY();
                 }
             }
+
+            captureEquipment(player);
         }
     }
 
@@ -192,6 +199,8 @@ void PlayerSync::update(float dt)
     mLocal.dynamicStats.magicka.current= cstats.getMagicka().getCurrent();
     mLocal.dynamicStats.fatigue.base   = cstats.getFatigue().getBase();
     mLocal.dynamicStats.fatigue.current= cstats.getFatigue().getCurrent();
+
+    captureEquipment(player);
 
     // --- cell ---
     if (const MWWorld::CellStore* cs = player.getCell())
@@ -595,15 +604,15 @@ void PlayerSync::sendAnimFlags(float dt)
         const float spd = std::sqrt(mLocal.velocity.linear[0]*mLocal.velocity.linear[0] + mLocal.velocity.linear[1]*mLocal.velocity.linear[1]);
         if (spd > 0.1f)
         {
-            Log(Debug::Info) << "[MPDBG] Sender Flags: fwd=" << f.animFwd << " side=" << f.animSide 
-                             << " spd=" << spd << " sneak=" << ((f.movementFlags & AnimFlags::MF_SNEAK) != 0)
-                             << " wallBlocked=" << ((f.movementFlags & AnimFlags::MF_WALL_BLOCKED) != 0)
-                             << " blockedSpeed=" << f.blockedMoveSpeed
-                              << " ccJump=" << ccJumpState
-                             << " ccJumpVisual=" << ccJumpVisual
-                             << " ccJumpLatch=" << mCcJumpVisualLatch
-                             << " vz=" << mLocal.velocity.linear[2]
-                             << " mode=" << (int)world->getCamera()->getMode();
+            Log(Debug::Verbose) << "[MPDBG] Sender Flags: fwd=" << f.animFwd << " side=" << f.animSide
+                                << " spd=" << spd << " sneak=" << ((f.movementFlags & AnimFlags::MF_SNEAK) != 0)
+                                << " wallBlocked=" << ((f.movementFlags & AnimFlags::MF_WALL_BLOCKED) != 0)
+                                << " blockedSpeed=" << f.blockedMoveSpeed
+                                << " ccJump=" << ccJumpState
+                                << " ccJumpVisual=" << ccJumpVisual
+                                << " ccJumpLatch=" << mCcJumpVisualLatch
+                                << " vz=" << mLocal.velocity.linear[2]
+                                << " mode=" << (int)world->getCamera()->getMode();
         }
     }
     // Use getPlayer().getJumping() — set by PhysicsSystem::handleJump() the same
@@ -625,14 +634,17 @@ void PlayerSync::sendAnimFlags(float dt)
     // MF_STRAFING is derived on the receiver from animFwd/animSide directly,
     // mirroring the vanilla CC criterion — no need to encode it from the sender.
 
-    // Knockdown / knockout — sustained hit-states driven by vanilla CC.
-    // Encoding them in the regular unreliable stream means they self-clear
-    // as soon as the sender recovers, without any separate handshake.
-    if (stats.getKnockedDown())
+    // Mirror the sender's live hit-state from CharacterController instead of
+    // inferring knockout solely from fatigue. The controller keeps "knocked out"
+    // true for the full lie-on-ground and stand-up sequence, which is what the
+    // remote ghost needs to stay down until vanilla recovery actually finishes.
+    auto mechanics = MWBase::Environment::get().getMechanicsManager();
+    if (mechanics && mechanics->isKnockedDown(player))
         f.movementFlags |= AnimFlags::MF_KNOCKED_DOWN;
-    // Knockout condition matches character.cpp: fatigue < 0 OR base == 0.
-    if (stats.getFatigue().getCurrent() < 0.f || stats.getFatigue().getBase() == 0.f)
+    if (mechanics && mechanics->isKnockedOut(player))
         f.movementFlags |= AnimFlags::MF_KNOCKED_OUT;
+    if (mechanics && mechanics->isRecovery(player))
+        f.movementFlags |= AnimFlags::MF_RECOVERY;
 
     // actionFlags bitmask
     if (stats.getAttackingOrSpell())
@@ -649,9 +661,9 @@ void PlayerSync::sendAnimFlags(float dt)
     const bool nowJumping = (f.movementFlags             & AnimFlags::MF_JUMP) != 0;
     const bool jumpEdge   = (wasJumping != nowJumping);
     if (jumpEdge)
-        Log(Debug::Info) << "[MP] AnimFlags MF_JUMP "
-                         << (nowJumping ? "0->1 (rising)" : "1->0 (falling)")
-                         << " -- sending reliably";
+        Log(Debug::Verbose) << "[MP] AnimFlags MF_JUMP "
+                            << (nowJumping ? "0->1 (rising)" : "1->0 (falling)")
+                            << " -- sending reliably";
 
     // ── Movement edge detection ────────────────────────────────────────────────
     // Any idle↔moving boundary packet is promoted to reliable, regardless of
@@ -667,10 +679,17 @@ void PlayerSync::sendAnimFlags(float dt)
     const bool nowMoving = (f.animFwd != 0.f || f.animSide != 0.f);
     const bool moveEdge  = (wasMoving != nowMoving);
     if (moveEdge)
-        Log(Debug::Info) << "[MP] AnimFlags move edge "
-                         << (nowMoving ? "idle->moving" : "moving->idle")
-                         << " sneak=" << ((f.movementFlags & AnimFlags::MF_SNEAK) != 0)
-                         << " fwd=" << f.animFwd << " side=" << f.animSide
+        Log(Debug::Verbose) << "[MP] AnimFlags move edge "
+                            << (nowMoving ? "idle->moving" : "moving->idle")
+                            << " sneak=" << ((f.movementFlags & AnimFlags::MF_SNEAK) != 0)
+                            << " fwd=" << f.animFwd << " side=" << f.animSide
+                            << " -- sending reliably";
+
+    const uint32_t hitStateMask = AnimFlags::MF_KNOCKED_DOWN | AnimFlags::MF_KNOCKED_OUT | AnimFlags::MF_RECOVERY;
+    const bool hitStateEdge = ((mLastAnimFlags.movementFlags ^ f.movementFlags) & hitStateMask) != 0;
+    if (hitStateEdge)
+        Log(Debug::Info) << "[MP] AnimFlags hit-state edge old=" << (mLastAnimFlags.movementFlags & hitStateMask)
+                         << " new=" << (f.movementFlags & hitStateMask)
                          << " -- sending reliably";
 
     // Periodic refresh: force send every ANIM_REFRESH_RATE seconds even with
@@ -683,7 +702,7 @@ void PlayerSync::sendAnimFlags(float dt)
     // Float comparison for delta-suppression: treat change < 0.05 as no-change
     // to avoid sending for tiny float noise while still catching real moves.
     // Jump edges and movement edges bypass this guard — they must always be delivered.
-    if (!forceRefresh && !jumpEdge && !moveEdge
+    if (!forceRefresh && !jumpEdge && !moveEdge && !hitStateEdge
         && f.movementFlags == mLastAnimFlags.movementFlags
         && f.actionFlags   == mLastAnimFlags.actionFlags
         && std::abs(f.animFwd  - mLastAnimFlags.animFwd)  < 0.05f
@@ -698,7 +717,7 @@ void PlayerSync::sendAnimFlags(float dt)
     pkt.setPlayer(&mLocal);
     // Jump-state transitions and movement edges (idle↔moving) are reliable;
     // all other anim changes are unreliable.
-    if (jumpEdge || moveEdge)
+    if (jumpEdge || moveEdge || hitStateEdge)
         mClient.sendReliable(pkt.encode(mSeqCounter++));
     else
         mClient.sendUnreliable(pkt.encode(mSeqCounter++));
@@ -722,6 +741,14 @@ void PlayerSync::sendAttack()
     if (pressed == mLastAttackPressed) return;
     mLastAttackPressed = pressed;
 
+    mLocal.attack.hit = false;
+    mLocal.attack.block = false;
+    mLocal.attack.miss = false;
+    mLocal.attack.knocked = false;
+    mLocal.attack.healthDamage = false;
+    mLocal.attack.damage = 0.f;
+    mLocal.attack.target.clear();
+    mLocal.attack.targetMpNum = 0;
     mLocal.attack.pressed = pressed;
 
     // On the rising edge, capture the animation type chosen by CharacterController.
@@ -737,6 +764,26 @@ void PlayerSync::sendAttack()
             Log(Debug::Verbose) << "[MP] PlayerSync::sendAttack pressed=true type=" << atkType;
         }
     }
+
+    PacketPlayerAttack pkt;
+    pkt.setPlayer(&mLocal);
+    mClient.sendReliable(pkt.encode(mSeqCounter++));
+}
+
+void PlayerSync::notifyLocalHit(const MWWorld::Ptr& victim, float damage, bool healthDamage, bool knocked)
+{
+    if (mLocal.guid == 0 || victim.isEmpty())
+        return;
+
+    mLocal.attack.pressed = false;
+    mLocal.attack.hit = true;
+    mLocal.attack.block = false;
+    mLocal.attack.miss = false;
+    mLocal.attack.knocked = knocked;
+    mLocal.attack.healthDamage = healthDamage;
+    mLocal.attack.damage = damage;
+    mLocal.attack.target = victim.getCellRef().getRefId().serializeText();
+    mLocal.attack.targetMpNum = resolveTargetMpNum(victim);
 
     PacketPlayerAttack pkt;
     pkt.setPlayer(&mLocal);
@@ -886,6 +933,54 @@ void PlayerSync::snapshotDynamicStats()
     mLastStats = { mLocal.dynamicStats.health.current,
                    mLocal.dynamicStats.magicka.current,
                    mLocal.dynamicStats.fatigue.current };
+}
+
+void PlayerSync::captureEquipment(const MWWorld::Ptr& player)
+{
+    if (!player.getClass().hasInventoryStore(player))
+        return;
+
+    MWWorld::InventoryStore& invStore = player.getClass().getInventoryStore(player);
+    for (int slot = 0; slot < BasePlayer::NUM_EQUIPMENT_SLOTS; ++slot)
+    {
+        auto& entry = mLocal.equipment[slot];
+        entry.slot = slot;
+
+        MWWorld::ContainerStoreIterator it = invStore.getSlot(slot);
+        if (it != invStore.end())
+        {
+            MWWorld::CellRef& cellRef = it->getCellRef();
+            entry.item.refId = cellRef.getRefId().serializeText();
+            entry.item.count = cellRef.getCount();
+            entry.item.charge = cellRef.getCharge();
+            entry.item.enchantmentCharge = cellRef.getEnchantmentCharge();
+            entry.item.soul = cellRef.getSoul().serializeText();
+        }
+        else
+        {
+            entry.item.refId.clear();
+            entry.item.count = 0;
+            entry.item.charge = -1;
+            entry.item.enchantmentCharge = -1.f;
+            entry.item.soul.clear();
+        }
+    }
+}
+
+uint32_t PlayerSync::resolveTargetMpNum(const MWWorld::Ptr& victim) const
+{
+    MWBase::World* world = MWBase::Environment::get().getWorld();
+    if (world && victim == world->getPlayerPtr())
+        return mLocal.guid;
+
+    if (auto* baseNode = victim.getRefData().getBaseNode())
+    {
+        int guid = 0;
+        if (baseNode->getUserValue("mp_player_guid", guid) && guid > 0)
+            return static_cast<uint32_t>(guid);
+    }
+
+    return 0;
 }
 
 } // namespace mwmp

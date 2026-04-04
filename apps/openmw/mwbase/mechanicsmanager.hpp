@@ -261,6 +261,9 @@ namespace MWBase
         virtual bool isCastingSpell(const MWWorld::Ptr& ptr) const = 0;
         virtual bool isReadyToBlock(const MWWorld::Ptr& ptr) const = 0;
         virtual bool isAttackingOrSpell(const MWWorld::Ptr& ptr) const = 0;
+        virtual bool isKnockedDown(const MWWorld::Ptr& ptr) const = 0;
+        virtual bool isKnockedOut(const MWWorld::Ptr& ptr) const = 0;
+        virtual bool isRecovery(const MWWorld::Ptr& ptr) const = 0;
 
         virtual void castSpell(const MWWorld::Ptr& ptr, const ESM::RefId& spellId, bool scriptedSpell) = 0;
 

@@ -8,7 +8,7 @@ namespace mwmp
     // -----------------------------------------------------------------------
     // PacketPlayerAttack — reliable attack event (melee / bow / thrown).
     //
-    // Sent once on attack release (not per-frame).
+    // Sent on attack press/release edges, plus authoritative local hit resolution.
     // Uses BasePlayer::attack (Attack struct from BaseStructs.hpp).
     //
     // Server: pure relay — decodes into c.player.attack, rebroadcasts raw
@@ -18,8 +18,8 @@ namespace mwmp
     //   1. Resolve attacker NPC Ptr from guid.
     //   2. Resolve target: if targetMpNum != 0 look up remote player NPC;
     //      otherwise look up world object by refId.
-    //   3. If hit == true, apply damage via MWMechanics combat functions.
-    //   4. Trigger "attack" AnimPlay on the attacker NPC if not already firing.
+    //   3. If hit == true, apply the authoritative resolved hit locally.
+    //   4. Keep the remote attack animation in sync using the chosen attack type.
     // -----------------------------------------------------------------------
     class PacketPlayerAttack : public PlayerPacket
     {
@@ -37,8 +37,11 @@ namespace mwmp
             ws.write(mPlayer->attack.miss);
             ws.write(mPlayer->attack.pressed);
             ws.write(mPlayer->attack.knocked);
+            ws.write(mPlayer->attack.healthDamage);
             ws.write(mPlayer->attack.strength);
+            ws.write(mPlayer->attack.damage);
             ws.write(mPlayer->attack.type);
+            ws.writeString(mPlayer->attack.attackAnimation);
         }
 
         void unpack(ReadStream& rs) override
@@ -51,8 +54,11 @@ namespace mwmp
             rs.read(mPlayer->attack.miss);
             rs.read(mPlayer->attack.pressed);
             rs.read(mPlayer->attack.knocked);
+            rs.read(mPlayer->attack.healthDamage);
             rs.read(mPlayer->attack.strength);
+            rs.read(mPlayer->attack.damage);
             rs.read(mPlayer->attack.type);
+            mPlayer->attack.attackAnimation = rs.readString();
         }
     };
 

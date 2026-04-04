@@ -34,6 +34,7 @@ namespace mwmp
 
         // Force-flush all state immediately (e.g. just after connect)
         void forceFullSync();
+        void notifyLocalHit(const MWWorld::Ptr& victim, float damage, bool healthDamage, bool knocked);
 
         // Server told us our position was wrong — snap to authoritative value
         void applyServerPositionCorrection(const BasePlayer& authoritative);
@@ -68,6 +69,8 @@ namespace mwmp
         void snapshotCell();
         void snapshotEquipment();
         void snapshotDynamicStats();
+        void captureEquipment(const MWWorld::Ptr& player);
+        uint32_t resolveTargetMpNum(const MWWorld::Ptr& victim) const;
 
         NetworkClient& mClient;
         Protocol&      mProtocol;

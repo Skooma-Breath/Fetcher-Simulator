@@ -71,6 +71,7 @@ namespace mwmp
         const BasePlayer&  getState()    const { return mState; }
         bool               isDead()      const { return mIsDead; }
         bool               isSpawned()   const { return mIsSpawned; }
+        const MWWorld::Ptr& getNpcPtr()  const { return mNpcPtr; }
 
     private:
         // ---- world interaction ----
@@ -131,6 +132,7 @@ namespace mwmp
 
         // --- anim flag state (last applied, for delta suppression) ---
         AnimFlags mLastAppliedAnimFlags;
+        uint32_t mAppliedHitFlags = 0;
 
         // Edge-detect for MF_JUMP — trigger "jump"/"jump landing" anim once on
         // rising/falling edge.  We never write mPosition[2] for remote players

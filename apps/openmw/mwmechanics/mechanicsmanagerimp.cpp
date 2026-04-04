@@ -1933,6 +1933,21 @@ namespace MWMechanics
         return mActors.isAttackingOrSpell(ptr);
     }
 
+    bool MechanicsManager::isKnockedDown(const MWWorld::Ptr& ptr) const
+    {
+        return mActors.isKnockedDown(ptr);
+    }
+
+    bool MechanicsManager::isKnockedOut(const MWWorld::Ptr& ptr) const
+    {
+        return mActors.isKnockedOut(ptr);
+    }
+
+    bool MechanicsManager::isRecovery(const MWWorld::Ptr& ptr) const
+    {
+        return mActors.isRecovery(ptr);
+    }
+
     void MechanicsManager::setWerewolf(const MWWorld::Ptr& actor, bool werewolf)
     {
         MWMechanics::NpcStats& npcStats = actor.getClass().getNpcStats(actor);

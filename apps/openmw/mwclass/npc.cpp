@@ -30,6 +30,13 @@
 #include "../mwbase/windowmanager.hpp"
 #include "../mwbase/world.hpp"
 
+#ifdef BUILD_MULTIPLAYER
+#include "../mwmp/Main.hpp"
+#include "../mwmp/sync/PlayerSync.hpp"
+#endif
+
+#include <components/sceneutil/positionattitudetransform.hpp>
+
 #include "../mwlua/localscripts.hpp"
 
 #include "../mwmechanics/actorutil.hpp"
@@ -717,6 +724,17 @@ namespace MWClass
 
         MWBase::Environment::get().getLuaManager()->onHit(ptr, victim, weapon, MWWorld::Ptr(), type, attackStrength,
             damage, healthdmg, hitPosition, true, MWMechanics::DamageSourceType::Melee);
+
+#ifdef BUILD_MULTIPLAYER
+        if (ptr == MWMechanics::getPlayer() && mwmp::Main::isInitialised())
+        {
+            const MWMechanics::CreatureStats& victimStats = victim.getClass().getCreatureStats(victim);
+            const bool knocked = victimStats.getKnockedDown()
+                || victimStats.getFatigue().getCurrent() < 0.f
+                || victimStats.getFatigue().getBase() == 0.f;
+            mwmp::Main::get().getPlayerSync().notifyLocalHit(victim, damage, healthdmg, knocked);
+        }
+#endif
     }
 
     void Npc::onHit(const MWWorld::Ptr& ptr, const std::map<std::string, float>& damages, ESM::RefId object,
@@ -827,10 +845,37 @@ namespace MWClass
             float knockdownTerm = stats.getAttribute(ESM::Attribute::Agility).getModified()
                     * gmst.iKnockDownOddsMult->mValue.getInteger() * 0.01f
                 + gmst.iKnockDownOddsBase->mValue.getInteger();
-            if (hasHealthDamage && agilityTerm <= healthDamage && knockdownTerm <= Misc::Rng::roll0to99(prng))
-                stats.setKnockedDown(true);
-            else
-                stats.setHitRecovery(true); // Is this supposed to always occur?
+
+            bool useAuthoritativeKnock = false;
+            bool authoritativeKnock = false;
+            const bool targetIsGhost = stats.getMovementFlag(MWMechanics::CreatureStats::Flag_NetworkPlayerNpc);
+#ifdef BUILD_MULTIPLAYER
+            const bool attackerIsGhost = attacker.getClass().getCreatureStats(attacker).getMovementFlag(
+                MWMechanics::CreatureStats::Flag_NetworkPlayerNpc);
+            if (attackerIsGhost)
+            {
+                if (auto* baseNode = attacker.getRefData().getBaseNode())
+                    useAuthoritativeKnock = baseNode->getUserValue("mp_attack_knocked", authoritativeKnock);
+            }
+#endif
+            // Remote-player ghosts should mirror the owning client's hit-state via
+            // AnimFlags. Letting local melee resolution also choose a recovery or
+            // knockdown state makes the ghost replay one-shot hit anims until the
+            // authoritative owner finally stands up.
+            if (!targetIsGhost)
+            {
+                if (useAuthoritativeKnock)
+                {
+                    if (authoritativeKnock)
+                        stats.setKnockedDown(true);
+                    else
+                        stats.setHitRecovery(true); // Is this supposed to always occur?
+                }
+                else if (hasHealthDamage && agilityTerm <= healthDamage && knockdownTerm <= Misc::Rng::roll0to99(prng))
+                    stats.setKnockedDown(true);
+                else
+                    stats.setHitRecovery(true); // Is this supposed to always occur?
+            }
         }
 
         if (hasHealthDamage && healthDamage > 0.0f)

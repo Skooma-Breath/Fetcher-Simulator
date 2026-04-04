@@ -2390,6 +2390,33 @@ namespace MWMechanics
         return it->second->getCharacterController().isAttackingOrSpell();
     }
 
+    bool Actors::isKnockedDown(const MWWorld::Ptr& ptr) const
+    {
+        const auto it = mIndex.find(ptr.mRef);
+        if (it == mIndex.end())
+            return false;
+
+        return it->second->getCharacterController().isKnockedDown();
+    }
+
+    bool Actors::isKnockedOut(const MWWorld::Ptr& ptr) const
+    {
+        const auto it = mIndex.find(ptr.mRef);
+        if (it == mIndex.end())
+            return false;
+
+        return it->second->getCharacterController().isKnockedOut();
+    }
+
+    bool Actors::isRecovery(const MWWorld::Ptr& ptr) const
+    {
+        const auto it = mIndex.find(ptr.mRef);
+        if (it == mIndex.end())
+            return false;
+
+        return it->second->getCharacterController().isRecovery();
+    }
+
     int Actors::getGreetingTimer(const MWWorld::Ptr& ptr) const
     {
         const auto it = mIndex.find(ptr.mRef);

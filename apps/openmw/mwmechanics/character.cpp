@@ -2209,7 +2209,7 @@ namespace MWMechanics
                             speed = mpSpeed;
 
                         if (mMpDebugTimer <= 0.f)
-                            Log(Debug::Info) << "[MPDBG] Applied speed override: " << mpSpeed << " -> " << speed;
+                            Log(Debug::Verbose) << "[MPDBG] Applied speed override: " << mpSpeed << " -> " << speed;
                     }
                 }
             }
@@ -2542,18 +2542,18 @@ namespace MWMechanics
                     std::string mpName;
                     if (mMpDebugTimer <= 0.f && getMpRemoteName(mPtr, mpName))
                     {
-                        Log(Debug::Info) << "[MPDBG] AnimRate " << mpName
-                                         << " group=" << mCurrentMovement
-                                         << " speed=" << speed
-                                         << " animVel=" << mMovementAnimSpeed
-                                         << " speedMult=" << speedMult
-                                         << " capped=" << std::min(maxSpeedMult, speedMult)
-                                         << " speedFactor=" << movementSettings.mSpeedFactor
-                                         << " move=(" << movementSettings.mPosition[0] << ","
-                                         << movementSettings.mPosition[1] << ","
-                                         << movementSettings.mPosition[2] << ")"
-                                         << " run=" << isrunning
-                                         << " sneak=" << sneak;
+                        Log(Debug::Verbose) << "[MPDBG] AnimRate " << mpName
+                                            << " group=" << mCurrentMovement
+                                            << " speed=" << speed
+                                            << " animVel=" << mMovementAnimSpeed
+                                            << " speedMult=" << speedMult
+                                            << " capped=" << std::min(maxSpeedMult, speedMult)
+                                            << " speedFactor=" << movementSettings.mSpeedFactor
+                                            << " move=(" << movementSettings.mPosition[0] << ","
+                                            << movementSettings.mPosition[1] << ","
+                                            << movementSettings.mPosition[2] << ")"
+                                            << " run=" << isrunning
+                                            << " sneak=" << sneak;
                         mMpDebugTimer = 0.25f;
                     }
 #endif
@@ -2564,18 +2564,18 @@ namespace MWMechanics
                     std::string mpName;
                     if (mMpDebugTimer <= 0.f && getMpRemoteName(mPtr, mpName))
                     {
-                        Log(Debug::Info) << "[MPDBG] AnimRate " << mpName
-                                         << " group=" << mCurrentMovement
-                                         << " speed=" << speed
-                                         << " animVel=" << mMovementAnimSpeed
-                                         << " speedMult=skipped"
-                                         << " speedFactor=" << movementSettings.mSpeedFactor
-                                         << " move=(" << movementSettings.mPosition[0] << ","
-                                         << movementSettings.mPosition[1] << ","
-                                         << movementSettings.mPosition[2] << ")"
-                                         << " run=" << isrunning
-                                         << " sneak=" << sneak
-                                         << " adjust=false";
+                        Log(Debug::Verbose) << "[MPDBG] AnimRate " << mpName
+                                            << " group=" << mCurrentMovement
+                                            << " speed=" << speed
+                                            << " animVel=" << mMovementAnimSpeed
+                                            << " speedMult=skipped"
+                                            << " speedFactor=" << movementSettings.mSpeedFactor
+                                            << " move=(" << movementSettings.mPosition[0] << ","
+                                            << movementSettings.mPosition[1] << ","
+                                            << movementSettings.mPosition[2] << ")"
+                                            << " run=" << isrunning
+                                            << " sneak=" << sneak
+                                            << " adjust=false";
                         mMpDebugTimer = 0.25f;
                     }
                 }

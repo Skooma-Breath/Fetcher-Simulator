@@ -31,6 +31,13 @@
 #include "../mwbase/windowmanager.hpp"
 #include "../mwbase/world.hpp"
 
+#ifdef BUILD_MULTIPLAYER
+#include "../mwmp/Main.hpp"
+#include "../mwmp/sync/PlayerSync.hpp"
+#endif
+
+#include <components/sceneutil/positionattitudetransform.hpp>
+
 #include "../mwlua/localscripts.hpp"
 
 #include "../mwworld/actionopen.hpp"
@@ -348,6 +355,17 @@ namespace MWClass
 
         MWBase::Environment::get().getLuaManager()->onHit(ptr, victim, weapon, MWWorld::Ptr(), type, attackStrength,
             damage, healthdmg, hitPosition, true, MWMechanics::DamageSourceType::Melee);
+
+#ifdef BUILD_MULTIPLAYER
+        if (ptr == MWMechanics::getPlayer() && mwmp::Main::isInitialised())
+        {
+            const MWMechanics::CreatureStats& victimStats = victim.getClass().getCreatureStats(victim);
+            const bool knocked = victimStats.getKnockedDown()
+                || victimStats.getFatigue().getCurrent() < 0.f
+                || victimStats.getFatigue().getBase() == 0.f;
+            mwmp::Main::get().getPlayerSync().notifyLocalHit(victim, damage, healthdmg, knocked);
+        }
+#endif
     }
 
     void Creature::onHit(const MWWorld::Ptr& ptr, const std::map<std::string, float>& damages, ESM::RefId object,
@@ -448,10 +466,33 @@ namespace MWClass
                         * getGmst().iKnockDownOddsMult->mValue.getInteger() * 0.01f
                     + getGmst().iKnockDownOddsBase->mValue.getInteger();
                 auto& prng = MWBase::Environment::get().getWorld()->getPrng();
-                if (hasHealthDamage && agilityTerm <= healthDamage && knockdownTerm <= Misc::Rng::roll0to99(prng))
-                    stats.setKnockedDown(true);
-                else
-                    stats.setHitRecovery(true); // Is this supposed to always occur?
+
+                bool useAuthoritativeKnock = false;
+                bool authoritativeKnock = false;
+#ifdef BUILD_MULTIPLAYER
+                const bool attackerIsGhost = attacker.getClass().getCreatureStats(attacker).getMovementFlag(
+                    MWMechanics::CreatureStats::Flag_NetworkPlayerNpc);
+                if (attackerIsGhost)
+                {
+                    if (auto* baseNode = attacker.getRefData().getBaseNode())
+                        useAuthoritativeKnock = baseNode->getUserValue("mp_attack_knocked", authoritativeKnock);
+                }
+#endif
+                const bool targetIsGhost = stats.getMovementFlag(MWMechanics::CreatureStats::Flag_NetworkPlayerNpc);
+                if (!targetIsGhost)
+                {
+                    if (useAuthoritativeKnock)
+                    {
+                        if (authoritativeKnock)
+                            stats.setKnockedDown(true);
+                        else
+                            stats.setHitRecovery(true);
+                    }
+                    else if (hasHealthDamage && agilityTerm <= healthDamage && knockdownTerm <= Misc::Rng::roll0to99(prng))
+                        stats.setKnockedDown(true);
+                    else
+                        stats.setHitRecovery(true); // Is this supposed to always occur?
+                }
             }
         }
     }
