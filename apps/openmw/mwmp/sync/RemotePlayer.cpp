@@ -353,6 +353,8 @@ namespace mwmp
         const uint32_t currentHitFlags
             = f.movementFlags & (AnimFlags::MF_KNOCKED_DOWN | AnimFlags::MF_KNOCKED_OUT | AnimFlags::MF_RECOVERY);
         const bool hitFlagsChanged = (currentHitFlags != mAppliedHitFlags);
+        const bool wasKnockedOut = (mAppliedHitFlags & AnimFlags::MF_KNOCKED_OUT) != 0;
+        const bool leftKnockOut = wasKnockedOut && !isKnockedOut;
 
         if (isKnockedOut || isKnockedDown || isRecovering)
         {
@@ -376,15 +378,31 @@ namespace mwmp
                     stats.setFatigue(fat);
                 }
             }
-            else if (hitFlagsChanged && isKnockedDown)
-            {
-                stats.setKnockedDown(true);
-                stats.setHitRecovery(false);
-            }
             else if (hitFlagsChanged)
             {
-                stats.setKnockedDown(false);
-                stats.setHitRecovery(true);
+                // The sender can expose a stand-up phase as KD|RECOVERY after KO.
+                // Treat any non-KO state carrying RECOVERY as "begin standing up"
+                // instead of replaying the knocked-down state until everything clears.
+                if (leftKnockOut)
+                {
+                    MWMechanics::DynamicStat<float> fat = stats.getFatigue();
+                    if (fat.getCurrent() < 0.f)
+                    {
+                        fat.setCurrent(1.f);
+                        stats.setFatigue(fat);
+                    }
+                }
+
+                if (isRecovering)
+                {
+                    stats.setKnockedDown(false);
+                    stats.setHitRecovery(true);
+                }
+                else if (isKnockedDown)
+                {
+                    stats.setKnockedDown(true);
+                    stats.setHitRecovery(false);
+                }
             }
         }
         else if (hitFlagsChanged)
@@ -792,10 +810,18 @@ namespace mwmp
         // standstill that induce micro-jitter in the sent position, which would make
         // the NPC slide back and forth each packet.  Z and rotation are always kept
         // so gravity/falling and standing-turn animations work correctly.
+        //
+        // Exception: during knockdown/knockout/recovery we must still accept XY
+        // updates even with zero input. Third-person hit states can shift the
+        // actor's authoritative world position without any locomotion input, and
+        // suppressing those packets leaves the remote ghost behind until movement
+        // resumes.
         const bool isIdleAnim = (mState.animFlags.animFwd == 0.f) && (mState.animFlags.animSide == 0.f);
         const bool isAirborneState
             = ((mState.animFlags.movementFlags & AnimFlags::MF_JUMP) != 0) || std::abs(state.velocity.linear[2]) > 0.1f;
-        if (!isIdleAnim || isAirborneState)
+        const bool hasHitState = (mState.animFlags.movementFlags
+            & (AnimFlags::MF_KNOCKED_DOWN | AnimFlags::MF_KNOCKED_OUT | AnimFlags::MF_RECOVERY)) != 0;
+        if (!isIdleAnim || isAirborneState || hasHitState)
         {
             mInterp.lastRecvX = state.position.pos[0];
             mInterp.lastRecvY = state.position.pos[1];

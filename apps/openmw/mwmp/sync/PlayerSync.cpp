@@ -634,16 +634,21 @@ void PlayerSync::sendAnimFlags(float dt)
     // MF_STRAFING is derived on the receiver from animFwd/animSide directly,
     // mirroring the vanilla CC criterion — no need to encode it from the sender.
 
-    // Mirror the sender's live hit-state from CharacterController instead of
-    // inferring knockout solely from fatigue. The controller keeps "knocked out"
-    // true for the full lie-on-ground and stand-up sequence, which is what the
-    // remote ghost needs to stay down until vanilla recovery actually finishes.
-    auto mechanics = MWBase::Environment::get().getMechanicsManager();
-    if (mechanics && mechanics->isKnockedDown(player))
-        f.movementFlags |= AnimFlags::MF_KNOCKED_DOWN;
-    if (mechanics && mechanics->isKnockedOut(player))
+    // Mirror the sender's broader CreatureStats hit-state lifetime rather than
+    // only the CharacterController's current leaf state. getKnockedDown() stays
+    // true through the whole downed sequence, including standing up, which lets
+    // us expose a KO -> KD -> clear transition instead of a single KO -> clear.
+    // That gives the receiver an earlier cue to begin the stand-up sequence.
+    const bool statsKnockedDown = stats.getKnockedDown();
+    const bool statsKnockedOut = statsKnockedDown
+        && (stats.getFatigue().getCurrent() < 0.f || stats.getFatigue().getBase() == 0.f);
+    const bool statsRecovery = stats.getHitRecovery();
+
+    if (statsKnockedOut)
         f.movementFlags |= AnimFlags::MF_KNOCKED_OUT;
-    if (mechanics && mechanics->isRecovery(player))
+    else if (statsKnockedDown)
+        f.movementFlags |= AnimFlags::MF_KNOCKED_DOWN;
+    if (statsRecovery)
         f.movementFlags |= AnimFlags::MF_RECOVERY;
 
     // actionFlags bitmask
