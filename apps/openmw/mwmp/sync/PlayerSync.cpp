@@ -4,11 +4,14 @@
 #include <cstring>
 
 #include <components/debug/debuglog.hpp>
+#include <components/misc/rng.hpp>
 #include <components/openmw-mp/Packets/Player/PacketPlayerPosition.hpp>
 #include <components/openmw-mp/Packets/Player/PacketPlayerCellChange.hpp>
 #include <components/openmw-mp/Packets/Player/PacketPlayerStatsDynamic.hpp>
 #include <components/openmw-mp/Packets/Player/PacketPlayerBaseInfo.hpp>
 #include <components/openmw-mp/Packets/Player/PacketPlayerEquipment.hpp>
+#include <components/openmw-mp/Packets/Player/PacketPlayerDeath.hpp>
+#include <components/openmw-mp/Packets/Player/PacketPlayerResurrect.hpp>
 #include <components/sceneutil/positionattitudetransform.hpp>
 
 #include "../network/Client.hpp"
@@ -20,14 +23,19 @@
 #include "../../mwbase/world.hpp"
 #include "../../mwbase/inputmanager.hpp"
 #include "../../mwbase/mechanicsmanager.hpp"
+#include "../../mwbase/statemanager.hpp"
+#include "../../mwbase/windowmanager.hpp"
 #include "../../mwrender/camera.hpp"
 #include "../../mwinput/actions.hpp"
+#include "../../mwgui/mode.hpp"
 #include "../../mwworld/ptr.hpp"
 #include "../../mwworld/class.hpp"
 #include "../../mwworld/cellstore.hpp"
 #include "../../mwworld/cell.hpp"
+#include "../../mwworld/globals.hpp"
 #include "../../mwworld/inventorystore.hpp"
 #include "../../mwmechanics/creaturestats.hpp"
+#include "../../mwmechanics/npcstats.hpp"
 #include "../../mwworld/player.hpp"
 #include "../../mwworld/livecellref.hpp"
 #include <components/esm3/loadnpc.hpp>
@@ -193,12 +201,43 @@ void PlayerSync::update(float dt)
 
     // --- dynamic stats ---
     const auto& cstats = player.getClass().getCreatureStats(player);
-    mLocal.dynamicStats.health.base    = cstats.getHealth().getBase();
-    mLocal.dynamicStats.health.current = cstats.getHealth().getCurrent();
-    mLocal.dynamicStats.magicka.base   = cstats.getMagicka().getBase();
-    mLocal.dynamicStats.magicka.current= cstats.getMagicka().getCurrent();
-    mLocal.dynamicStats.fatigue.base   = cstats.getFatigue().getBase();
-    mLocal.dynamicStats.fatigue.current= cstats.getFatigue().getCurrent();
+    if (cstats.isDead() && !mLastWasDead)
+    {
+        sendDeath();
+        mRespawnPending = true;
+        mRespawnTimer = RESPAWN_DELAY;
+    }
+    else if (!cstats.isDead() && mLastWasDead)
+    {
+        mRespawnPending = false;
+        mRespawnTimer = 0.f;
+    }
+
+    if (cstats.isDead() && mRespawnPending)
+    {
+        mRespawnTimer -= dt;
+        if (mRespawnTimer <= 0.f)
+        {
+            respawnLocally(player);
+            mRespawnPending = false;
+            mRespawnTimer = 0.f;
+        }
+    }
+
+    const auto& liveStats = player.getClass().getCreatureStats(player);
+    if (!liveStats.isDead() && mLastWasDead)
+    {
+        sendResurrect();
+        forceFullSync();
+    }
+
+    mLocal.dynamicStats.health.base    = liveStats.getHealth().getBase();
+    mLocal.dynamicStats.health.current = liveStats.getHealth().getCurrent();
+    mLocal.dynamicStats.magicka.base   = liveStats.getMagicka().getBase();
+    mLocal.dynamicStats.magicka.current= liveStats.getMagicka().getCurrent();
+    mLocal.dynamicStats.fatigue.base   = liveStats.getFatigue().getBase();
+    mLocal.dynamicStats.fatigue.current= liveStats.getFatigue().getCurrent();
+    mLastWasDead = liveStats.isDead();
 
     captureEquipment(player);
 
@@ -754,6 +793,9 @@ void PlayerSync::sendAttack()
     mLocal.attack.damage = 0.f;
     mLocal.attack.target.clear();
     mLocal.attack.targetMpNum = 0;
+    mLocal.attack.hitPos[0] = 0.f;
+    mLocal.attack.hitPos[1] = 0.f;
+    mLocal.attack.hitPos[2] = 0.f;
     mLocal.attack.pressed = pressed;
 
     // On the rising edge, capture the animation type chosen by CharacterController.
@@ -775,7 +817,8 @@ void PlayerSync::sendAttack()
     mClient.sendReliable(pkt.encode(mSeqCounter++));
 }
 
-void PlayerSync::notifyLocalHit(const MWWorld::Ptr& victim, float damage, bool healthDamage, bool knocked)
+void PlayerSync::notifyLocalHit(
+    const MWWorld::Ptr& victim, float damage, bool healthDamage, bool knocked, const osg::Vec3f& hitPos)
 {
     if (mLocal.guid == 0 || victim.isEmpty())
         return;
@@ -789,14 +832,91 @@ void PlayerSync::notifyLocalHit(const MWWorld::Ptr& victim, float damage, bool h
     mLocal.attack.damage = damage;
     mLocal.attack.target = victim.getCellRef().getRefId().serializeText();
     mLocal.attack.targetMpNum = resolveTargetMpNum(victim);
+    mLocal.attack.hitPos[0] = hitPos.x();
+    mLocal.attack.hitPos[1] = hitPos.y();
+    mLocal.attack.hitPos[2] = hitPos.z();
 
     PacketPlayerAttack pkt;
     pkt.setPlayer(&mLocal);
     mClient.sendReliable(pkt.encode(mSeqCounter++));
 }
 
+void PlayerSync::sendDeath()
+{
+    mLocal.isDead = true;
+    mLocal.deathAnimationGroup.clear();
+    if (MWBase::World* world = MWBase::Environment::get().getWorld())
+    {
+        MWWorld::Ptr player = world->getPlayerPtr();
+        if (!player.isEmpty())
+            if (auto* bn = player.getRefData().getBaseNode())
+                bn->getUserValue("mp_death_anim_group", mLocal.deathAnimationGroup);
+    }
+
+    PacketPlayerDeath pkt;
+    pkt.setPlayer(&mLocal);
+    mClient.sendReliable(pkt.encode(mSeqCounter++));
+}
+
+void PlayerSync::sendResurrect()
+{
+    mLocal.isDead = false;
+    mLocal.deathAnimationGroup.clear();
+    PacketPlayerResurrect pkt;
+    pkt.setPlayer(&mLocal);
+    mClient.sendReliable(pkt.encode(mSeqCounter++));
+}
+
 // ---------------------------------------------------------------------------
 // sendCast — reliable, edge-triggered when a spell fires.
+void PlayerSync::respawnLocally(const MWWorld::Ptr& player)
+{
+    const MWBase::Environment& env = MWBase::Environment::get();
+    MWBase::World* world = env.getWorld();
+    MWBase::MechanicsManager* mechanics = env.getMechanicsManager();
+    if (!world || !mechanics || player.isEmpty())
+        return;
+
+    const bool useImperialShrine = Misc::Rng::roll0to99(world->getPrng()) >= 50;
+    const ESM::RefId respawnMarker
+        = ESM::RefId::stringRefId(useImperialShrine ? "divinemarker" : "templemarker");
+    world->teleportToClosestMarker(player, respawnMarker);
+
+    if (player.getClass().isNpc() && player.getClass().getNpcStats(player).isWerewolf())
+        mechanics->setWerewolf(player, false);
+
+    mechanics->resurrect(player);
+
+    if (MWBase::StateManager* stateManager = env.getStateManager();
+        stateManager && stateManager->getState() == MWBase::StateManager::State_Ended)
+    {
+        stateManager->resumeGame();
+    }
+
+    MWMechanics::CreatureStats& stats = player.getClass().getCreatureStats(player);
+    MWMechanics::DynamicStat<float> fatigue = stats.getFatigue();
+    fatigue.setCurrent(std::max(1.f, fatigue.getModified()), false, true);
+    stats.setFatigue(fatigue);
+
+    stats.setKnockedDown(false);
+    stats.setHitRecovery(false);
+    stats.setAttackingOrSpell(false);
+    stats.setDrawState(MWMechanics::DrawState::Nothing);
+
+    if (player.getClass().isNpc())
+        player.getClass().getNpcStats(player).setDrawState(MWMechanics::DrawState::Nothing);
+
+    world->setGlobalInt(MWWorld::Globals::sPCKnownWerewolf, 0);
+
+    if (MWBase::WindowManager* window = env.getWindowManager())
+    {
+        while (window->containsMode(MWGui::GM_MainMenu))
+            window->removeGuiMode(MWGui::GM_MainMenu);
+        window->setCursorVisible(false);
+        window->setCursorActive(false);
+    }
+}
+
 void PlayerSync::sendCast()
 {
     MWBase::World* world = MWBase::Environment::get().getWorld();

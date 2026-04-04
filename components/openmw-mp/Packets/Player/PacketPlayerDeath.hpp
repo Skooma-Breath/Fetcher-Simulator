@@ -17,12 +17,14 @@ namespace mwmp
         void pack(WriteStream& ws) override
         {
             ws.write(mPlayer->guid);
+            ws.writeString(mPlayer->deathAnimationGroup);
             ws.writeString(killerRefId);
             ws.write(killerGuid);
         }
         void unpack(ReadStream& rs) override
         {
             rs.read(mPlayer->guid);
+            mPlayer->deathAnimationGroup = rs.readString();
             killerRefId = rs.readString();
             rs.read(killerGuid);
         }

@@ -224,6 +224,32 @@ namespace
         }
     }
 
+    MWMechanics::CharacterState deathAnimGroupToState(std::string_view group)
+    {
+        using namespace MWMechanics;
+        if (group == "swimdeath")
+            return CharState_SwimDeath;
+        if (group == "swimdeathknockdown")
+            return CharState_SwimDeathKnockDown;
+        if (group == "swimdeathknockout")
+            return CharState_SwimDeathKnockOut;
+        if (group == "deathknockdown")
+            return CharState_DeathKnockDown;
+        if (group == "deathknockout")
+            return CharState_DeathKnockOut;
+        if (group == "death1")
+            return CharState_Death1;
+        if (group == "death2")
+            return CharState_Death2;
+        if (group == "death3")
+            return CharState_Death3;
+        if (group == "death4")
+            return CharState_Death4;
+        if (group == "death5")
+            return CharState_Death5;
+        return CharState_None;
+    }
+
     // Converts a hit state to its equivalent animation group as long as it is a hit state.
     std::string hitStateToAnimGroup(MWMechanics::CharacterState state)
     {
@@ -894,13 +920,39 @@ namespace MWMechanics
             MWBase::Environment::get().getWorld()->useDeathCamera();
         }
 
-        mDeathState = hitStateToDeathState(mHitState);
+        const MWWorld::Class& cls = mPtr.getClass();
+        mDeathState = CharState_None;
+
+        // Remote network-player NPCs can receive the sender's exact death animation
+        // group via PacketPlayerDeath, which avoids local random mismatch.
+        if (cls.isActor() && cls.getCreatureStats(mPtr).getMovementFlag(MWMechanics::CreatureStats::Flag_NetworkPlayerNpc))
+        {
+            if (auto* bn = mPtr.getRefData().getBaseNode())
+            {
+                std::string syncedDeathGroup;
+                if (bn->getUserValue("mp_death_anim_group", syncedDeathGroup) && !syncedDeathGroup.empty())
+                {
+                    const CharacterState syncedState = deathAnimGroupToState(syncedDeathGroup);
+                    if (syncedState != CharState_None && mAnimation->hasAnimation(syncedDeathGroup))
+                        mDeathState = syncedState;
+                }
+            }
+        }
+
+        if (mDeathState == CharState_None)
+            mDeathState = hitStateToDeathState(mHitState);
         if (mDeathState == CharState_None && MWBase::Environment::get().getWorld()->isSwimming(mPtr))
             mDeathState = CharState_SwimDeath;
 
         if (mDeathState == CharState_None
             || (mAnimation && !mAnimation->hasAnimation(deathStateToAnimGroup(mDeathState))))
             mDeathState = chooseRandomDeathState();
+
+        if (mPtr == getPlayer())
+        {
+            if (auto* bn = mPtr.getRefData().getBaseNode())
+                bn->setUserValue("mp_death_anim_group", std::string(deathStateToAnimGroup(mDeathState)));
+        }
 
         // Do not interrupt scripted animation by death
         if (!mAnimation || isScriptedAnimPlaying())
@@ -2975,6 +3027,9 @@ namespace MWMechanics
     {
         if (mDeathState == CharState_None)
             return;
+
+        if (auto* bn = mPtr.getRefData().getBaseNode())
+            bn->setUserValue("mp_death_anim_group", std::string());
 
         resetCurrentDeathState();
         mWeaponType = ESM::Weapon::None;

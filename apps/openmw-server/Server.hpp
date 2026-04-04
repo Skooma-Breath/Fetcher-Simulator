@@ -161,6 +161,8 @@ private:
     void handlePlayerCast       (ConnectedClient& c, const uint8_t* data, size_t size);
     void handlePlayerInventory  (ConnectedClient& c, const uint8_t* data, size_t size);
     void handlePlayerStatsDynamic(ConnectedClient& c, const uint8_t* data, size_t size);
+    void handlePlayerDeath      (ConnectedClient& c, const uint8_t* data, size_t size);
+    void handlePlayerResurrect  (ConnectedClient& c, const uint8_t* data, size_t size);
     void handleChatMessage      (ConnectedClient& c, const uint8_t* data, size_t size);
     void handleDoorState        (ConnectedClient& c, const uint8_t* data, size_t size);
     void handleWeather          (ConnectedClient& c, const uint8_t* data, size_t size);

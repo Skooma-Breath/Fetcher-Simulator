@@ -36,6 +36,10 @@
 #include "../mwbase/windowmanager.hpp"
 #include "../mwbase/world.hpp"
 
+#ifdef BUILD_MULTIPLAYER
+#include "../mwmp/Main.hpp"
+#endif
+
 #include "../mwmechanics/aibreathe.hpp"
 
 #include "../mwrender/vismask.hpp"
@@ -1857,6 +1861,9 @@ namespace MWMechanics
                 if (isPlayer)
                 {
                     // player's death animation is over
+#ifdef BUILD_MULTIPLAYER
+                    if (!mwmp::Main::isConnected())
+#endif
                     MWBase::Environment::get().getStateManager()->askLoadRecent();
                 }
                 else

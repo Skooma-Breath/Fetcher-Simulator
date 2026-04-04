@@ -170,6 +170,7 @@ namespace mwmp
     {
         std::string target;         // refId of target (empty = none)
         uint32_t    targetMpNum = 0;
+        float       hitPos[3] = { 0.f, 0.f, 0.f };
         bool        hit     = false;
         bool        block   = false;
         bool        miss    = false;

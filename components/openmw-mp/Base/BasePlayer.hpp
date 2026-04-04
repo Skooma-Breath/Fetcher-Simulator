@@ -158,6 +158,7 @@ namespace mwmp
         bool isDead         = false;
         bool isMoving       = false;
         int  deathCount     = 0;
+        std::string deathAnimationGroup;
     };
 
 } // namespace mwmp

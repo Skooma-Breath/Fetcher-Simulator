@@ -32,6 +32,9 @@ namespace mwmp
             ws.write(mPlayer->guid);
             ws.writeString(mPlayer->attack.target);
             ws.write(mPlayer->attack.targetMpNum);
+            ws.write(mPlayer->attack.hitPos[0]);
+            ws.write(mPlayer->attack.hitPos[1]);
+            ws.write(mPlayer->attack.hitPos[2]);
             ws.write(mPlayer->attack.hit);
             ws.write(mPlayer->attack.block);
             ws.write(mPlayer->attack.miss);
@@ -49,6 +52,9 @@ namespace mwmp
             rs.read(mPlayer->guid);
             mPlayer->attack.target     = rs.readString();
             rs.read(mPlayer->attack.targetMpNum);
+            rs.read(mPlayer->attack.hitPos[0]);
+            rs.read(mPlayer->attack.hitPos[1]);
+            rs.read(mPlayer->attack.hitPos[2]);
             rs.read(mPlayer->attack.hit);
             rs.read(mPlayer->attack.block);
             rs.read(mPlayer->attack.miss);

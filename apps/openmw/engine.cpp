@@ -304,7 +304,12 @@ bool OMW::Engine::frame(unsigned frameNumber, float frametime)
             if (mStateManager->getState() == MWBase::StateManager::State_Running)
             {
                 MWWorld::Ptr player = mWorld->getPlayerPtr();
-                if (!paused && player.getClass().getCreatureStats(player).isDead())
+                bool shouldEndGame = !paused && player.getClass().getCreatureStats(player).isDead();
+#ifdef BUILD_MULTIPLAYER
+                if (shouldEndGame && mwmp::Main::isConnected())
+                    shouldEndGame = false;
+#endif
+                if (shouldEndGame)
                     mStateManager->endGame();
             }
         }

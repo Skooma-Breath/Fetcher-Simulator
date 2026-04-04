@@ -363,7 +363,7 @@ namespace MWClass
             const bool knocked = victimStats.getKnockedDown()
                 || victimStats.getFatigue().getCurrent() < 0.f
                 || victimStats.getFatigue().getBase() == 0.f;
-            mwmp::Main::get().getPlayerSync().notifyLocalHit(victim, damage, healthdmg, knocked);
+            mwmp::Main::get().getPlayerSync().notifyLocalHit(victim, damage, healthdmg, knocked, hitPosition);
         }
 #endif
     }
@@ -455,6 +455,19 @@ namespace MWClass
             }
         }
 
+        const bool targetIsGhost = stats.getMovementFlag(MWMechanics::CreatureStats::Flag_NetworkPlayerNpc);
+#ifdef BUILD_MULTIPLAYER
+        if (targetIsGhost && stats.isDead())
+        {
+            if (MWBase::MechanicsManager* mechanics = MWBase::Environment::get().getMechanicsManager())
+                mechanics->resurrect(ptr);
+
+            MWMechanics::DynamicStat<float> health = stats.getHealth();
+            health.setCurrent(std::max(1.f, std::min(health.getBase(), 1.f)));
+            stats.setHealth(health);
+        }
+#endif
+
         if (hasDamage)
         {
             if (!attacker.isEmpty())
@@ -478,7 +491,6 @@ namespace MWClass
                         useAuthoritativeKnock = baseNode->getUserValue("mp_attack_knocked", authoritativeKnock);
                 }
 #endif
-                const bool targetIsGhost = stats.getMovementFlag(MWMechanics::CreatureStats::Flag_NetworkPlayerNpc);
                 if (!targetIsGhost)
                 {
                     if (useAuthoritativeKnock)

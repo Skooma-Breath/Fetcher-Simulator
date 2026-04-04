@@ -3,6 +3,8 @@
 
 #include <cstdint>
 
+#include <osg/Vec3f>
+
 #include <components/openmw-mp/Base/BasePlayer.hpp>
 #include <components/openmw-mp/NetworkMessages.hpp>
 
@@ -34,7 +36,8 @@ namespace mwmp
 
         // Force-flush all state immediately (e.g. just after connect)
         void forceFullSync();
-        void notifyLocalHit(const MWWorld::Ptr& victim, float damage, bool healthDamage, bool knocked);
+        void notifyLocalHit(
+            const MWWorld::Ptr& victim, float damage, bool healthDamage, bool knocked, const osg::Vec3f& hitPos);
 
         // Server told us our position was wrong — snap to authoritative value
         void applyServerPositionCorrection(const BasePlayer& authoritative);
@@ -56,6 +59,9 @@ namespace mwmp
         void sendCast();
         void sendDynamicStats();
         void sendBaseInfo();
+        void sendDeath();
+        void sendResurrect();
+        void respawnLocally(const MWWorld::Ptr& player);
 
         // ---- change detection ----
         bool positionChanged()    const;
@@ -139,6 +145,10 @@ namespace mwmp
         // Last attack pressed state — detect edge (false→true) for send
         bool mLastAttackPressed = false;
         bool mLastCastingOrSpell = false;
+        bool mLastWasDead = false;
+        bool mRespawnPending = false;
+        float mRespawnTimer = 0.f;
+        static constexpr float RESPAWN_DELAY = 5.f;
 
         uint32_t mSeqCounter = 0;
 

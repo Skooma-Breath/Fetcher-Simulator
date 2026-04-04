@@ -5,11 +5,15 @@
 
 #include <components/debug/debuglog.hpp>
 #include <components/esm/refid.hpp>
+#include <components/fallback/fallback.hpp>
 #include <components/misc/constants.hpp>
+#include <components/misc/rng.hpp>
 
 #include "../../mwbase/environment.hpp"
+#include "../../mwbase/luamanager.hpp"
 #include "../../mwbase/mechanicsmanager.hpp"
 #include "../../mwbase/rotationflags.hpp"
+#include "../../mwbase/soundmanager.hpp"
 #include "../../mwbase/windowmanager.hpp"
 #include "../../mwbase/world.hpp"
 #include "../../mwgui/mode.hpp"
@@ -18,6 +22,7 @@
 #include "../../mwmechanics/spellcasting.hpp"
 #include "../../mwmechanics/creaturestats.hpp"
 #include "../../mwmechanics/movement.hpp"
+#include "../../mwmechanics/npcstats.hpp"
 #include "../../mwrender/animation.hpp"
 #include "../../mwrender/npcanimation.hpp"
 #include "../../mwrender/animationpriority.hpp"
@@ -27,8 +32,13 @@
 #include "../../mwworld/class.hpp"
 #include "../../mwworld/containerstore.hpp"
 #include "../../mwworld/esmstore.hpp"
+#include "../../mwworld/inventorystore.hpp"
 #include "../../mwworld/manualref.hpp"
 #include "../../mwworld/ptr.hpp"
+#include <components/esm3/loadcrea.hpp>
+#include <components/esm3/loadarmo.hpp>
+#include <components/esm3/loadsoun.hpp>
+#include <components/esm3/loadweap.hpp>
 #include <components/esm3/loadnpc.hpp>
 #include <components/esm3/loadspel.hpp>
 #include <components/esm3/loadmgef.hpp>
@@ -57,6 +67,87 @@ namespace mwmp
             while (diff < -PI)
                 diff += TWO_PI;
             return current + diff * alpha;
+        }
+
+        bool isUnarmedAttack(const MWWorld::Ptr& attacker)
+        {
+            if (attacker.isEmpty() || !attacker.getClass().hasInventoryStore(attacker))
+                return true;
+
+            const MWWorld::InventoryStore& inv = attacker.getClass().getInventoryStore(attacker);
+            const MWWorld::ConstContainerStoreIterator weapon = inv.getSlot(MWWorld::InventoryStore::Slot_CarriedRight);
+            return weapon == inv.end() || weapon->getType() != ESM::Weapon::sRecordId;
+        }
+
+        MWWorld::Ptr getEquippedWeapon(const MWWorld::Ptr& attacker)
+        {
+            if (attacker.isEmpty() || !attacker.getClass().hasInventoryStore(attacker))
+                return {};
+
+            MWWorld::InventoryStore& inv = attacker.getClass().getInventoryStore(attacker);
+            MWWorld::ContainerStoreIterator weapon = inv.getSlot(MWWorld::InventoryStore::Slot_CarriedRight);
+            if (weapon == inv.end() || weapon->getType() != ESM::Weapon::sRecordId)
+                return {};
+
+            return *weapon;
+        }
+
+        void playReplicatedImpactSound(const MWWorld::Ptr& attacker, const MWWorld::Ptr& target, const Attack& atk)
+        {
+            const MWBase::Environment& env = MWBase::Environment::get();
+            MWBase::World* world = env.getWorld();
+            MWBase::SoundManager* sound = env.getSoundManager();
+            if (!world || !sound || target.isEmpty() || !atk.hit || atk.pressed)
+                return;
+
+            const bool melee = atk.type == 0;
+            const bool unarmed = melee && isUnarmedAttack(attacker);
+            const bool isWerewolf = !attacker.isEmpty() && unarmed && attacker.getClass().isNpc()
+                && attacker.getClass().getNpcStats(attacker).isWerewolf();
+
+            if (isWerewolf)
+            {
+                const MWWorld::ESMStore& store = world->getStore();
+                if (const ESM::Sound* wolfHit = store.get<ESM::Sound>().searchRandom("WolfHit", world->getPrng()))
+                    sound->playSound3D(target, wolfHit->mId, 1.0f, 1.0f);
+            }
+            else if (unarmed && !atk.healthDamage)
+            {
+                static const std::array<ESM::RefId, 2> h2hSounds = {
+                    ESM::RefId::stringRefId("Hand To Hand Hit"),
+                    ESM::RefId::stringRefId("Hand To Hand Hit 2"),
+                };
+                sound->playSound3D(target, h2hSounds[Misc::Rng::rollDice(h2hSounds.size(), world->getPrng())], 1.0f,
+                    1.0f);
+            }
+        }
+
+        void spawnReplicatedPlayerBloodEffect(const MWWorld::Ptr& target, const osg::Vec3f& hitPos)
+        {
+            MWBase::World* world = MWBase::Environment::get().getWorld();
+            if (!world || target.isEmpty())
+                return;
+
+            osg::Vec3f effectPos = hitPos;
+            if (effectPos.length2() < 0.001f)
+                effectPos = target.getRefData().getPosition().asVec3();
+
+            int bloodType = 0;
+            if (target.getType() == ESM::NPC::sRecordId)
+                bloodType = target.get<ESM::NPC>()->mBase->mBloodType;
+            else if (target.getType() == ESM::Creature::sRecordId)
+                bloodType = target.get<ESM::Creature>()->mBase->mBloodType;
+
+            const std::size_t bloodModelIndex = Misc::Rng::rollDice(3, world->getPrng());
+            const std::string modelKey = "Blood_Model_" + std::to_string(bloodModelIndex);
+            const std::string bloodModel = Misc::ResourceHelpers::correctMeshPath(
+                VFS::Path::Normalized(Fallback::Map::getString(modelKey)));
+
+            std::string bloodTexture = std::string(Fallback::Map::getString("Blood_Texture_" + std::to_string(bloodType)));
+            if (bloodTexture.empty())
+                bloodTexture = std::string(Fallback::Map::getString("Blood_Texture_0"));
+
+            world->spawnEffect(VFS::Path::Normalized(bloodModel), bloodTexture, effectPos, 1.f, false, false);
         }
 
     }
@@ -165,6 +256,23 @@ namespace mwmp
     {
         if (!mIsSpawned || mNpcPtr.isEmpty())
             return;
+
+        if (mIsDead)
+        {
+            MWMechanics::Movement& deadMov = mNpcPtr.getClass().getMovementSettings(mNpcPtr);
+            deadMov.mPosition[0] = 0.f;
+            deadMov.mPosition[1] = 0.f;
+            deadMov.mPosition[2] = 0.f;
+            deadMov.mRotation[0] = 0.f;
+            deadMov.mRotation[1] = 0.f;
+            deadMov.mRotation[2] = 0.f;
+            deadMov.mIsStrafing = false;
+
+            MWMechanics::CreatureStats& deadStats = mNpcPtr.getClass().getCreatureStats(mNpcPtr);
+            deadStats.setAttackingOrSpell(false);
+            deadStats.setDrawState(MWMechanics::DrawState::Nothing);
+            return;
+        }
 
         const AnimFlags& f = mState.animFlags;
 
@@ -1005,17 +1113,62 @@ namespace mwmp
     }
 
     // ---------------------------------------------------------------------------
-    void RemotePlayer::onDeath(const BasePlayer& /*state*/)
+    void RemotePlayer::onDeath(const BasePlayer& state)
     {
         mIsDead = true;
-        Log(Debug::Info) << "[MP] RemotePlayer " << mName << " died";
-        // Phase 3: play death animation
+        mState.isDead = true;
+        mState.deathAnimationGroup = state.deathAnimationGroup;
+        if (mIsSpawned && !mNpcPtr.isEmpty())
+        {
+            if (auto* bn = mNpcPtr.getRefData().getBaseNode())
+                bn->setUserValue("mp_death_anim_group", state.deathAnimationGroup);
+
+            MWMechanics::CreatureStats& stats = mNpcPtr.getClass().getCreatureStats(mNpcPtr);
+            MWMechanics::Movement& mov = mNpcPtr.getClass().getMovementSettings(mNpcPtr);
+            mov.mPosition[0] = 0.f;
+            mov.mPosition[1] = 0.f;
+            mov.mPosition[2] = 0.f;
+            mov.mRotation[0] = 0.f;
+            mov.mRotation[1] = 0.f;
+            mov.mRotation[2] = 0.f;
+            mov.mIsStrafing = false;
+            MWMechanics::DynamicStat<float> health = stats.getHealth();
+            health.setCurrent(0.f);
+            stats.setHealth(health);
+            stats.setDeathAnimationFinished(false);
+            stats.setAttackingOrSpell(false);
+            stats.setDrawState(MWMechanics::DrawState::Nothing);
+        }
+        Log(Debug::Info) << "[MP] RemotePlayer " << mName << " died"
+                         << " anim='" << state.deathAnimationGroup << "'";
     }
 
     // ---------------------------------------------------------------------------
     void RemotePlayer::onResurrect(const BasePlayer& /*state*/)
     {
         mIsDead = false;
+        mState.isDead = false;
+        mState.deathAnimationGroup.clear();
+        if (mIsSpawned && !mNpcPtr.isEmpty())
+        {
+            if (auto* bn = mNpcPtr.getRefData().getBaseNode())
+                bn->setUserValue("mp_death_anim_group", std::string());
+
+            if (MWBase::MechanicsManager* mechanics = MWBase::Environment::get().getMechanicsManager())
+                mechanics->resurrect(mNpcPtr);
+
+            MWMechanics::CreatureStats& stats = mNpcPtr.getClass().getCreatureStats(mNpcPtr);
+            MWMechanics::DynamicStat<float> magicka = stats.getMagicka();
+            magicka.setCurrent(magicka.getBase());
+            stats.setMagicka(magicka);
+
+            MWMechanics::DynamicStat<float> fatigue = stats.getFatigue();
+            fatigue.setCurrent(fatigue.getBase());
+            stats.setFatigue(fatigue);
+
+            stats.setKnockedDown(false);
+            stats.setHitRecovery(false);
+        }
         Log(Debug::Info) << "[MP] RemotePlayer " << mName << " resurrected";
     }
 
@@ -1188,10 +1341,17 @@ namespace mwmp
 
             if (!targetPtr.isEmpty())
             {
-                std::map<std::string, float> damages;
-                damages[atk.healthDamage ? "health" : "fatigue"] = atk.damage;
-                targetPtr.getClass().onHit(
-                    targetPtr, damages, ESM::RefId(), mNpcPtr, true, MWMechanics::DamageSourceType::Melee);
+                const osg::Vec3f hitPos(atk.hitPos[0], atk.hitPos[1], atk.hitPos[2]);
+                const MWMechanics::DamageSourceType sourceType
+                    = (atk.type == 2 || atk.type == 3) ? MWMechanics::DamageSourceType::Ranged
+                                                       : MWMechanics::DamageSourceType::Melee;
+                MWWorld::Ptr weapon = getEquippedWeapon(mNpcPtr);
+                MWBase::Environment::get().getLuaManager()->onHit(
+                    mNpcPtr, targetPtr, weapon, MWWorld::Ptr(), atk.type, atk.strength, atk.damage, atk.healthDamage,
+                    hitPos, true, sourceType);
+                if (atk.healthDamage && targetPtr == world->getPlayerPtr())
+                    spawnReplicatedPlayerBloodEffect(targetPtr, hitPos);
+                playReplicatedImpactSound(mNpcPtr, targetPtr, atk);
             }
 
             if (auto* bn = mNpcPtr.getRefData().getBaseNode())

@@ -36,6 +36,8 @@
 #include <components/openmw-mp/Packets/Player/PacketPlayerCast.hpp>
 #include <components/openmw-mp/Packets/Player/PacketPlayerInventory.hpp>
 #include <components/openmw-mp/Packets/Player/PacketPlayerStatsDynamic.hpp>
+#include <components/openmw-mp/Packets/Player/PacketPlayerDeath.hpp>
+#include <components/openmw-mp/Packets/Player/PacketPlayerResurrect.hpp>
 #include <components/openmw-mp/Packets/Player/PacketChatMessage.hpp>
 #include <components/openmw-mp/Packets/Worldstate/PacketWorldTime.hpp>
 // PacketWorldWeather is defined in PacketWorldTime.hpp
@@ -445,6 +447,8 @@ void MPServer::onClientMessage(ConnectedClient& client,
         case PacketType::PlayerCast:       handlePlayerCast(client, data, size);         break;
         case PacketType::PlayerInventory:  handlePlayerInventory(client, data, size);    break;
         case PacketType::PlayerStatsDynamic: handlePlayerStatsDynamic(client, data, size); break;
+        case PacketType::PlayerDeath:      handlePlayerDeath(client, data, size);        break;
+        case PacketType::PlayerResurrect:  handlePlayerResurrect(client, data, size);    break;
         case PacketType::ChatMessage:      handleChatMessage(client, data, size);        break;
         case PacketType::DoorState:        handleDoorState(client, data, size);          break;
         case PacketType::WorldWeather:     handleWeather(client, data, size);            break;
@@ -1029,6 +1033,35 @@ void MPServer::handlePlayerStatsDynamic(ConnectedClient& c, const uint8_t* data,
     pkt.setPlayer(&c.player);
     if (!pkt.decode(data, size)) return;
     broadcastToAll(std::vector<uint8_t>(data, data + size), c.conn);
+}
+
+// ---------------------------------------------------------------------------
+void MPServer::handlePlayerDeath(ConnectedClient& c, const uint8_t* data, size_t size)
+{
+    PacketPlayerDeath pkt;
+    pkt.setPlayer(&c.player);
+    if (!pkt.decode(data, size)) return;
+
+    c.player.isDead = true;
+    broadcastToAll(std::vector<uint8_t>(data, data + size), c.conn);
+
+    Log(Debug::Info) << "[Server] Relayed PlayerDeath for " << c.name
+                     << " anim='" << c.player.deathAnimationGroup << "'"
+                     << " killerGuid=" << pkt.killerGuid
+                     << " killerRefId='" << pkt.killerRefId << "'";
+}
+
+// ---------------------------------------------------------------------------
+void MPServer::handlePlayerResurrect(ConnectedClient& c, const uint8_t* data, size_t size)
+{
+    PacketPlayerResurrect pkt;
+    pkt.setPlayer(&c.player);
+    if (!pkt.decode(data, size)) return;
+
+    c.player.isDead = false;
+    broadcastToAll(std::vector<uint8_t>(data, data + size), c.conn);
+
+    Log(Debug::Info) << "[Server] Relayed PlayerResurrect for " << c.name;
 }
 
 // ---------------------------------------------------------------------------
