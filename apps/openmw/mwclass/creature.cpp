@@ -424,6 +424,7 @@ namespace MWClass
         if (!object.empty())
             stats.setLastHitObject(object);
 
+        const bool targetIsGhost = stats.getMovementFlag(MWMechanics::CreatureStats::Flag_NetworkPlayerNpc);
         bool hasDamage = false;
         bool hasHealthDamage = false;
         float healthDamage = 0.f;
@@ -443,9 +444,15 @@ namespace MWClass
             }
             else if (stat == "fatigue")
             {
-                MWMechanics::DynamicStat<float> fatigue(getCreatureStats(ptr).getFatigue());
-                fatigue.setCurrent(fatigue.getCurrent() - damage, true);
-                stats.setFatigue(fatigue);
+                // Remote-player ghosts should only enter knockout from synced owner
+                // AnimFlags, not from local fatigue damage resolution on the
+                // observing client.
+                if (!targetIsGhost)
+                {
+                    MWMechanics::DynamicStat<float> fatigue(getCreatureStats(ptr).getFatigue());
+                    fatigue.setCurrent(fatigue.getCurrent() - damage, true);
+                    stats.setFatigue(fatigue);
+                }
             }
             else if (stat == "magicka")
             {
@@ -455,7 +462,6 @@ namespace MWClass
             }
         }
 
-        const bool targetIsGhost = stats.getMovementFlag(MWMechanics::CreatureStats::Flag_NetworkPlayerNpc);
 #ifdef BUILD_MULTIPLAYER
         if (targetIsGhost && stats.isDead())
         {

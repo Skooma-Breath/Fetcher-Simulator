@@ -488,18 +488,19 @@ namespace mwmp
             mov.mPosition[1] = 0.f;
             mov.mIsStrafing = false;
 
-            if (hitFlagsChanged && isKnockedOut)
+            if (isKnockedOut)
             {
                 // Drive CC into looping KnockOut by holding fatigue negative.
                 // DynamicStats sync never pushes fatigue back to the NPC's
                 // CreatureStats, so this write has no conflict with stats sync.
-                // When the flag clears, vanilla fatigue regen restores naturally.
+                // Reassert it while the flag stays set, because local mechanics can
+                // otherwise regenerate fatigue and pop the proxy back up early.
                 stats.setKnockedDown(true);
                 stats.setHitRecovery(false);
                 MWMechanics::DynamicStat<float> fat = stats.getFatigue();
                 if (fat.getCurrent() >= 0.f)
                 {
-                    fat.setCurrent(-1.f);
+                    fat.setCurrent(-1.f, true);
                     stats.setFatigue(fat);
                 }
             }
