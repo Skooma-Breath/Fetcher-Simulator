@@ -107,7 +107,7 @@ namespace mwmp
             const MWBase::Environment& env = MWBase::Environment::get();
             MWBase::World* world = env.getWorld();
             MWBase::SoundManager* sound = env.getSoundManager();
-            if (!world || !sound || target.isEmpty() || !atk.hit || atk.pressed)
+            if (!world || !sound || target.isEmpty() || !atk.hit)
                 return;
 
             const bool melee = atk.type == 0;
@@ -1419,7 +1419,7 @@ namespace mwmp
                 bn->setUserValue("mp_attack_knocked", atk.knocked);
         }
 
-        if (atk.hit && !atk.pressed)
+        if (atk.hit)
         {
             MWBase::World* world = MWBase::Environment::get().getWorld();
             if (!world)

@@ -882,7 +882,18 @@ void PlayerSync::notifyLocalHit(
     if (mLocal.guid == 0 || victim.isEmpty())
         return;
 
-    mLocal.attack.pressed = false;
+    bool attackHeld = false;
+    if (MWBase::World* world = MWBase::Environment::get().getWorld())
+    {
+        MWWorld::Ptr player = world->getPlayerPtr();
+        if (!player.isEmpty())
+            attackHeld = player.getClass().getCreatureStats(player).getAttackingOrSpell();
+    }
+
+    // Preserve the live held state when the hit actually lands. This keeps
+    // queued follow-up attacks intact if the player released and re-held attack
+    // before the hit event was emitted.
+    mLocal.attack.pressed = attackHeld;
     mLocal.attack.hit = true;
     mLocal.attack.block = false;
     mLocal.attack.miss = false;
