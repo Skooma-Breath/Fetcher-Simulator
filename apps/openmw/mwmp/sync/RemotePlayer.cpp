@@ -516,9 +516,18 @@ namespace mwmp
                         fat.setCurrent(1.f);
                         stats.setFatigue(fat);
                     }
-                }
 
-                if (isRecovering)
+                    // Knockout stand-up is the tail of the existing knockout anim
+                    // with looping disabled, not a fresh "hit" recovery anim.
+                    // If we set HitRecovery here, the remote CC can start a new
+                    // hit anim too early and visibly stand up before the sender.
+                    stats.setKnockedDown(false);
+                    stats.setHitRecovery(false);
+
+                    if (auto* bn = mNpcPtr.getRefData().getBaseNode())
+                        bn->setUserValue("mp_recovery_anim_group", std::string());
+                }
+                else if (isRecovering)
                 {
                     stats.setKnockedDown(false);
                     stats.setHitRecovery(true);
@@ -545,6 +554,9 @@ namespace mwmp
                 fat.setCurrent(1.f);
                 stats.setFatigue(fat);
             }
+
+            if (auto* bn = mNpcPtr.getRefData().getBaseNode())
+                bn->setUserValue("mp_recovery_anim_group", std::string());
         }
         mAppliedHitFlags = currentHitFlags;
 
@@ -1186,6 +1198,7 @@ namespace mwmp
             if (auto* bn = mNpcPtr.getRefData().getBaseNode())
             {
                 bn->setUserValue("mp_death_anim_group", state.deathAnimationGroup);
+                bn->setUserValue("mp_recovery_anim_group", std::string());
                 bn->setUserValue("mp_interp_speed", 0.f);
             }
 
@@ -1226,6 +1239,7 @@ namespace mwmp
             if (auto* bn = mNpcPtr.getRefData().getBaseNode())
             {
                 bn->setUserValue("mp_death_anim_group", std::string());
+                bn->setUserValue("mp_recovery_anim_group", std::string());
                 bn->setUserValue("mp_interp_speed", 0.f);
             }
 
@@ -1339,6 +1353,13 @@ namespace mwmp
         {
             Log(Debug::Warning) << "[MP] RemotePlayer " << mName << ": onAnimPlay — no Animation for NPC";
             return;
+        }
+
+        if (auto* bn = mNpcPtr.getRefData().getBaseNode())
+        {
+            const bool isRecoveryAnim = ap.groupName.rfind("hit", 0) == 0 || ap.groupName.rfind("swimhit", 0) == 0;
+            if (isRecoveryAnim)
+                bn->setUserValue("mp_recovery_anim_group", ap.groupName);
         }
 
         int blendMask = MWRender::BlendMask_All;

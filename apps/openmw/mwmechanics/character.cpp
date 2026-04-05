@@ -495,9 +495,32 @@ namespace MWMechanics
 
         if (isRecovery())
         {
-            mCurrentHit = chooseRandomGroup(mCurrentHit);
-            if (mHitState == CharState_SwimHit && !mAnimation->hasAnimation(mCurrentHit))
-                mCurrentHit = chooseRandomGroup(hitStateToAnimGroup(CharState_Hit));
+            const std::string recoveryPrefix = mCurrentHit;
+            bool usedSyncedRecovery = false;
+
+            if (charClass.isActor()
+                && charClass.getCreatureStats(mPtr).getMovementFlag(MWMechanics::CreatureStats::Flag_NetworkPlayerNpc))
+            {
+                if (auto* bn = mPtr.getRefData().getBaseNode())
+                {
+                    std::string syncedRecoveryGroup;
+                    if (bn->getUserValue("mp_recovery_anim_group", syncedRecoveryGroup)
+                        && !syncedRecoveryGroup.empty()
+                        && syncedRecoveryGroup.rfind(recoveryPrefix, 0) == 0
+                        && mAnimation->hasAnimation(syncedRecoveryGroup))
+                    {
+                        mCurrentHit = syncedRecoveryGroup;
+                        usedSyncedRecovery = true;
+                    }
+                }
+            }
+
+            if (!usedSyncedRecovery)
+            {
+                mCurrentHit = chooseRandomGroup(mCurrentHit);
+                if (mHitState == CharState_SwimHit && !mAnimation->hasAnimation(mCurrentHit))
+                    mCurrentHit = chooseRandomGroup(hitStateToAnimGroup(CharState_Hit));
+            }
         }
 
         // Cancel upper body animations
@@ -521,6 +544,19 @@ namespace MWMechanics
         {
             mCurrentHit.clear();
             return;
+        }
+
+        if (mPtr == getPlayer() && isRecovery())
+        {
+            if (auto* bn = mPtr.getRefData().getBaseNode())
+            {
+                bn->setUserValue("mp_anim_play_pending", true);
+                bn->setUserValue("mp_anim_play_group", mCurrentHit);
+                bn->setUserValue("mp_anim_play_priority", int(Priority_Hit));
+                bn->setUserValue("mp_anim_play_loops", 0);
+                bn->setUserValue("mp_anim_play_start", std::string(startKey));
+                bn->setUserValue("mp_anim_play_stop", std::string(stopKey));
+            }
         }
 
         playBlendedAnimation(mCurrentHit, priority, MWRender::BlendMask_All, true, 1, startKey, stopKey, 0.0f,

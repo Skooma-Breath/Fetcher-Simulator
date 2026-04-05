@@ -12,6 +12,7 @@
 #include <components/openmw-mp/Packets/Player/PacketPlayerEquipment.hpp>
 #include <components/openmw-mp/Packets/Player/PacketPlayerDeath.hpp>
 #include <components/openmw-mp/Packets/Player/PacketPlayerResurrect.hpp>
+#include <components/openmw-mp/Packets/Player/PacketPlayerAnimPlay.hpp>
 #include <components/sceneutil/positionattitudetransform.hpp>
 
 #include "../network/Client.hpp"
@@ -260,6 +261,7 @@ void PlayerSync::update(float dt)
     tickPosition(dt);
     tickDynamicStats(dt);
     sendAnimFlags(dt);
+    sendAnimPlay();
     sendAttack();
     sendCast();
 
@@ -340,6 +342,51 @@ void PlayerSync::sendCellChange()
 void PlayerSync::sendDynamicStats()
 {
     PacketPlayerStatsDynamic pkt;
+    pkt.setPlayer(&mLocal);
+    mClient.sendReliable(pkt.encode(mSeqCounter++));
+}
+
+void PlayerSync::sendAnimPlay()
+{
+    MWBase::World* world = MWBase::Environment::get().getWorld();
+    if (!world)
+        return;
+
+    MWWorld::Ptr player = world->getPlayerPtr();
+    if (player.isEmpty())
+        return;
+
+    auto* bn = player.getRefData().getBaseNode();
+    if (!bn)
+        return;
+
+    bool pending = false;
+    if (!bn->getUserValue("mp_anim_play_pending", pending) || !pending)
+        return;
+
+    bn->setUserValue("mp_anim_play_pending", false);
+
+    std::string groupName;
+    bn->getUserValue("mp_anim_play_group", groupName);
+    if (groupName.empty())
+        return;
+
+    int priority = 0;
+    int loops = 0;
+    std::string startKey = "start";
+    std::string stopKey = "stop";
+    bn->getUserValue("mp_anim_play_priority", priority);
+    bn->getUserValue("mp_anim_play_loops", loops);
+    bn->getUserValue("mp_anim_play_start", startKey);
+    bn->getUserValue("mp_anim_play_stop", stopKey);
+
+    mLocal.animPlay.groupName = groupName;
+    mLocal.animPlay.priority = priority;
+    mLocal.animPlay.loops = loops;
+    mLocal.animPlay.startKey = startKey;
+    mLocal.animPlay.stopKey = stopKey;
+
+    PacketPlayerAnimPlay pkt;
     pkt.setPlayer(&mLocal);
     mClient.sendReliable(pkt.encode(mSeqCounter++));
 }
@@ -862,7 +909,10 @@ void PlayerSync::sendDeath()
         MWWorld::Ptr player = world->getPlayerPtr();
         if (!player.isEmpty())
             if (auto* bn = player.getRefData().getBaseNode())
+            {
                 bn->getUserValue("mp_death_anim_group", mLocal.deathAnimationGroup);
+                bn->setUserValue("mp_anim_play_pending", false);
+            }
     }
 
     PacketPlayerDeath pkt;
@@ -874,6 +924,13 @@ void PlayerSync::sendResurrect()
 {
     mLocal.isDead = false;
     mLocal.deathAnimationGroup.clear();
+    if (MWBase::World* world = MWBase::Environment::get().getWorld())
+    {
+        MWWorld::Ptr player = world->getPlayerPtr();
+        if (!player.isEmpty())
+            if (auto* bn = player.getRefData().getBaseNode())
+                bn->setUserValue("mp_anim_play_pending", false);
+    }
     PacketPlayerResurrect pkt;
     pkt.setPlayer(&mLocal);
     mClient.sendReliable(pkt.encode(mSeqCounter++));

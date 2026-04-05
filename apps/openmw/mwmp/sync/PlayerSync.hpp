@@ -55,6 +55,7 @@ namespace mwmp
         void sendCellChange();
         void sendEquipment();
         void sendAnimFlags(float dt);
+        void sendAnimPlay();
         void sendAttack();
         void sendCast();
         void sendDynamicStats();
