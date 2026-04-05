@@ -69,6 +69,16 @@ namespace mwmp
             return current + diff * alpha;
         }
 
+        void clearTransientLocomotion(AnimFlags& flags)
+        {
+            flags.animFwd = 0.f;
+            flags.animSide = 0.f;
+            flags.blockedMoveSpeed = 0.f;
+            flags.jumpVz = 0.f;
+            flags.movementFlags &= ~AnimFlags::MF_WALL_BLOCKED;
+            flags.actionFlags &= (AnimFlags::AF_WEAPON_DRAWN | AnimFlags::AF_SPELL_READY);
+        }
+
         bool isUnarmedAttack(const MWWorld::Ptr& attacker)
         {
             if (attacker.isEmpty() || !attacker.getClass().hasInventoryStore(attacker))
@@ -466,6 +476,13 @@ namespace mwmp
 
         if (isKnockedOut || isKnockedDown || isRecovering)
         {
+            if (hitFlagsChanged)
+            {
+                clearTransientLocomotion(mState.animFlags);
+                clearTransientLocomotion(mLastAppliedAnimFlags);
+                mInterpPlanarSpeed = 0.f;
+            }
+
             // Zero movement so the CC's locomotion branch doesn't fight the hit anim
             mov.mPosition[0] = 0.f;
             mov.mPosition[1] = 0.f;
@@ -537,6 +554,46 @@ namespace mwmp
         else if (f.actionFlags & AnimFlags::AF_SPELL_READY)
             ds = MWMechanics::DrawState::Spell;
         stats.setDrawState(ds);
+    }
+
+    // ---------------------------------------------------------------------------
+    void RemotePlayer::applyDynamicStatsToActor()
+    {
+        if (!mIsSpawned || mNpcPtr.isEmpty() || mIsDead)
+            return;
+
+        const DynamicStats& dyn = mState.dynamicStats;
+        const bool hasSyncedDynamicStats
+            = dyn.health.base != 0.f || dyn.health.current != 0.f || dyn.health.mod != 0.f
+            || dyn.magicka.base != 0.f || dyn.magicka.current != 0.f || dyn.magicka.mod != 0.f
+            || dyn.fatigue.base != 0.f || dyn.fatigue.current != 0.f || dyn.fatigue.mod != 0.f;
+        if (!hasSyncedDynamicStats)
+            return;
+
+        MWMechanics::CreatureStats& stats = mNpcPtr.getClass().getCreatureStats(mNpcPtr);
+
+        MWMechanics::DynamicStat<float> health = stats.getHealth();
+        health.setBase(dyn.health.base);
+        health.setModifier(dyn.health.mod);
+        health.setCurrent(dyn.health.current, true, true);
+        stats.setHealth(health);
+
+        MWMechanics::DynamicStat<float> magicka = stats.getMagicka();
+        magicka.setBase(dyn.magicka.base);
+        magicka.setModifier(dyn.magicka.mod);
+        magicka.setCurrent(dyn.magicka.current, true, true);
+        stats.setMagicka(magicka);
+
+        MWMechanics::DynamicStat<float> fatigue = stats.getFatigue();
+        fatigue.setBase(dyn.fatigue.base);
+        fatigue.setModifier(dyn.fatigue.mod);
+
+        const bool hitStateActive
+            = (mAppliedHitFlags & (AnimFlags::MF_KNOCKED_DOWN | AnimFlags::MF_KNOCKED_OUT | AnimFlags::MF_RECOVERY)) != 0;
+        if (!hitStateActive)
+            fatigue.setCurrent(dyn.fatigue.current, true, true);
+
+        stats.setFatigue(fatigue);
     }
 
     // ---------------------------------------------------------------------------
@@ -701,6 +758,7 @@ namespace mwmp
 
             mIsSpawned = true;
             mMechanicsRegistered = false;
+            applyDynamicStatsToActor();
 
             // Attach world-space nameplate above the NPC's head.
             // Also tag the base node with the player's network name so that
@@ -1059,6 +1117,7 @@ namespace mwmp
     void RemotePlayer::onStatsDynamicUpdate(const BasePlayer& state)
     {
         mState.dynamicStats = state.dynamicStats;
+        applyDynamicStatsToActor();
     }
 
     // ---------------------------------------------------------------------------
@@ -1118,10 +1177,17 @@ namespace mwmp
         mIsDead = true;
         mState.isDead = true;
         mState.deathAnimationGroup = state.deathAnimationGroup;
+        clearTransientLocomotion(mState.animFlags);
+        clearTransientLocomotion(mLastAppliedAnimFlags);
+        mInterpPlanarSpeed = 0.f;
+        mState.attack.pressed = false;
         if (mIsSpawned && !mNpcPtr.isEmpty())
         {
             if (auto* bn = mNpcPtr.getRefData().getBaseNode())
+            {
                 bn->setUserValue("mp_death_anim_group", state.deathAnimationGroup);
+                bn->setUserValue("mp_interp_speed", 0.f);
+            }
 
             MWMechanics::CreatureStats& stats = mNpcPtr.getClass().getCreatureStats(mNpcPtr);
             MWMechanics::Movement& mov = mNpcPtr.getClass().getMovementSettings(mNpcPtr);
@@ -1149,15 +1215,32 @@ namespace mwmp
         mIsDead = false;
         mState.isDead = false;
         mState.deathAnimationGroup.clear();
+        clearTransientLocomotion(mState.animFlags);
+        clearTransientLocomotion(mLastAppliedAnimFlags);
+        mInterpPlanarSpeed = 0.f;
+        mAppliedHitFlags = 0;
+        mState.attack.pressed = false;
+        mIsStrafing = false;
         if (mIsSpawned && !mNpcPtr.isEmpty())
         {
             if (auto* bn = mNpcPtr.getRefData().getBaseNode())
+            {
                 bn->setUserValue("mp_death_anim_group", std::string());
+                bn->setUserValue("mp_interp_speed", 0.f);
+            }
 
             if (MWBase::MechanicsManager* mechanics = MWBase::Environment::get().getMechanicsManager())
                 mechanics->resurrect(mNpcPtr);
 
             MWMechanics::CreatureStats& stats = mNpcPtr.getClass().getCreatureStats(mNpcPtr);
+            MWMechanics::Movement& mov = mNpcPtr.getClass().getMovementSettings(mNpcPtr);
+            mov.mPosition[0] = 0.f;
+            mov.mPosition[1] = 0.f;
+            mov.mPosition[2] = 0.f;
+            mov.mRotation[0] = 0.f;
+            mov.mRotation[1] = 0.f;
+            mov.mRotation[2] = 0.f;
+            mov.mIsStrafing = false;
             MWMechanics::DynamicStat<float> magicka = stats.getMagicka();
             magicka.setCurrent(magicka.getBase());
             stats.setMagicka(magicka);

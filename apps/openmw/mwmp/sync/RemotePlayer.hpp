@@ -80,6 +80,7 @@ namespace mwmp
         void ensureMechanicsRegistration();
         void applyInterpolationToWorld();
         void applyAnimationStateToActor();
+        void applyDynamicStatsToActor();
 
         // ---- interpolation ----
         void updateInterpolation(float dt);

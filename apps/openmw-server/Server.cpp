@@ -1059,6 +1059,7 @@ void MPServer::handlePlayerResurrect(ConnectedClient& c, const uint8_t* data, si
     if (!pkt.decode(data, size)) return;
 
     c.player.isDead = false;
+    c.player.deathAnimationGroup.clear();
     broadcastToAll(std::vector<uint8_t>(data, data + size), c.conn);
 
     Log(Debug::Info) << "[Server] Relayed PlayerResurrect for " << c.name;

@@ -225,18 +225,21 @@ void PlayerSync::update(float dt)
     }
 
     const auto& liveStats = player.getClass().getCreatureStats(player);
-    if (!liveStats.isDead() && mLastWasDead)
-    {
-        sendResurrect();
-        forceFullSync();
-    }
-
     mLocal.dynamicStats.health.base    = liveStats.getHealth().getBase();
     mLocal.dynamicStats.health.current = liveStats.getHealth().getCurrent();
     mLocal.dynamicStats.magicka.base   = liveStats.getMagicka().getBase();
     mLocal.dynamicStats.magicka.current= liveStats.getMagicka().getCurrent();
     mLocal.dynamicStats.fatigue.base   = liveStats.getFatigue().getBase();
     mLocal.dynamicStats.fatigue.current= liveStats.getFatigue().getCurrent();
+
+    if (!liveStats.isDead() && mLastWasDead)
+    {
+        // Refresh dynamic stats before the respawn full sync so observers don't
+        // see a resurrect immediately followed by a stale dead-state snapshot.
+        sendResurrect();
+        forceFullSync();
+    }
+
     mLastWasDead = liveStats.isDead();
 
     captureEquipment(player);
@@ -673,11 +676,20 @@ void PlayerSync::sendAnimFlags(float dt)
     // MF_STRAFING is derived on the receiver from animFwd/animSide directly,
     // mirroring the vanilla CC criterion — no need to encode it from the sender.
 
-    // Mirror the sender's broader CreatureStats hit-state lifetime rather than
-    // only the CharacterController's current leaf state. getKnockedDown() stays
-    // true through the whole downed sequence, including standing up, which lets
-    // us expose a KO -> KD -> clear transition instead of a single KO -> clear.
-    // That gives the receiver an earlier cue to begin the stand-up sequence.
+    // Mirror a single authoritative hit-state phase per frame.
+    //
+    // Logs from April 4, 2026 showed mixed combinations like:
+    //   0 -> 384  (KNOCKED_OUT | RECOVERY)
+    //   384 -> 320 (KNOCKED_DOWN | RECOVERY)
+    // during fatigue-punch desync cases. Those overlapping internal CreatureStats
+    // flags are valid locally, but they over-describe transient state for remote
+    // playback and can synthesize a fall/stand sequence the owning client never
+    // visibly enters.
+    //
+    // Networking only needs the dominant phase:
+    //   KO        beats everything
+    //   RECOVERY  beats plain KD while standing up
+    //   KD        is only sent when neither KO nor recovery is active
     const bool statsKnockedDown = stats.getKnockedDown();
     const bool statsKnockedOut = statsKnockedDown
         && (stats.getFatigue().getCurrent() < 0.f || stats.getFatigue().getBase() == 0.f);
@@ -685,10 +697,10 @@ void PlayerSync::sendAnimFlags(float dt)
 
     if (statsKnockedOut)
         f.movementFlags |= AnimFlags::MF_KNOCKED_OUT;
+    else if (statsRecovery)
+        f.movementFlags |= AnimFlags::MF_RECOVERY;
     else if (statsKnockedDown)
         f.movementFlags |= AnimFlags::MF_KNOCKED_DOWN;
-    if (statsRecovery)
-        f.movementFlags |= AnimFlags::MF_RECOVERY;
 
     // actionFlags bitmask
     if (stats.getAttackingOrSpell())
