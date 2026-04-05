@@ -1501,14 +1501,18 @@ namespace mwmp
         // and even jump arcs look noticeably laggier than flat ground movement.
         const bool isJumping = (mState.animFlags.movementFlags & AnimFlags::MF_JUMP) != 0;
         const bool isFlying = (mState.animFlags.movementFlags & AnimFlags::MF_FLY) != 0;
+        const bool hasHitState = (mState.animFlags.movementFlags
+            & (AnimFlags::MF_KNOCKED_DOWN | AnimFlags::MF_KNOCKED_OUT | AnimFlags::MF_RECOVERY)) != 0;
         const bool isAirborne = isJumping || isFlying;
         const float netVerticalSpeed = mState.velocity.linear[2];
         const bool hasVerticalMotion = std::abs(netVerticalSpeed) > 0.1f;
         // Use a larger epsilon (0.1) for idle detection to decisively filter wiggles.
-        // Input Idle: both movement axes were let go, regardless of being grounded or airborne.
-        // We exclude jumps from this check because jump arcs are physically-driven without 
-        // manual input but should not be snapped prematurely.
-        const bool isInputIdle = (std::abs(mState.animFlags.animFwd) < 0.1f && std::abs(mState.animFlags.animSide) < 0.1f) && !isJumping;
+        // Important: knockdown/knockout/recovery must NOT count as idle here even
+        // though their movement axes are zero. Those states can carry legitimate
+        // animation-driven XY motion with no locomotion input, and routing them
+        // through the fast idle snap path makes the motion look 30 Hz / choppy.
+        const bool isInputIdle = (std::abs(mState.animFlags.animFwd) < 0.1f
+            && std::abs(mState.animFlags.animSide) < 0.1f) && !isJumping && !hasHitState;
 
         // Extrapolation Braking: if a packet is late, decay current velocity.
         // This ensures the ghost NPC 'coasts' to a halt during delay instead of 
@@ -1561,7 +1565,9 @@ namespace mwmp
             mInterp.tz = std::clamp(mInterp.tz, mInterp.lastRecvZ - maxZExtrap, mInterp.lastRecvZ + maxZExtrap);
         }
 
-        // Idle catch-up: faster XY convergence when standing still.
+        // Idle catch-up: faster XY convergence when truly standing still.
+        // Hit states deliberately stay on the normal smoothing path because their
+        // positional motion is animation-driven rather than locomotion-driven.
         float interpSpeed = POS_INTERP_SPEED;
         if (isInputIdle)
         {
@@ -1603,6 +1609,8 @@ namespace mwmp
         // so the actor doesn't visibly coast to a halt.
         // We now include airborne/levitating cases if the sender has sent an
         // absolute zero velocity (signaling a clean stop).
+        // Exclude hit states: their small XY deltas are part of the stagger/stand-up
+        // motion and should lerp smoothly instead of snapping on each packet.
         const bool isStopping = (mState.velocity.linear[0] == 0.f && mState.velocity.linear[1] == 0.f && mState.velocity.linear[2] == 0.f);
         if (isInputIdle || (isAirborne && isStopping))
         {
