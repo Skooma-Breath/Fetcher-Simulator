@@ -1,15 +1,18 @@
 #include "PlayerSync.hpp"
 
+#include <algorithm>
 #include <cmath>
 #include <cstring>
 
 #include <components/debug/debuglog.hpp>
+#include <components/esm/refid.hpp>
 #include <components/misc/rng.hpp>
 #include <components/openmw-mp/Packets/Player/PacketPlayerPosition.hpp>
 #include <components/openmw-mp/Packets/Player/PacketPlayerCellChange.hpp>
 #include <components/openmw-mp/Packets/Player/PacketPlayerStatsDynamic.hpp>
 #include <components/openmw-mp/Packets/Player/PacketPlayerBaseInfo.hpp>
 #include <components/openmw-mp/Packets/Player/PacketPlayerEquipment.hpp>
+#include <components/openmw-mp/Packets/Player/PacketPlayerInventory.hpp>
 #include <components/openmw-mp/Packets/Player/PacketPlayerDeath.hpp>
 #include <components/openmw-mp/Packets/Player/PacketPlayerResurrect.hpp>
 #include <components/openmw-mp/Packets/Player/PacketPlayerAnimPlay.hpp>
@@ -49,11 +52,49 @@
 namespace mwmp
 {
 
+namespace
+{
+    bool sameItemIdentity(const Item& left, const Item& right)
+    {
+        return left.refId == right.refId
+            && left.charge == right.charge
+            && std::abs(left.enchantmentCharge - right.enchantmentCharge) < 0.001f
+            && left.soul == right.soul;
+    }
+
+    bool sameItem(const Item& left, const Item& right)
+    {
+        return left.count == right.count && sameItemIdentity(left, right);
+    }
+
+    bool sameEquipment(const EquipmentItem& left, const EquipmentItem& right)
+    {
+        return left.slot == right.slot && sameItem(left.item, right.item);
+    }
+
+    bool inventoryOrder(const Item& left, const Item& right)
+    {
+        if (left.refId != right.refId) return left.refId < right.refId;
+        if (left.charge != right.charge) return left.charge < right.charge;
+        if (std::abs(left.enchantmentCharge - right.enchantmentCharge) >= 0.001f)
+            return left.enchantmentCharge < right.enchantmentCharge;
+        if (left.soul != right.soul) return left.soul < right.soul;
+        return left.count < right.count;
+    }
+}
+
 PlayerSync::PlayerSync(NetworkClient& client, Protocol& protocol)
     : mClient(client), mProtocol(protocol)
 {
     for (int i = 0; i < BasePlayer::NUM_EQUIPMENT_SLOTS; ++i)
+    {
         mLocal.equipment[i].slot = i;
+        mLastEquip[i].slot = i;
+        mAuthoritativeEquipment[i].slot = i;
+    }
+
+    mLocal.inventoryChanges.action = BasePlayer::InventoryChanges::Action::Set;
+    mAuthoritativeInventory.action = BasePlayer::InventoryChanges::Action::Set;
 }
 
 // ---------------------------------------------------------------------------
@@ -73,6 +114,8 @@ void PlayerSync::forceFullSync()
         MWWorld::Ptr player = world->getPlayerPtr();
         if (!player.isEmpty())
         {
+            applyPendingAuthoritativeState(player);
+
             // Snapshot position
             const auto& refData = player.getRefData();
             const auto& pos     = refData.getPosition();
@@ -121,17 +164,20 @@ void PlayerSync::forceFullSync()
             }
 
             captureEquipment(player);
+            captureInventory(player);
         }
     }
 
     sendBaseInfo();
     sendCellChange();
     sendEquipment();
+    sendInventory();
     sendDynamicStats();
     mPositionTimer = POSITION_RATE; // force position send next tick
     snapshotPosition();
     snapshotCell();
     snapshotEquipment();
+    snapshotInventory();
     snapshotDynamicStats();
     Log(Debug::Info) << "[MP] PlayerSync: full sync sent (guid=" << mLocal.guid << ")";
 }
@@ -147,6 +193,35 @@ void PlayerSync::applyServerPositionCorrection(const BasePlayer& auth)
                         << auth.position.pos[2] << ")";
 }
 
+void PlayerSync::queueAuthoritativeEquipment(const BasePlayer& authoritative)
+{
+    mAuthoritativeEquipment = authoritative.equipment;
+    for (int slot = 0; slot < BasePlayer::NUM_EQUIPMENT_SLOTS; ++slot)
+        mAuthoritativeEquipment[slot].slot = slot;
+    mPendingEquipmentRestore = true;
+
+    MWBase::World* world = MWBase::Environment::get().getWorld();
+    if (!world) return;
+
+    MWWorld::Ptr player = world->getPlayerPtr();
+    if (!player.isEmpty())
+        applyPendingAuthoritativeState(player);
+}
+
+void PlayerSync::queueAuthoritativeInventory(const BasePlayer& authoritative)
+{
+    mAuthoritativeInventory = authoritative.inventoryChanges;
+    mAuthoritativeInventory.action = BasePlayer::InventoryChanges::Action::Set;
+    mPendingInventoryRestore = true;
+
+    MWBase::World* world = MWBase::Environment::get().getWorld();
+    if (!world) return;
+
+    MWWorld::Ptr player = world->getPlayerPtr();
+    if (!player.isEmpty())
+        applyPendingAuthoritativeState(player);
+}
+
 // ---------------------------------------------------------------------------
 void PlayerSync::update(float dt)
 {
@@ -159,6 +234,8 @@ void PlayerSync::update(float dt)
 
     MWWorld::Ptr player = world->getPlayerPtr();
     if (player.isEmpty()) return;
+
+    applyPendingAuthoritativeState(player);
 
     // Don't send anything until we have a valid server-assigned guid.
     // forceFullSync() is called by Main.cpp from the CharacterData handler
@@ -244,6 +321,7 @@ void PlayerSync::update(float dt)
     mLastWasDead = liveStats.isDead();
 
     captureEquipment(player);
+    captureInventory(player);
 
     // --- cell ---
     if (const MWWorld::CellStore* cs = player.getCell())
@@ -275,6 +353,11 @@ void PlayerSync::update(float dt)
     {
         snapshotEquipment();
         sendEquipment();
+    }
+    if (inventoryChanged())
+    {
+        snapshotInventory();
+        sendInventory();
     }
 }
 
@@ -401,6 +484,15 @@ void PlayerSync::sendBaseInfo()
 void PlayerSync::sendEquipment()
 {
     PacketPlayerEquipment pkt;
+    pkt.setPlayer(&mLocal);
+    mClient.sendReliable(pkt.encode(mSeqCounter++));
+}
+
+void PlayerSync::sendInventory()
+{
+    mLocal.inventoryChanges.action = BasePlayer::InventoryChanges::Action::Set;
+
+    PacketPlayerInventory pkt;
     pkt.setPlayer(&mLocal);
     mClient.sendReliable(pkt.encode(mSeqCounter++));
 }
@@ -1090,9 +1182,20 @@ bool PlayerSync::equipmentChanged() const
 {
     for (int i = 0; i < BasePlayer::NUM_EQUIPMENT_SLOTS; ++i)
     {
-        const std::string& live = (i < (int)mLocal.equipment.size())
-            ? mLocal.equipment[i].item.refId : "";
-        if (live != mLastEquip[i])
+        if (!sameEquipment(mLocal.equipment[i], mLastEquip[i]))
+            return true;
+    }
+    return false;
+}
+
+bool PlayerSync::inventoryChanged() const
+{
+    if (mLocal.inventoryChanges.items.size() != mLastInventory.size())
+        return true;
+
+    for (std::size_t i = 0; i < mLocal.inventoryChanges.items.size(); ++i)
+    {
+        if (!sameItem(mLocal.inventoryChanges.items[i], mLastInventory[i]))
             return true;
     }
     return false;
@@ -1130,8 +1233,12 @@ void PlayerSync::snapshotCell()
 void PlayerSync::snapshotEquipment()
 {
     for (int i = 0; i < BasePlayer::NUM_EQUIPMENT_SLOTS; ++i)
-        mLastEquip[i] = (i < (int)mLocal.equipment.size())
-            ? mLocal.equipment[i].item.refId : "";
+        mLastEquip[i] = mLocal.equipment[i];
+}
+
+void PlayerSync::snapshotInventory()
+{
+    mLastInventory = mLocal.inventoryChanges.items;
 }
 void PlayerSync::snapshotDynamicStats()
 {
@@ -1169,6 +1276,107 @@ void PlayerSync::captureEquipment(const MWWorld::Ptr& player)
             entry.item.enchantmentCharge = -1.f;
             entry.item.soul.clear();
         }
+    }
+}
+
+void PlayerSync::captureInventory(const MWWorld::Ptr& player)
+{
+    if (!player.getClass().hasInventoryStore(player))
+        return;
+
+    MWWorld::InventoryStore& invStore = player.getClass().getInventoryStore(player);
+    auto& items = mLocal.inventoryChanges.items;
+    items.clear();
+    mLocal.inventoryChanges.action = BasePlayer::InventoryChanges::Action::Set;
+
+    for (auto it = invStore.begin(); it != invStore.end(); ++it)
+    {
+        if (it->getCellRef().getCount() <= 0)
+            continue;
+
+        Item item;
+        const MWWorld::CellRef& cellRef = it->getCellRef();
+        item.refId = cellRef.getRefId().serializeText();
+        item.count = cellRef.getCount();
+        item.charge = cellRef.getCharge();
+        item.enchantmentCharge = cellRef.getEnchantmentCharge();
+        item.soul = cellRef.getSoul().serializeText();
+        items.push_back(std::move(item));
+    }
+
+    std::sort(items.begin(), items.end(), inventoryOrder);
+}
+
+void PlayerSync::applyPendingAuthoritativeState(const MWWorld::Ptr& player)
+{
+    if (!player.getClass().hasInventoryStore(player))
+        return;
+
+    MWWorld::InventoryStore& invStore = player.getClass().getInventoryStore(player);
+    MWWorld::ContainerStore& containerStore = invStore;
+    bool applied = false;
+
+    if (mPendingInventoryRestore)
+    {
+        invStore.clear();
+        for (const Item& item : mAuthoritativeInventory.items)
+        {
+            if (item.refId.empty() || item.count <= 0)
+                continue;
+
+            MWWorld::ContainerStoreIterator it = containerStore.add(
+                ESM::RefId::stringRefId(item.refId), item.count, false);
+            if (it == invStore.end())
+                continue;
+
+            MWWorld::CellRef& cellRef = it->getCellRef();
+            cellRef.setCharge(item.charge);
+            cellRef.setEnchantmentCharge(item.enchantmentCharge);
+            cellRef.setSoul(item.soul.empty() ? ESM::RefId() : ESM::RefId::deserializeText(item.soul));
+        }
+        mPendingInventoryRestore = false;
+        applied = true;
+    }
+
+    if (mPendingEquipmentRestore)
+    {
+        invStore.unequipAll();
+        for (int slot = 0; slot < BasePlayer::NUM_EQUIPMENT_SLOTS; ++slot)
+        {
+            const EquipmentItem& target = mAuthoritativeEquipment[slot];
+            if (target.item.refId.empty())
+                continue;
+
+            for (auto it = invStore.begin(); it != invStore.end(); ++it)
+            {
+                const MWWorld::CellRef& cellRef = it->getCellRef();
+                if (cellRef.getCount() <= 0)
+                    continue;
+
+                Item liveItem;
+                liveItem.refId = cellRef.getRefId().serializeText();
+                liveItem.count = cellRef.getCount();
+                liveItem.charge = cellRef.getCharge();
+                liveItem.enchantmentCharge = cellRef.getEnchantmentCharge();
+                liveItem.soul = cellRef.getSoul().serializeText();
+
+                if (!sameItemIdentity(liveItem, target.item))
+                    continue;
+
+                invStore.equip(slot, it);
+                break;
+            }
+        }
+        mPendingEquipmentRestore = false;
+        applied = true;
+    }
+
+    if (applied)
+    {
+        captureInventory(player);
+        captureEquipment(player);
+        snapshotInventory();
+        snapshotEquipment();
     }
 }
 

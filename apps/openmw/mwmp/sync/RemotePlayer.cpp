@@ -1585,6 +1585,11 @@ namespace mwmp
                                     << " items)";
                 break;
         }
+
+        // A full inventory Set clears the underlying InventoryStore slots, so
+        // re-apply the last authoritative equipment snapshot afterward to keep
+        // the visible weapon/armor state in sync with the remote actor.
+        onEquipmentUpdate(mState);
     }
 
     // ---------------------------------------------------------------------------

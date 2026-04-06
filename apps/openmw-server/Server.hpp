@@ -16,6 +16,7 @@
 #include <steam/isteamnetworkingutils.h>
 #include <steam/steamnetworkingsockets.h>
 
+#include <components/openmw-mp/Base/BaseObject.hpp>
 #include <components/openmw-mp/Base/BasePlayer.hpp>
 #include <components/openmw-mp/NetworkMessages.hpp>
 #include <components/openmw-mp/Packets/Object/PacketDoorState.hpp>
@@ -164,6 +165,10 @@ private:
     void handlePlayerDeath      (ConnectedClient& c, const uint8_t* data, size_t size);
     void handlePlayerResurrect  (ConnectedClient& c, const uint8_t* data, size_t size);
     void handleChatMessage      (ConnectedClient& c, const uint8_t* data, size_t size);
+    void handleObjectPlace      (ConnectedClient& c, const uint8_t* data, size_t size);
+    void handleObjectDelete     (ConnectedClient& c, const uint8_t* data, size_t size);
+    void handleObjectMove       (ConnectedClient& c, const uint8_t* data, size_t size);
+    void handleContainer        (ConnectedClient& c, const uint8_t* data, size_t size);
     void handleDoorState        (ConnectedClient& c, const uint8_t* data, size_t size);
     void handleWeather          (ConnectedClient& c, const uint8_t* data, size_t size);
 
@@ -174,6 +179,10 @@ private:
     void sendTo        (HSteamNetConnection conn,
                         const std::vector<uint8_t>& data,
                         bool reliable = true);
+    void broadcastToCell(const std::string& cellId,
+                         const std::vector<uint8_t>& data,
+                         HSteamNetConnection except = k_HSteamNetConnection_Invalid,
+                         bool reliable = true);
 
     // ── Validation ────────────────────────────────────────────────────────
     bool validateMovement(const ConnectedClient& c, const BasePlayer& proposed) const;
@@ -212,6 +221,9 @@ private:
 
         // Authoritative door states: cellId → list of door entries.
         std::map<std::string, std::vector<mwmp::DoorEntry>> doorStates;
+        std::map<std::string, std::vector<mwmp::PlacedObject>> placedObjects;
+        std::unordered_map<std::string, mwmp::ContainerRecord> containers;
+        uint32_t nextObjectMpNum = 1;
 
         // Weather — reported by the host (guid 1) and relayed to others.
         bool        hasWeather        = false;
@@ -242,6 +254,9 @@ private:
     // ── Config ────────────────────────────────────────────────────────────
     static constexpr float       MAX_MOVE_SPEED = 600.f;
     static constexpr const char* SERVER_VERSION = "0.1.0";
+
+    void loadPersistentWorldState();
+    void sendCellStateToClient(HSteamNetConnection conn, const std::string& cellId);
 };
 
 } // namespace mwmp

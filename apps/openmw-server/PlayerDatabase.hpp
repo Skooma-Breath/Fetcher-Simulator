@@ -26,6 +26,10 @@
 #include <string_view>
 #include <vector>
 
+#include <components/openmw-mp/Base/BasePlayer.hpp>
+#include <components/openmw-mp/Base/BaseObject.hpp>
+#include <components/openmw-mp/Packets/Object/PacketDoorState.hpp>
+
 struct sqlite3;
 struct sqlite3_stmt;
 
@@ -52,6 +56,8 @@ namespace mwmp
         std::string birthSign;
         std::string classData; ///< CLDTstruct encoded as comma-separated ints
         std::string nickname;  ///< cosmetic display name; empty = use slot name
+        bool        hasSavedInventory = false;
+        bool        hasSavedEquipment = false;
     };
 
     class PlayerDatabase
@@ -126,6 +132,39 @@ namespace mwmp
         /// Set (or clear) the nickname for a character slot.
         /// Pass an empty string to revert to the slot name.
         void setNickname(int64_t characterId, std::string_view nickname);
+
+        /// Load the last persisted inventory snapshot for a character.
+        std::vector<Item> loadCharacterInventory(int64_t characterId);
+
+        /// Replace the persisted inventory snapshot for a character.
+        void saveCharacterInventory(int64_t characterId, const std::vector<Item>& items);
+
+        /// Load the last persisted equipment snapshot for a character.
+        std::vector<EquipmentItem> loadCharacterEquipment(int64_t characterId);
+
+        /// Replace the persisted equipment snapshot for a character.
+        void saveCharacterEquipment(int64_t characterId, const std::vector<EquipmentItem>& equipment);
+
+        /// Load persisted multiplayer-placed world objects.
+        std::vector<PlacedObject> loadWorldObjects();
+
+        /// Insert or update one multiplayer-placed world object.
+        void upsertWorldObject(const PlacedObject& object);
+
+        /// Delete one multiplayer-placed world object by mpNum.
+        void deleteWorldObject(uint32_t mpNum);
+
+        /// Load server-authoritative container inventories.
+        std::vector<ContainerRecord> loadContainerRecords();
+
+        /// Insert or update one server-authoritative container inventory.
+        void upsertContainerRecord(const ContainerRecord& record);
+
+        /// Load persisted door states.
+        std::vector<DoorEntry> loadDoorStates();
+
+        /// Insert or update one persisted door state entry.
+        void upsertDoorState(const DoorEntry& entry);
 
         /// Lightweight summary used to build PacketCharacterList.
         struct CharacterSummary

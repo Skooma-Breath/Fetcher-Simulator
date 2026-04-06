@@ -121,7 +121,7 @@ if (BUILD_MULTIPLAYER)
         Client Protocol Serialization
     )
     add_openmw_dir (mwmp/sync
-        PlayerSync RemotePlayer Nameplate ActorSync CellSync ObjectSync WorldStateSync
+        PlayerSync RemotePlayer Nameplate ActorSync CellSync ObjectSync WorldObjectSync WorldStateSync
     )
     add_openmw_dir (mwmp/gui
         ChatWindow LoginDialog PlayerListWindow ServerBrowser

@@ -1,9 +1,12 @@
 #include "WorldObjectSync.hpp"
 
 #include <algorithm>
+#include <cmath>
+#include <cstdio>
 
 #include <components/debug/debuglog.hpp>
 #include <components/esm/refid.hpp>
+#include <components/esm3/loadcont.hpp>
 #include <components/esm/position.hpp>
 #include <components/openmw-mp/Packets/Object/PacketObjectPlace.hpp>
 #include <components/openmw-mp/Packets/Object/PacketObjectDelete.hpp>
@@ -12,6 +15,7 @@
 
 #include "../../mwbase/environment.hpp"
 #include "../../mwbase/world.hpp"
+#include "../../mwworld/class.hpp"
 #include "../../mwworld/ptr.hpp"
 #include "../../mwworld/manualref.hpp"
 #include "../../mwworld/esmstore.hpp"
@@ -27,6 +31,22 @@
 
 namespace mwmp
 {
+
+namespace
+{
+    bool samePosition(const Position& left, const Position& right)
+    {
+        constexpr float epsilon = 0.01f;
+        for (int i = 0; i < 3; ++i)
+        {
+            if (std::abs(left.pos[i] - right.pos[i]) > epsilon)
+                return false;
+            if (std::abs(left.rot[i] - right.rot[i]) > epsilon)
+                return false;
+        }
+        return true;
+    }
+}
 
 WorldObjectSync::WorldObjectSync(NetworkClient& client)
     : mClient(client)
@@ -86,7 +106,7 @@ void WorldObjectSync::update(float dt)
 // ---------------------------------------------------------------------------
 // Outbound — local player places an object
 // ---------------------------------------------------------------------------
-void WorldObjectSync::onLocalObjectPlaced(const std::string& refId, int count,
+void WorldObjectSync::onLocalObjectPlaced(const MWWorld::Ptr& ptr, const std::string& refId, int count,
                                           const Position& pos,
                                           const std::string& cellId)
 {
@@ -96,8 +116,47 @@ void WorldObjectSync::onLocalObjectPlaced(const std::string& refId, int count,
     pkt.object.count   = count;
     pkt.object.position= pos;
     pkt.object.cellId  = cellId;
+    mPendingLocalPlace.push_back({ptr, refId, count, pos, cellId});
     mClient.sendReliable(pkt.encode());
     Log(Debug::Verbose) << "[MP] WorldObjectSync: sent ObjectPlace refId=" << refId;
+}
+
+void WorldObjectSync::onLocalObjectDeleted(const MWWorld::Ptr& ptr)
+{
+    if (mSuppressLocalDelete || ptr.isEmpty() || !ptr.isInCell())
+        return;
+
+    uint32_t mpNum = 0;
+    for (const auto& [candidateMpNum, objectPtr] : mObjects)
+    {
+        if (objectPtr == ptr)
+        {
+            mpNum = candidateMpNum;
+            break;
+        }
+    }
+
+    if (mpNum == 0)
+        return;
+
+    std::string cellId;
+    if (const MWWorld::Cell* cell = ptr.getCell()->getCell())
+    {
+        if (cell->isExterior())
+        {
+            char buf[32];
+            std::snprintf(buf, sizeof(buf), "EXT:%d,%d", cell->getGridX(), cell->getGridY());
+            cellId = buf;
+        }
+        else
+            cellId = std::string(cell->getNameId());
+    }
+
+    PacketObjectDelete pkt;
+    pkt.mpNum = mpNum;
+    pkt.cellId = cellId;
+    mClient.sendReliable(pkt.encode());
+    Log(Debug::Verbose) << "[MP] WorldObjectSync: sent ObjectDelete mpNum=" << mpNum;
 }
 
 // ---------------------------------------------------------------------------
@@ -122,28 +181,31 @@ void WorldObjectSync::onLocalContainerOpened(const std::string& cellId,
     auto& scene = static_cast<MWWorld::World*>(world)->getWorldScene();
     for (MWWorld::CellStore* store : scene.getActiveCells())
     {
-        // Try containers
-        for (const auto& liveRef : store->getReadOnlyContainers().mList)
+        bool found = false;
+        store->forEach([&](MWWorld::Ptr ptr) -> bool
         {
-            if (liveRef.mRef.getRefId().toString() != refId) continue;
-            if (refNum != 0 && liveRef.mRef.getRefNum().mIndex != refNum) continue;
-
-            MWWorld::Ptr ptr(
-                const_cast<MWWorld::LiveCellRefBase*>(
-                    static_cast<const MWWorld::LiveCellRefBase*>(&liveRef)),
-                store);
+            if (ptr.getType() != ESM::Container::sRecordId)
+                return true;
+            if (ptr.getCellRef().getRefId().toString() != refId)
+                return true;
+            if (refNum != 0 && ptr.getCellRef().getRefNum().mIndex != refNum)
+                return true;
 
             auto& cstore = ptr.getClass().getContainerStore(ptr);
             for (auto it = cstore.begin(); it != cstore.end(); ++it)
             {
                 ContainerItem ci;
                 ci.refId  = it->getCellRef().getRefId().toString();
-                ci.count  = it->getRefData().getCount();
+                ci.count  = it->getCellRef().getCount();
                 ci.charge = static_cast<int>(it->getCellRef().getCharge());
                 pkt.container.items.push_back(ci);
             }
+            found = true;
+            return false;
+        });
+
+        if (found)
             break;
-        }
     }
 
     mClient.sendReliable(pkt.encode());
@@ -175,6 +237,24 @@ void WorldObjectSync::onServerObjectPlace(uint32_t mpNum, const std::string& ref
                                            int count, const Position& pos,
                                            const std::string& cellId)
 {
+    auto localIt = std::find_if(
+        mPendingLocalPlace.begin(), mPendingLocalPlace.end(),
+        [&](const PendingLocalPlace& pending)
+        {
+            return !pending.ptr.isEmpty()
+                && pending.refId == refId
+                && pending.count == count
+                && pending.cellId == cellId
+                && samePosition(pending.pos, pos);
+        });
+    if (localIt != mPendingLocalPlace.end())
+    {
+        mObjects[mpNum] = localIt->ptr;
+        mPendingLocalPlace.erase(localIt);
+        Log(Debug::Verbose) << "[MP] WorldObjectSync: registered local ObjectPlace mpNum=" << mpNum;
+        return;
+    }
+
     if (!tryPlaceObject(mpNum, refId, count, pos, cellId))
     {
         Log(Debug::Verbose) << "[MP] WorldObjectSync: queuing ObjectPlace mpNum=" << mpNum
@@ -276,7 +356,9 @@ bool WorldObjectSync::tryDeleteObject(uint32_t mpNum)
 
     if (!it->second.isEmpty())
     {
+        mSuppressLocalDelete = true;
         world->deleteObject(it->second);
+        mSuppressLocalDelete = false;
         Log(Debug::Info) << "[MP] WorldObjectSync: deleted mpNum=" << mpNum;
     }
     mObjects.erase(it);
@@ -295,7 +377,7 @@ bool WorldObjectSync::tryMoveObject(uint32_t mpNum, const Position& pos)
     osg::Vec3f osgPos(pos.pos[0], pos.pos[1], pos.pos[2]);
     osg::Vec3f osgRot(pos.rot[0], pos.rot[1], pos.rot[2]);
 
-    it->second = world->moveObject(it->second, osgPos.x(), osgPos.y(), osgPos.z());
+    it->second = world->moveObject(it->second, osgPos);
     world->rotateObject(it->second, osgRot);
     return true;
 }
@@ -309,49 +391,55 @@ bool WorldObjectSync::tryApplyContainer(const ContainerRecord& record, Container
     auto& scene = static_cast<MWWorld::World*>(world)->getWorldScene();
     for (MWWorld::CellStore* store : scene.getActiveCells())
     {
-        for (auto& liveRef : store->getReadOnlyContainers().mList)
+        MWWorld::Ptr target;
+        store->forEach([&](MWWorld::Ptr ptr) -> bool
         {
-            if (liveRef.mRef.getRefId().toString() != record.refId) continue;
-            if (record.refNum != 0 && liveRef.mRef.getRefNum().mIndex != record.refNum) continue;
+            if (ptr.getType() != ESM::Container::sRecordId)
+                return true;
+            if (ptr.getCellRef().getRefId().toString() != record.refId)
+                return true;
+            if (record.refNum != 0 && ptr.getCellRef().getRefNum().mIndex != record.refNum)
+                return true;
 
-            MWWorld::Ptr ptr(
-                const_cast<MWWorld::LiveCellRefBase*>(
-                    static_cast<const MWWorld::LiveCellRefBase*>(&liveRef)),
-                store);
+            target = ptr;
+            return false;
+        });
 
-            auto& cstore = ptr.getClass().getContainerStore(ptr);
-            const MWWorld::ESMStore& esmStore = world->getStore();
+        if (target.isEmpty())
+            continue;
 
-            if (action == ContainerAction::Set)
+        auto& cstore = target.getClass().getContainerStore(target);
+        const MWWorld::ESMStore& esmStore = world->getStore();
+
+        if (action == ContainerAction::Set)
+        {
+            cstore.clear();
+            for (const auto& ci : record.items)
             {
-                cstore.clear();
-                for (const auto& ci : record.items)
-                {
-                    MWWorld::ManualRef ref(esmStore, ESM::RefId::stringRefId(ci.refId), ci.count);
-                    if (!ref.getPtr().isEmpty())
-                        cstore.add(ref.getPtr(), ci.count);
-                }
+                MWWorld::ManualRef ref(esmStore, ESM::RefId::stringRefId(ci.refId), ci.count);
+                if (!ref.getPtr().isEmpty())
+                    cstore.add(ref.getPtr(), ci.count);
             }
-            else if (action == ContainerAction::Add)
-            {
-                for (const auto& ci : record.items)
-                {
-                    MWWorld::ManualRef ref(esmStore, ESM::RefId::stringRefId(ci.refId), ci.count);
-                    if (!ref.getPtr().isEmpty())
-                        cstore.add(ref.getPtr(), ci.count);
-                }
-            }
-            else if (action == ContainerAction::Remove)
-            {
-                for (const auto& ci : record.items)
-                    cstore.remove(ESM::RefId::stringRefId(ci.refId), ci.count);
-            }
-
-            Log(Debug::Info) << "[MP] WorldObjectSync: applied Container action="
-                             << static_cast<int>(action)
-                             << " refId=" << record.refId;
-            return true;
         }
+        else if (action == ContainerAction::Add)
+        {
+            for (const auto& ci : record.items)
+            {
+                MWWorld::ManualRef ref(esmStore, ESM::RefId::stringRefId(ci.refId), ci.count);
+                if (!ref.getPtr().isEmpty())
+                    cstore.add(ref.getPtr(), ci.count);
+            }
+        }
+        else if (action == ContainerAction::Remove)
+        {
+            for (const auto& ci : record.items)
+                cstore.remove(ESM::RefId::stringRefId(ci.refId), ci.count);
+        }
+
+        Log(Debug::Info) << "[MP] WorldObjectSync: applied Container action="
+                         << static_cast<int>(action)
+                         << " refId=" << record.refId;
+        return true;
     }
     return false;
 }

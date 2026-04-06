@@ -36,8 +36,11 @@ namespace mwmp
 
         // --- outbound: local player actions ---
         // Called when the local player drops/places an object in the world.
-        void onLocalObjectPlaced(const std::string& refId, int count,
+        void onLocalObjectPlaced(const MWWorld::Ptr& ptr, const std::string& refId, int count,
                                  const Position& pos, const std::string& cellId);
+
+        // Called when the local player picks up or otherwise deletes an MP-placed object.
+        void onLocalObjectDeleted(const MWWorld::Ptr& ptr);
 
         // Called when the local player opens a container.
         // Sends action=Set with its current contents so the server can take authority.
@@ -83,14 +86,17 @@ namespace mwmp
         // Pending operations that arrived before the target cell was loaded
         struct PendingPlace  { uint32_t mpNum; std::string refId; int count;
                                Position pos; std::string cellId; float timer; };
+        struct PendingLocalPlace { MWWorld::Ptr ptr; std::string refId; int count; Position pos; std::string cellId; };
         struct PendingDelete { uint32_t mpNum; float timer; };
         struct PendingMove   { uint32_t mpNum; Position pos; float timer; };
         struct PendingContainer { ContainerRecord record; ContainerAction action; float timer; };
 
         std::vector<PendingPlace>     mPendingPlace;
+        std::vector<PendingLocalPlace> mPendingLocalPlace;
         std::vector<PendingDelete>    mPendingDelete;
         std::vector<PendingMove>      mPendingMove;
         std::vector<PendingContainer> mPendingContainer;
+        bool mSuppressLocalDelete = false;
 
         static constexpr float RETRY_RATE = 0.25f;
     };

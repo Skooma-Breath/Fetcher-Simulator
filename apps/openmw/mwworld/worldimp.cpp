@@ -66,8 +66,10 @@
 #include "../mwbase/windowmanager.hpp"
 
 #ifdef BUILD_MULTIPLAYER
+#include <components/openmw-mp/Base/BaseStructs.hpp>
 #include "../mwmp/Main.hpp"
 #include "../mwmp/sync/ObjectSync.hpp"
+#include "../mwmp/sync/WorldObjectSync.hpp"
 #endif
 
 #include "../mwmechanics/actorutil.hpp"
@@ -1013,6 +1015,11 @@ namespace MWWorld
         {
             if (ptr == getPlayerPtr())
                 throw std::runtime_error("can not delete player object");
+
+#ifdef BUILD_MULTIPLAYER
+            if (mwmp::Main::isConnected())
+                mwmp::Main::get().getWorldObjectSync().onLocalObjectDeleted(ptr);
+#endif
 
             ptr.getCellRef().setCount(0);
 
@@ -1967,6 +1974,40 @@ namespace MWWorld
         // Set OnPCDrop Variable on item's script, if it has a script with that variable declared
         if (!script.empty())
             item.getRefData().getLocals().setVarByInt(script, "onpcdrop", 1);
+
+#ifdef BUILD_MULTIPLAYER
+        if (mwmp::Main::isConnected() && item.getCell())
+        {
+            const MWWorld::Cell* cell = item.getCell()->getCell();
+            if (cell)
+            {
+                std::string cellId;
+                if (cell->isExterior())
+                {
+                    char buf[32];
+                    std::snprintf(buf, sizeof(buf), "EXT:%d,%d", cell->getGridX(), cell->getGridY());
+                    cellId = buf;
+                }
+                else
+                    cellId = std::string(cell->getNameId());
+
+                mwmp::Position pos{};
+                const ESM::Position& itemPos = item.getRefData().getPosition();
+                for (int i = 0; i < 3; ++i)
+                {
+                    pos.pos[i] = itemPos.pos[i];
+                    pos.rot[i] = itemPos.rot[i];
+                }
+
+                mwmp::Main::get().getWorldObjectSync().onLocalObjectPlaced(
+                    item,
+                    item.getCellRef().getRefId().serializeText(),
+                    item.getCellRef().getCount(),
+                    pos,
+                    cellId);
+            }
+        }
+#endif
     }
 
     MWWorld::Ptr World::placeObject(const MWWorld::Ptr& object, float cursorX, float cursorY, int amount, bool copy)

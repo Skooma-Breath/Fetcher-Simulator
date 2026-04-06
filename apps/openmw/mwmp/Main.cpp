@@ -16,6 +16,10 @@
 #include <components/openmw-mp/Packets/System/PacketHandshake.hpp>
 #include <components/openmw-mp/Packets/Worldstate/PacketWorldTime.hpp>
 #include <components/openmw-mp/Packets/Object/PacketDoorState.hpp>
+#include <components/openmw-mp/Packets/Object/PacketObjectPlace.hpp>
+#include <components/openmw-mp/Packets/Object/PacketObjectDelete.hpp>
+#include <components/openmw-mp/Packets/Object/PacketObjectMove.hpp>
+#include <components/openmw-mp/Packets/Object/PacketContainer.hpp>
 #include <components/openmw-mp/Packets/Player/PacketPlayerAnimFlags.hpp>
 #include <components/openmw-mp/Packets/Player/PacketPlayerAnimPlay.hpp>
 #include <components/openmw-mp/Packets/Player/PacketPlayerAttack.hpp>
@@ -29,6 +33,7 @@
 #include "sync/ActorSync.hpp"
 #include "sync/CellSync.hpp"
 #include "sync/ObjectSync.hpp"
+#include "sync/WorldObjectSync.hpp"
 #include "sync/WorldStateSync.hpp"
 #include "gui/ChatWindow.hpp"
 
@@ -144,6 +149,7 @@ Main::Main()
     mActorSync     = std::make_unique<ActorSync>(*mClient);
     mCellSync      = std::make_unique<CellSync>(*mClient);
     mObjectSync    = std::make_unique<ObjectSync>(*mClient);
+    mWorldObjectSync = std::make_unique<WorldObjectSync>(*mClient);
     mWorldStateSync= std::make_unique<WorldStateSync>(*mClient);
     mChatWindow = std::make_unique<ChatWindow>(*mClient);
 }
@@ -177,6 +183,7 @@ void Main::frame(float dt)
     mPlayerList->updateAll(dt);
     mActorSync->update(dt);
     mObjectSync->update(dt);
+    mWorldObjectSync->update(dt);
     mWorldStateSync->update(dt);
 
     mChatWindow->update(dt);
@@ -557,7 +564,11 @@ void Main::registerProtocolHandlers()
             PacketPlayerEquipment pkt;
             pkt.setPlayer(&tmp);
             if (!pkt.decode(data, size)) return;
-            if (tmp.guid == mPlayerSync->localPlayer().guid) return;
+            if (tmp.guid == mPlayerSync->localPlayer().guid)
+            {
+                mPlayerSync->queueAuthoritativeEquipment(tmp);
+                return;
+            }
 
             auto* rp = mPlayerList->getPlayer(tmp.guid);
             if (rp) rp->onEquipmentUpdate(tmp);
@@ -634,6 +645,43 @@ void Main::registerProtocolHandlers()
                 mObjectSync->onServerDoorState(d.cellId, d.refId, d.refNum, d.isOpen);
         });
 
+    // --- Persisted / relayed world objects ---
+    proto.registerHandler(PacketType::ObjectPlace,
+        [this](const uint8_t* data, size_t size)
+        {
+            PacketObjectPlace pkt;
+            if (!pkt.decode(data, size)) return;
+            mWorldObjectSync->onServerObjectPlace(
+                pkt.object.mpNum, pkt.object.refId, pkt.object.count,
+                pkt.object.position, pkt.object.cellId);
+        });
+
+    proto.registerHandler(PacketType::ObjectDelete,
+        [this](const uint8_t* data, size_t size)
+        {
+            PacketObjectDelete pkt;
+            if (!pkt.decode(data, size)) return;
+            mWorldObjectSync->onServerObjectDelete(pkt.mpNum, pkt.cellId);
+        });
+
+    proto.registerHandler(PacketType::ObjectMove,
+        [this](const uint8_t* data, size_t size)
+        {
+            PacketObjectMove pkt;
+            if (!pkt.decode(data, size)) return;
+            mWorldObjectSync->onServerObjectMove(pkt.mpNum, pkt.cellId, pkt.position);
+        });
+
+    proto.registerHandler(PacketType::Container,
+        [this](const uint8_t* data, size_t size)
+        {
+            PacketContainer pkt;
+            if (!pkt.decode(data, size)) return;
+            mWorldObjectSync->onServerContainer(
+                pkt.container,
+                static_cast<ContainerAction>(pkt.mAction));
+        });
+
     // --- Remote player animation flags ---
     proto.registerHandler(PacketType::PlayerAnimFlags,
         [this](const uint8_t* data, size_t size)
@@ -698,7 +746,11 @@ void Main::registerProtocolHandlers()
             PacketPlayerInventory pkt;
             pkt.setPlayer(&tmp);
             if (!pkt.decode(data, size)) return;
-            if (tmp.guid == mPlayerSync->localPlayer().guid) return;
+            if (tmp.guid == mPlayerSync->localPlayer().guid)
+            {
+                mPlayerSync->queueAuthoritativeInventory(tmp);
+                return;
+            }
 
             auto* rp = mPlayerList->getPlayer(tmp.guid);
             if (rp) rp->onInventoryUpdate(tmp);

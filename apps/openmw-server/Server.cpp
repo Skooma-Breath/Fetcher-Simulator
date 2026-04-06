@@ -13,6 +13,7 @@
 
 #include "bindings/PlayerBindings.hpp"
 
+#include <algorithm>
 #include <chrono>
 #include <cmath>
 #include <cstring>
@@ -39,6 +40,11 @@
 #include <components/openmw-mp/Packets/Player/PacketPlayerDeath.hpp>
 #include <components/openmw-mp/Packets/Player/PacketPlayerResurrect.hpp>
 #include <components/openmw-mp/Packets/Player/PacketChatMessage.hpp>
+#include <components/openmw-mp/Packets/Object/PacketObjectPlace.hpp>
+#include <components/openmw-mp/Packets/Object/PacketObjectDelete.hpp>
+#include <components/openmw-mp/Packets/Object/PacketObjectMove.hpp>
+#include <components/openmw-mp/Packets/Object/PacketContainer.hpp>
+#include <components/openmw-mp/Packets/Object/PacketDoorState.hpp>
 #include <components/openmw-mp/Packets/Worldstate/PacketWorldTime.hpp>
 // PacketWorldWeather is defined in PacketWorldTime.hpp
 
@@ -69,6 +75,13 @@ namespace
             for (auto& v : row)
                 ss >> comma >> v;
         ss >> comma >> d.mIsPlayable >> comma >> d.mServices;
+    }
+
+    std::string makeContainerKey(const std::string& cellId,
+                                 const std::string& refId,
+                                 uint32_t refNum)
+    {
+        return cellId + "|" + refId + "|" + std::to_string(refNum);
     }
 }
 
@@ -172,6 +185,7 @@ void MPServer::run()
     try
     {
         mPlayerDb.emplace(mDbPath);
+        loadPersistentWorldState();
     }
     catch (const std::exception& e)
     {
@@ -450,6 +464,10 @@ void MPServer::onClientMessage(ConnectedClient& client,
         case PacketType::PlayerDeath:      handlePlayerDeath(client, data, size);        break;
         case PacketType::PlayerResurrect:  handlePlayerResurrect(client, data, size);    break;
         case PacketType::ChatMessage:      handleChatMessage(client, data, size);        break;
+        case PacketType::ObjectPlace:      handleObjectPlace(client, data, size);        break;
+        case PacketType::ObjectDelete:     handleObjectDelete(client, data, size);       break;
+        case PacketType::ObjectMove:       handleObjectMove(client, data, size);         break;
+        case PacketType::Container:        handleContainer(client, data, size);          break;
         case PacketType::DoorState:        handleDoorState(client, data, size);          break;
         case PacketType::WorldWeather:     handleWeather(client, data, size);            break;
         default:
@@ -469,6 +487,69 @@ std::vector<uint8_t> MPServer::buildWorldTimePacket() const
     pkt.time.gameHour  = mWorld.gameHour;
     pkt.timeScale      = mWorld.timeScale;
     return pkt.encode();
+}
+
+// ---------------------------------------------------------------------------
+void MPServer::loadPersistentWorldState()
+{
+    if (!mPlayerDb) return;
+
+    uint32_t maxMpNum = 0;
+    std::size_t objectCount = 0;
+
+    for (const auto& object : mPlayerDb->loadWorldObjects())
+    {
+        maxMpNum = std::max(maxMpNum, object.mpNum);
+        mWorld.placedObjects[object.cellId].push_back(object);
+        ++objectCount;
+    }
+
+    for (const auto& record : mPlayerDb->loadContainerRecords())
+        mWorld.containers[makeContainerKey(record.cellId, record.refId, record.refNum)] = record;
+
+    for (const auto& entry : mPlayerDb->loadDoorStates())
+        mWorld.doorStates[entry.cellId].push_back(entry);
+
+    mWorld.nextObjectMpNum = std::max<uint32_t>(1, maxMpNum + 1);
+
+    Log(Debug::Info) << "[Server] Loaded persistent world state: objects="
+                     << objectCount
+                     << " containers=" << mWorld.containers.size()
+                     << " doorCells=" << mWorld.doorStates.size();
+}
+
+// ---------------------------------------------------------------------------
+void MPServer::sendCellStateToClient(HSteamNetConnection conn, const std::string& cellId)
+{
+    auto objectsIt = mWorld.placedObjects.find(cellId);
+    if (objectsIt != mWorld.placedObjects.end())
+    {
+        for (const auto& object : objectsIt->second)
+        {
+            PacketObjectPlace pkt;
+            pkt.object = object;
+            sendTo(conn, pkt.encode());
+        }
+    }
+
+    for (const auto& [key, record] : mWorld.containers)
+    {
+        if (record.cellId != cellId || !record.hasAuthority) continue;
+        PacketContainer pkt;
+        pkt.container = record;
+        pkt.mAction = static_cast<uint8_t>(ContainerAction::Set);
+        sendTo(conn, pkt.encode());
+    }
+
+    auto doorsIt = mWorld.doorStates.find(cellId);
+    if (doorsIt != mWorld.doorStates.end() && !doorsIt->second.empty())
+    {
+        PacketDoorState pkt;
+        pkt.authorGuid = 0;
+        pkt.cellId = cellId;
+        pkt.doors = doorsIt->second;
+        sendTo(conn, pkt.encode());
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -704,6 +785,11 @@ void MPServer::handleCharacterSelect(ConnectedClient& c, const uint8_t* data, si
 
     PacketCharacterData cdPkt;
     cdPkt.spawnCell = mDefaultSpawnCell;
+    bool sendSavedInventory = false;
+    bool sendSavedEquipment = false;
+
+    for (int slot = 0; slot < BasePlayer::NUM_EQUIPMENT_SLOTS; ++slot)
+        c.player.equipment[slot].slot = slot;
 
     if (mPlayerDb && c.dbAccountId > 0)
     {
@@ -787,6 +873,27 @@ void MPServer::handleCharacterSelect(ConnectedClient& c, const uint8_t* data, si
                     cdPkt.spawnRotX = rec->rotX;
                     cdPkt.spawnRotY = rec->rotY;
                     cdPkt.spawnRotZ = rec->rotZ;
+
+                    if (rec->hasSavedInventory)
+                    {
+                        c.player.inventoryChanges.action = BasePlayer::InventoryChanges::Action::Set;
+                        c.player.inventoryChanges.items = mPlayerDb->loadCharacterInventory(rec->characterId);
+                        sendSavedInventory = true;
+                    }
+
+                    if (rec->hasSavedEquipment)
+                    {
+                        for (auto& slotEntry : c.player.equipment)
+                            slotEntry.item = {};
+
+                        for (const auto& entry : mPlayerDb->loadCharacterEquipment(rec->characterId))
+                        {
+                            if (entry.slot < 0 || entry.slot >= BasePlayer::NUM_EQUIPMENT_SLOTS)
+                                continue;
+                            c.player.equipment[entry.slot] = entry;
+                        }
+                        sendSavedEquipment = true;
+                    }
                 }
                 cdPkt.characterName  = sel.charName;
                 Log(Debug::Info) << "[Server] Character '" << sel.charName
@@ -830,6 +937,20 @@ void MPServer::handleCharacterSelect(ConnectedClient& c, const uint8_t* data, si
         c.player.name = displayName;
     }
 
+    if (sendSavedInventory)
+    {
+        PacketPlayerInventory inventory;
+        inventory.setPlayer(&c.player);
+        sendTo(c.conn, inventory.encode());
+    }
+
+    if (sendSavedEquipment)
+    {
+        PacketPlayerEquipment equipment;
+        equipment.setPlayer(&c.player);
+        sendTo(c.conn, equipment.encode());
+    }
+
     // Late-join catch-up: send state of all in-world players to the new joiner.
     for (auto& [existingConn, existingClient] : mClients)
     {
@@ -859,16 +980,8 @@ void MPServer::handleCharacterSelect(ConnectedClient& c, const uint8_t* data, si
     }
 
     sendTo(c.conn, buildWorldTimePacket());
-
-    for (const auto& [cellId, entries] : mWorld.doorStates)
-    {
-        if (entries.empty()) continue;
-        PacketDoorState pkt;
-        pkt.authorGuid = 0;
-        pkt.cellId     = cellId;
-        pkt.doors      = entries;
-        sendTo(c.conn, pkt.encode());
-    }
+    if (!cdPkt.spawnCell.empty())
+        sendCellStateToClient(c.conn, cdPkt.spawnCell);
 
     if (mWorld.hasWeather)
         sendTo(c.conn, buildWorldWeatherPacket());
@@ -970,14 +1083,32 @@ void MPServer::handlePlayerCellChange(ConnectedClient& c, const uint8_t* data, s
                  ScriptPlayer{ c.guid, this }, newCell, oldCell);
 
     broadcastToAll(std::vector<uint8_t>(data, data + size), c.conn);
+    if (!newCell.empty())
+        sendCellStateToClient(c.conn, newCell);
 }
 
 // ---------------------------------------------------------------------------
 void MPServer::handlePlayerEquipment(ConnectedClient& c, const uint8_t* data, size_t size)
 {
+    BasePlayer incoming = c.player;
     PacketPlayerEquipment pkt;
-    pkt.setPlayer(&c.player);
+    pkt.setPlayer(&incoming);
     if (!pkt.decode(data, size)) return;
+    c.player.equipment = incoming.equipment;
+
+    if (mPlayerDb && c.dbCharacterId != 0)
+    {
+        try
+        {
+            std::vector<EquipmentItem> equipment(c.player.equipment.begin(), c.player.equipment.end());
+            mPlayerDb->saveCharacterEquipment(c.dbCharacterId, equipment);
+        }
+        catch (const std::exception& e)
+        {
+            Log(Debug::Warning) << "[PlayerDB] saveCharacterEquipment error: " << e.what();
+        }
+    }
+
     broadcastToAll(std::vector<uint8_t>(data, data + size), c.conn);
 }
 
@@ -1020,9 +1151,69 @@ void MPServer::handlePlayerCast(ConnectedClient& c, const uint8_t* data, size_t 
 // ---------------------------------------------------------------------------
 void MPServer::handlePlayerInventory(ConnectedClient& c, const uint8_t* data, size_t size)
 {
+    BasePlayer incoming = c.player;
     PacketPlayerInventory pkt;
-    pkt.setPlayer(&c.player);
+    pkt.setPlayer(&incoming);
     if (!pkt.decode(data, size)) return;
+
+    using InventoryAction = BasePlayer::InventoryChanges::Action;
+    auto sameStack = [](const Item& left, const Item& right) {
+        return left.refId == right.refId
+            && left.charge == right.charge
+            && std::abs(left.enchantmentCharge - right.enchantmentCharge) < 0.001f
+            && left.soul == right.soul;
+    };
+
+    if (c.player.inventoryChanges.action != InventoryAction::Set)
+        c.player.inventoryChanges.action = InventoryAction::Set;
+
+    if (incoming.inventoryChanges.action == InventoryAction::Set)
+    {
+        c.player.inventoryChanges = incoming.inventoryChanges;
+    }
+    else if (incoming.inventoryChanges.action == InventoryAction::Add)
+    {
+        for (const auto& item : incoming.inventoryChanges.items)
+        {
+            auto it = std::find_if(
+                c.player.inventoryChanges.items.begin(),
+                c.player.inventoryChanges.items.end(),
+                [&](const Item& existing) { return sameStack(existing, item); });
+            if (it != c.player.inventoryChanges.items.end())
+                it->count += item.count;
+            else
+                c.player.inventoryChanges.items.push_back(item);
+        }
+    }
+    else if (incoming.inventoryChanges.action == InventoryAction::Remove)
+    {
+        for (const auto& item : incoming.inventoryChanges.items)
+        {
+            auto it = std::find_if(
+                c.player.inventoryChanges.items.begin(),
+                c.player.inventoryChanges.items.end(),
+                [&](const Item& existing) { return sameStack(existing, item); });
+            if (it == c.player.inventoryChanges.items.end())
+                continue;
+
+            it->count -= item.count;
+            if (it->count <= 0)
+                c.player.inventoryChanges.items.erase(it);
+        }
+    }
+
+    if (mPlayerDb && c.dbCharacterId != 0)
+    {
+        try
+        {
+            mPlayerDb->saveCharacterInventory(c.dbCharacterId, c.player.inventoryChanges.items);
+        }
+        catch (const std::exception& e)
+        {
+            Log(Debug::Warning) << "[PlayerDB] saveCharacterInventory error: " << e.what();
+        }
+    }
+
     broadcastToAll(std::vector<uint8_t>(data, data + size), c.conn);
 }
 
@@ -1111,6 +1302,148 @@ void MPServer::handleWeather(ConnectedClient& c, const uint8_t* data, size_t siz
 }
 
 // ---------------------------------------------------------------------------
+void MPServer::handleObjectPlace(ConnectedClient& c, const uint8_t* data, size_t size)
+{
+    PacketObjectPlace pkt;
+    if (!pkt.decode(data, size)) return;
+
+    pkt.object.mpNum = mWorld.nextObjectMpNum++;
+
+    auto& objects = mWorld.placedObjects[pkt.object.cellId];
+    objects.push_back(pkt.object);
+
+    if (mPlayerDb)
+        mPlayerDb->upsertWorldObject(pkt.object);
+
+    sendTo(c.conn, pkt.encode());
+    broadcastToCell(pkt.object.cellId, pkt.encode(), c.conn);
+}
+
+// ---------------------------------------------------------------------------
+void MPServer::handleObjectDelete(ConnectedClient& c, const uint8_t* data, size_t size)
+{
+    PacketObjectDelete pkt;
+    if (!pkt.decode(data, size)) return;
+
+    auto objectsIt = mWorld.placedObjects.find(pkt.cellId);
+    if (objectsIt != mWorld.placedObjects.end())
+    {
+        auto& objects = objectsIt->second;
+        objects.erase(std::remove_if(objects.begin(), objects.end(),
+            [&](const PlacedObject& object) { return object.mpNum == pkt.mpNum; }),
+            objects.end());
+        if (objects.empty())
+            mWorld.placedObjects.erase(objectsIt);
+    }
+
+    if (mPlayerDb)
+        mPlayerDb->deleteWorldObject(pkt.mpNum);
+
+    broadcastToCell(pkt.cellId, std::vector<uint8_t>(data, data + size), c.conn);
+}
+
+// ---------------------------------------------------------------------------
+void MPServer::handleObjectMove(ConnectedClient& c, const uint8_t* data, size_t size)
+{
+    PacketObjectMove pkt;
+    if (!pkt.decode(data, size)) return;
+
+    auto objectsIt = mWorld.placedObjects.find(pkt.cellId);
+    if (objectsIt != mWorld.placedObjects.end())
+    {
+        for (auto& object : objectsIt->second)
+        {
+            if (object.mpNum != pkt.mpNum) continue;
+            object.position = pkt.position;
+            if (mPlayerDb)
+                mPlayerDb->upsertWorldObject(object);
+            break;
+        }
+    }
+
+    broadcastToCell(pkt.cellId, std::vector<uint8_t>(data, data + size), c.conn, /*reliable=*/false);
+}
+
+// ---------------------------------------------------------------------------
+void MPServer::handleContainer(ConnectedClient& c, const uint8_t* data, size_t size)
+{
+    PacketContainer pkt;
+    if (!pkt.decode(data, size)) return;
+
+    const auto action = static_cast<ContainerAction>(pkt.mAction);
+    const std::string key = makeContainerKey(pkt.container.cellId, pkt.container.refId, pkt.container.refNum);
+    auto& authoritative = mWorld.containers[key];
+
+    if (authoritative.cellId.empty())
+    {
+        authoritative.cellId = pkt.container.cellId;
+        authoritative.refId = pkt.container.refId;
+        authoritative.refNum = pkt.container.refNum;
+        authoritative.mpNum = pkt.container.mpNum;
+    }
+
+    if (action == ContainerAction::Set)
+    {
+        if (authoritative.hasAuthority)
+        {
+            PacketContainer current;
+            current.container = authoritative;
+            current.mAction = static_cast<uint8_t>(ContainerAction::Set);
+            sendTo(c.conn, current.encode());
+            return;
+        }
+
+        authoritative = pkt.container;
+        authoritative.hasAuthority = true;
+        if (mPlayerDb)
+            mPlayerDb->upsertContainerRecord(authoritative);
+
+        PacketContainer accepted;
+        accepted.container = authoritative;
+        accepted.mAction = static_cast<uint8_t>(ContainerAction::Set);
+        sendTo(c.conn, accepted.encode());
+        broadcastToCell(authoritative.cellId, accepted.encode(), c.conn);
+        return;
+    }
+
+    authoritative.hasAuthority = true;
+    if (authoritative.cellId.empty())
+    {
+        authoritative.cellId = pkt.container.cellId;
+        authoritative.refId = pkt.container.refId;
+        authoritative.refNum = pkt.container.refNum;
+    }
+
+    for (const auto& item : pkt.container.items)
+    {
+        auto existing = std::find_if(authoritative.items.begin(), authoritative.items.end(),
+            [&](const ContainerItem& current) {
+                return current.refId == item.refId && current.charge == item.charge;
+            });
+
+        if (action == ContainerAction::Add)
+        {
+            if (existing == authoritative.items.end())
+                authoritative.items.push_back(item);
+            else
+                existing->count += item.count;
+        }
+        else if (action == ContainerAction::Remove && existing != authoritative.items.end())
+        {
+            existing->count -= item.count;
+        }
+    }
+
+    authoritative.items.erase(std::remove_if(authoritative.items.begin(), authoritative.items.end(),
+        [](const ContainerItem& item) { return item.count <= 0; }),
+        authoritative.items.end());
+
+    if (mPlayerDb)
+        mPlayerDb->upsertContainerRecord(authoritative);
+    broadcastToCell(authoritative.cellId, std::vector<uint8_t>(data, data + size), c.conn);
+}
+
+// ---------------------------------------------------------------------------
 void MPServer::handleDoorState(ConnectedClient& c, const uint8_t* data, size_t size)
 {
     PacketDoorState pkt;
@@ -1140,10 +1473,13 @@ void MPServer::handleDoorState(ConnectedClient& c, const uint8_t* data, size_t s
         }
         if (!found)
             cellDoors.push_back(entry);
+
+        if (mPlayerDb)
+            mPlayerDb->upsertDoorState(entry);
     }
 
     // Relay to all other clients so they apply the state immediately.
-    broadcastToAll(std::vector<uint8_t>(data, data + size), c.conn);
+    broadcastToCell(pkt.cellId, std::vector<uint8_t>(data, data + size), c.conn);
 
     // Notify scripts — fire once per door entry.
     for (const auto& entry : pkt.doors)
@@ -1269,6 +1605,22 @@ void MPServer::sendTo(HSteamNetConnection conn,
                          : k_nSteamNetworkingSend_UnreliableNoDelay;
     mInterface->SendMessageToConnection(
         conn, data.data(), static_cast<uint32_t>(data.size()), flags, nullptr);
+}
+
+void MPServer::broadcastToCell(const std::string& cellId,
+                               const std::vector<uint8_t>& data,
+                               HSteamNetConnection except,
+                               bool reliable)
+{
+    int flags = reliable ? k_nSteamNetworkingSend_Reliable
+                         : k_nSteamNetworkingSend_UnreliableNoDelay;
+    for (auto& [conn, client] : mClients)
+    {
+        if (conn == except || !client.charSelectComplete) continue;
+        if (client.player.cell.cellName != cellId) continue;
+        mInterface->SendMessageToConnection(
+            conn, data.data(), static_cast<uint32_t>(data.size()), flags, nullptr);
+    }
 }
 
 // ---------------------------------------------------------------------------

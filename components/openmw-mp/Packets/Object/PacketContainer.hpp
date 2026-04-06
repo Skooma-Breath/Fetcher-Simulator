@@ -48,9 +48,6 @@ namespace mwmp
             ws.writeString(container.refId);
             ws.write(container.refNum);
             ws.write(container.mpNum);
-            auto action = static_cast<uint8_t>(
-                container.hasAuthority ? ContainerAction::Set : ContainerAction::Set);
-            // caller sets action explicitly via a parallel field below
             ws.write(mAction);
             auto count = static_cast<uint16_t>(container.items.size());
             ws.write(count);

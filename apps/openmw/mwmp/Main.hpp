@@ -18,6 +18,7 @@ namespace mwmp
     class ActorSync;
     class CellSync;
     class ObjectSync;
+    class WorldObjectSync;
     class WorldStateSync;
     class ChatWindow;
 
@@ -57,6 +58,7 @@ namespace mwmp
         ActorSync&      getActorSync()      { return *mActorSync; }
         CellSync&       getCellSync()       { return *mCellSync; }
         ObjectSync&     getObjectSync()     { return *mObjectSync; }
+        WorldObjectSync& getWorldObjectSync() { return *mWorldObjectSync; }
         WorldStateSync& getWorldStateSync() { return *mWorldStateSync; }
         ChatWindow& getChatWindow() { return *mChatWindow; }
         bool hasChatWindow() const { return mChatWindow != nullptr; }
@@ -124,6 +126,7 @@ namespace mwmp
         std::unique_ptr<ActorSync>      mActorSync;
         std::unique_ptr<CellSync>       mCellSync;
         std::unique_ptr<ObjectSync>     mObjectSync;
+        std::unique_ptr<WorldObjectSync> mWorldObjectSync;
         std::unique_ptr<WorldStateSync> mWorldStateSync;
         std::unique_ptr<ChatWindow> mChatWindow;
 

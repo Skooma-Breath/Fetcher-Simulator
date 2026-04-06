@@ -39,8 +39,10 @@ namespace mwmp
         void notifyLocalHit(
             const MWWorld::Ptr& victim, float damage, bool healthDamage, bool knocked, const osg::Vec3f& hitPos);
 
-        // Server told us our position was wrong — snap to authoritative value
+        // Server told us our position was wrong - snap to authoritative value
         void applyServerPositionCorrection(const BasePlayer& authoritative);
+        void queueAuthoritativeEquipment(const BasePlayer& authoritative);
+        void queueAuthoritativeInventory(const BasePlayer& authoritative);
 
         // Accessors used by Networking dispatcher
         BasePlayer& localPlayer() { return mLocal; }
@@ -54,6 +56,7 @@ namespace mwmp
         void sendPosition(bool reliable);
         void sendCellChange();
         void sendEquipment();
+        void sendInventory();
         void sendAnimFlags(float dt);
         void sendAnimPlay();
         void sendAttack();
@@ -68,6 +71,7 @@ namespace mwmp
         bool positionChanged()    const;
         bool cellChanged()        const;
         bool equipmentChanged()   const;
+        bool inventoryChanged()   const;
         bool dynamicStatsChanged() const;
         bool animFlagsChanged()    const;
 
@@ -75,8 +79,11 @@ namespace mwmp
         void snapshotPosition();
         void snapshotCell();
         void snapshotEquipment();
+        void snapshotInventory();
         void snapshotDynamicStats();
         void captureEquipment(const MWWorld::Ptr& player);
+        void captureInventory(const MWWorld::Ptr& player);
+        void applyPendingAuthoritativeState(const MWWorld::Ptr& player);
         uint32_t resolveTargetMpNum(const MWWorld::Ptr& victim) const;
 
         NetworkClient& mClient;
@@ -101,8 +108,8 @@ namespace mwmp
         struct CellSnapshot { std::string cellName; bool isExterior; int gx; int gy; };
         CellSnapshot mLastCell{};
 
-        // equipment slots as refIds for quick comparison
-        std::array<std::string, BasePlayer::NUM_EQUIPMENT_SLOTS> mLastEquip{};
+        std::array<EquipmentItem, BasePlayer::NUM_EQUIPMENT_SLOTS> mLastEquip{};
+        std::vector<Item> mLastInventory;
 
         struct StatsSnapshot { float hCur, mCur, fCur; };
         StatsSnapshot mLastStats{};
@@ -153,7 +160,12 @@ namespace mwmp
 
         uint32_t mSeqCounter = 0;
 
-        // Smoothed Z velocity — raw per-frame Z deltas are very spiky on stairs
+        bool mPendingEquipmentRestore = false;
+        bool mPendingInventoryRestore = false;
+        std::array<EquipmentItem, BasePlayer::NUM_EQUIPMENT_SLOTS> mAuthoritativeEquipment{};
+        BasePlayer::InventoryChanges mAuthoritativeInventory;
+
+        // Smoothed Z velocity - raw per-frame Z deltas are very spiky on stairs
         // (discrete step geometry produces alternating large/zero Z displacement).
         // An EMA smooths this into a steady signal so the receiver's Z dead-
         // reckoning produces smooth stair movement matching the local client.
