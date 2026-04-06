@@ -1035,6 +1035,12 @@ void PlayerSync::notifyLocalHit(const MWWorld::Ptr& victim, float damage, bool h
     mClient.sendReliable(pkt.encode(mSeqCounter++));
 }
 
+void PlayerSync::notifyLocalCastRelease(
+    const std::string& spellId, const std::string& castAnimation, const MWWorld::Ptr& target)
+{
+    sendCastPacket(spellId, castAnimation, true, target);
+}
+
 void PlayerSync::sendDeath()
 {
     mLocal.isDead = true;
@@ -1146,20 +1152,9 @@ void PlayerSync::sendCast()
     std::string spellId;
     bn->getUserValue("mp_cast_spell_id", spellId);
 
-    mLocal.castSpell.spellId  = spellId;
-    mLocal.castSpell.success  = true; // optimistic; Phase 7E will validate
-    mLocal.castSpell.targetGuid   = 0;
-    mLocal.castSpell.targetRefId.clear();
-
     std::string castAnim;
     bn->getUserValue("mp_cast_anim", castAnim);
-    mLocal.castSpell.castAnimation = castAnim;
-
-    Log(Debug::Info) << "[MP] PlayerSync::sendCast spellId='" << spellId << "'";
-
-    PacketPlayerCast pkt;
-    pkt.setPlayer(&mLocal);
-    mClient.sendReliable(pkt.encode(mSeqCounter++));
+    sendCastPacket(spellId, castAnim, false, MWWorld::Ptr());
 }
 
 // ---------------------------------------------------------------------------
@@ -1426,6 +1421,32 @@ uint32_t PlayerSync::resolveTargetMpNum(const MWWorld::Ptr& victim) const
     }
 
     return 0;
+}
+
+void PlayerSync::sendCastPacket(
+    const std::string& spellId, const std::string& castAnimation, bool release, const MWWorld::Ptr& target)
+{
+    if (mLocal.guid == 0)
+        return;
+
+    mLocal.castSpell.spellId = spellId;
+    mLocal.castSpell.success = true; // optimistic; authoritative spell validation is still future work
+    mLocal.castSpell.release = release;
+    mLocal.castSpell.castAnimation = castAnimation;
+    mLocal.castSpell.targetGuid = target.isEmpty() ? 0 : resolveTargetMpNum(target);
+    if (!target.isEmpty() && mLocal.castSpell.targetGuid == 0)
+        mLocal.castSpell.targetRefId = target.getCellRef().getRefId().serializeText();
+    else
+        mLocal.castSpell.targetRefId.clear();
+
+    Log(Debug::Info) << "[MP] PlayerSync::sendCast phase=" << (release ? "release" : "start")
+                     << " spellId='" << spellId << "'"
+                     << " targetGuid=" << mLocal.castSpell.targetGuid
+                     << " targetRefId='" << mLocal.castSpell.targetRefId << "'";
+
+    PacketPlayerCast pkt;
+    pkt.setPlayer(&mLocal);
+    mClient.sendReliable(pkt.encode(mSeqCounter++));
 }
 
 } // namespace mwmp

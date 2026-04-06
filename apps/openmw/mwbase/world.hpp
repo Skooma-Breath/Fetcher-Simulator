@@ -482,7 +482,7 @@ namespace MWBase
         virtual void castSpell(const MWWorld::Ptr& actor, bool scriptedSpell = false) = 0;
 
         virtual void launchMagicBolt(const ESM::RefId& spellId, const MWWorld::Ptr& caster,
-            const osg::Vec3f& fallbackDirection, ESM::RefNum item)
+            const osg::Vec3f& fallbackDirection, ESM::RefNum item, bool visualOnly = false)
             = 0;
         virtual void launchProjectile(MWWorld::Ptr& actor, MWWorld::Ptr& projectile, const osg::Vec3f& worldPos,
             const osg::Quat& orient, MWWorld::Ptr& bow, float speed, float attackStrength)

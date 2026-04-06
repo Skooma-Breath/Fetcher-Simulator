@@ -22,6 +22,7 @@
 #include <components/esm3/loadgmst.hpp>
 #include <components/esm3/loadlevlist.hpp>
 #include <components/esm3/loadmgef.hpp>
+#include <components/esm3/loadspel.hpp>
 #include <components/esm3/loadregn.hpp>
 #include <components/esm3/loadstat.hpp>
 #include <components/esm4/loadcell.hpp>
@@ -69,6 +70,7 @@
 #include <components/openmw-mp/Base/BaseStructs.hpp>
 #include "../mwmp/Main.hpp"
 #include "../mwmp/sync/ObjectSync.hpp"
+#include "../mwmp/sync/PlayerSync.hpp"
 #include "../mwmp/sync/WorldObjectSync.hpp"
 #endif
 
@@ -117,6 +119,24 @@ namespace MWWorld
 {
     namespace
     {
+        std::string getSpellcastAnimationFromEffects(const ESM::EffectList& effects)
+        {
+            if (effects.mList.empty())
+                return {};
+
+            switch (effects.mList.front().mData.mRange)
+            {
+                case ESM::RT_Self:
+                    return "self";
+                case ESM::RT_Touch:
+                    return "touch";
+                case ESM::RT_Target:
+                    return "target";
+            }
+
+            return {};
+        }
+
         std::vector<std::pair<std::string_view, ESM::Variant>> generateDefaultGameSettings()
         {
             return {
@@ -3101,7 +3121,14 @@ namespace MWWorld
         if (!selectedSpell.empty())
         {
             const ESM::Spell* spell = mStore.get<ESM::Spell>().find(selectedSpell);
-            cast.cast(spell);
+            const bool castSucceeded = cast.cast(spell);
+#ifdef BUILD_MULTIPLAYER
+            if (castSucceeded && casterIsPlayer && mwmp::Main::isInitialised())
+            {
+                mwmp::Main::get().getPlayerSync().notifyLocalCastRelease(
+                    spell->mId.serializeText(), getSpellcastAnimationFromEffects(spell->mEffects), target);
+            }
+#endif
         }
         else
         {
@@ -3109,7 +3136,17 @@ namespace MWWorld
             if (inv.getSelectedEnchantItem() != inv.end())
             {
                 const auto& itemPtr = *inv.getSelectedEnchantItem();
-                cast.cast(itemPtr);
+                const bool castSucceeded = cast.cast(itemPtr);
+#ifdef BUILD_MULTIPLAYER
+                if (castSucceeded && casterIsPlayer && mwmp::Main::isInitialised())
+                {
+                    const ESM::RefId& enchantmentId = itemPtr.getClass().getEnchantment(itemPtr);
+                    const ESM::Enchantment* enchantment = mStore.get<ESM::Enchantment>().find(enchantmentId);
+                    mwmp::Main::get().getPlayerSync().notifyLocalCastRelease(
+                        itemPtr.getCellRef().getRefId().serializeText(),
+                        getSpellcastAnimationFromEffects(enchantment->mEffects), target);
+                }
+#endif
             }
         }
     }
@@ -3151,10 +3188,10 @@ namespace MWWorld
         mProjectileManager->launchProjectile(actor, projectile, worldPos, orient, bow, speed, attackStrength);
     }
 
-    void World::launchMagicBolt(
-        const ESM::RefId& spellId, const MWWorld::Ptr& caster, const osg::Vec3f& fallbackDirection, ESM::RefNum item)
+    void World::launchMagicBolt(const ESM::RefId& spellId, const MWWorld::Ptr& caster,
+        const osg::Vec3f& fallbackDirection, ESM::RefNum item, bool visualOnly)
     {
-        mProjectileManager->launchMagicBolt(spellId, caster, fallbackDirection, item);
+        mProjectileManager->launchMagicBolt(spellId, caster, fallbackDirection, item, visualOnly);
     }
 
     void World::updateProjectilesCasters()

@@ -31,6 +31,7 @@ namespace mwmp
             ws.write(mPlayer->castSpell.targetGuid);
             ws.writeString(mPlayer->castSpell.targetRefId);
             ws.write(mPlayer->castSpell.success);
+            ws.write(mPlayer->castSpell.release);
             ws.writeString(mPlayer->castSpell.castAnimation);
         }
 
@@ -41,6 +42,7 @@ namespace mwmp
             rs.read(mPlayer->castSpell.targetGuid);
             mPlayer->castSpell.targetRefId = rs.readString();
             rs.read(mPlayer->castSpell.success);
+            rs.read(mPlayer->castSpell.release);
             mPlayer->castSpell.castAnimation = rs.readString();
         }
     };

@@ -15,6 +15,8 @@
 #include <components/esm3/loadench.hpp>
 #include <components/esm3/loadmgef.hpp>
 #include <components/esm3/loadrace.hpp>
+#include <components/esm3/loadskil.hpp>
+#include <components/esm3/loadstat.hpp>
 #include <components/esm3/projectilestate.hpp>
 
 #include <components/esm/quaternion.hpp>
@@ -30,6 +32,7 @@
 #include <components/sceneutil/controller.hpp>
 #include <components/sceneutil/lightmanager.hpp>
 #include <components/sceneutil/nodecallback.hpp>
+#include <components/sceneutil/positionattitudetransform.hpp>
 #include <components/sceneutil/visitor.hpp>
 
 #include <components/settings/values.hpp>
@@ -62,6 +65,80 @@
 
 namespace
 {
+    const ESM::EffectList* resolveMagicBoltEffects(const MWWorld::ESMStore& esmStore, const ESM::RefId& id)
+    {
+        if (const ESM::Spell* spell = esmStore.get<ESM::Spell>().search(id))
+            return &spell->mEffects;
+
+        MWWorld::ManualRef ref(esmStore, id);
+        const MWWorld::Ptr& ptr = ref.getPtr();
+        return &esmStore.get<ESM::Enchantment>().find(ptr.getClass().getEnchantment(ptr))->mEffects;
+    }
+
+    bool isRemotePlayerProxy(const MWWorld::Ptr& ptr)
+    {
+        if (auto* baseNode = ptr.getRefData().getBaseNode())
+        {
+            int guid = 0;
+            return baseNode->getUserValue("mp_player_guid", guid) && guid > 0;
+        }
+
+        return false;
+    }
+
+    bool effectsAffectHealth(const ESM::EffectList& effects, ESM::RangeType range)
+    {
+        const MWWorld::ESMStore& store = *MWBase::Environment::get().getESMStore();
+
+        for (const ESM::IndexedENAMstruct& effectInfo : effects.mList)
+        {
+            if (effectInfo.mData.mRange != range)
+                continue;
+
+            const ESM::MagicEffect* magicEffect = store.get<ESM::MagicEffect>().find(effectInfo.mData.mEffectID);
+            if ((magicEffect->mData.mFlags & ESM::MagicEffect::Harmful)
+                || effectInfo.mData.mEffectID == ESM::MagicEffect::RestoreHealth)
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    void playMagicBoltImpactEffects(const ESM::EffectList& effects, const osg::Vec3f& hitPosition, const MWWorld::Ptr& ignore)
+    {
+        const auto world = MWBase::Environment::get().getWorld();
+        const MWWorld::ESMStore& store = world->getStore();
+
+        for (const ESM::IndexedENAMstruct& effectInfo : effects.mList)
+        {
+            const ESM::MagicEffect* effect = store.get<ESM::MagicEffect>().find(effectInfo.mData.mEffectID);
+
+            if (effectInfo.mData.mRange != ESM::RT_Target)
+                continue;
+            if (effectInfo.mData.mArea <= 0 && !ignore.isEmpty() && ignore.getClass().isActor())
+                continue;
+            if (effectInfo.mData.mArea <= 0)
+                continue;
+
+            const ESM::Static* areaStatic = !effect->mArea.empty()
+                ? store.get<ESM::Static>().find(effect->mArea)
+                : store.get<ESM::Static>().find(ESM::RefId::stringRefId("VFX_DefaultArea"));
+
+            world->spawnEffect(
+                Misc::ResourceHelpers::correctMeshPath(VFS::Path::Normalized(areaStatic->mModel)), effect->mParticle,
+                hitPosition, static_cast<float>(effectInfo.mData.mArea * 2));
+
+            MWBase::SoundManager* sndMgr = MWBase::Environment::get().getSoundManager();
+            if (!effect->mAreaSound.empty())
+                sndMgr->playSound3D(hitPosition, effect->mAreaSound, 1.0f, 1.0f);
+            else
+                sndMgr->playSound3D(
+                    hitPosition, store.get<ESM::Skill>().find(effect->mData.mSchool)->mSchool->mAreaSound, 1.0f, 1.0f);
+        }
+    }
+
     ESM::EffectList getMagicBoltData(std::vector<ESM::RefId>& projectileIDs, std::set<ESM::RefId>& sounds, float& speed,
         std::string& texture, std::string& sourceName, const ESM::RefId& id)
     {
@@ -288,8 +365,8 @@ namespace MWWorld
         state.mEffectAnimationTime->addTime(duration);
     }
 
-    void ProjectileManager::launchMagicBolt(
-        const ESM::RefId& spellId, const Ptr& caster, const osg::Vec3f& fallbackDirection, ESM::RefNum item)
+    void ProjectileManager::launchMagicBolt(const ESM::RefId& spellId, const Ptr& caster,
+        const osg::Vec3f& fallbackDirection, ESM::RefNum item, bool visualOnly)
     {
         osg::Vec3f pos = caster.getRefData().getPosition().asVec3();
         if (caster.getClass().isActor())
@@ -314,6 +391,7 @@ namespace MWWorld
         state.mSpellId = spellId;
         state.mCasterHandle = caster;
         state.mItem = item;
+        state.mVisualOnly = visualOnly;
         MWBase::Environment::get().getWorldModel()->registerPtr(caster);
         state.mCaster = caster.getCellRef().getRefNum();
 
@@ -594,22 +672,31 @@ namespace MWWorld
 
             assert(target != caster);
 
-            MWMechanics::CastSpell cast(caster, target);
-            cast.mHitPosition = !active ? Misc::Convert::makeOsgVec3f(projectile->getHitPosition()) : pos;
-            cast.mId = magicBoltState.mSpellId;
-            cast.mSourceName = magicBoltState.mSourceName;
-            cast.mItem = magicBoltState.mItem;
-            // Grab original effect list so the indices are correct
-            const ESM::EffectList* effects;
-            if (const ESM::Spell* spell = esmStore.get<ESM::Spell>().search(magicBoltState.mSpellId))
-                effects = &spell->mEffects;
-            else
+            const osg::Vec3f hitPosition = !active ? Misc::Convert::makeOsgVec3f(projectile->getHitPosition()) : pos;
+            const ESM::EffectList* effects = resolveMagicBoltEffects(esmStore, magicBoltState.mSpellId);
+            const MWWorld::Ptr localPlayer = MWBase::Environment::get().getWorld()->getPlayerPtr();
+            const bool applyToLocalPlayer = magicBoltState.mVisualOnly && !target.isEmpty() && target == localPlayer;
+            const bool suppressProxyGameplay = !magicBoltState.mVisualOnly && caster == MWMechanics::getPlayer()
+                && !target.isEmpty() && isRemotePlayerProxy(target);
+
+            if ((!magicBoltState.mVisualOnly || applyToLocalPlayer) && !suppressProxyGameplay)
             {
-                MWWorld::ManualRef ref(esmStore, magicBoltState.mSpellId);
-                const MWWorld::Ptr& ptr = ref.getPtr();
-                effects = &esmStore.get<ESM::Enchantment>().find(ptr.getClass().getEnchantment(ptr))->mEffects;
+                MWMechanics::CastSpell cast(caster, target);
+                cast.mHitPosition = hitPosition;
+                cast.mId = magicBoltState.mSpellId;
+                cast.mSourceName = magicBoltState.mSourceName;
+                cast.mItem = magicBoltState.mItem;
+                cast.inflict(target, *effects, ESM::RT_Target);
             }
-            cast.inflict(target, *effects, ESM::RT_Target);
+            else if (effects)
+            {
+                if (suppressProxyGameplay && !target.isEmpty() && target.getClass().isActor()
+                    && effectsAffectHealth(*effects, ESM::RT_Target))
+                {
+                    MWBase::Environment::get().getWindowManager()->setEnemy(target);
+                }
+                playMagicBoltImpactEffects(*effects, hitPosition, target);
+            }
 
             magicBoltState.mToDelete = true;
         }
@@ -685,6 +772,9 @@ namespace MWWorld
 
         for (const MagicBoltState& bolt : mMagicBolts)
         {
+            if (bolt.mVisualOnly)
+                continue;
+
             writer.startRecord(ESM::REC_MPRJ);
 
             ESM::MagicBoltState state;
@@ -807,7 +897,9 @@ namespace MWWorld
 
     size_t ProjectileManager::countSavedGameRecords() const
     {
-        return mMagicBolts.size() + mProjectiles.size();
+        return mProjectiles.size()
+            + static_cast<size_t>(std::count_if(mMagicBolts.begin(), mMagicBolts.end(),
+                [](const MagicBoltState& bolt) { return !bolt.mVisualOnly; }));
     }
 
     void ProjectileManager::saveLoaded(const ESM::ESMReader& reader)

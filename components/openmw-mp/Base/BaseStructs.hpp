@@ -196,6 +196,7 @@ namespace mwmp
         uint32_t    targetGuid  = 0;    // mp guid of target player (0 = world object)
         std::string targetRefId;        // refId of world object target
         bool        success     = false;
+        bool        release     = false; // false = cast start, true = actual spell release / launch
         // Range-type animation key prefix for the spellcast group.
         // Values: "self", "touch", "target" (from ESM::ENAMstruct::mRange).
         // Used by the receiver as: startKey = castAnimation + " start"

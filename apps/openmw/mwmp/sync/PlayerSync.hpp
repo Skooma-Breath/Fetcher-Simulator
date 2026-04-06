@@ -38,6 +38,8 @@ namespace mwmp
         void forceFullSync();
         void notifyLocalHit(const MWWorld::Ptr& victim, float damage, bool healthDamage, bool knocked,
             const osg::Vec3f& hitPos, int attackType = 0, float attackStrength = 0.f);
+        void notifyLocalCastRelease(
+            const std::string& spellId, const std::string& castAnimation, const MWWorld::Ptr& target);
 
         // Server told us our position was wrong - snap to authoritative value
         void applyServerPositionCorrection(const BasePlayer& authoritative);
@@ -85,6 +87,8 @@ namespace mwmp
         void captureInventory(const MWWorld::Ptr& player);
         void applyPendingAuthoritativeState(const MWWorld::Ptr& player);
         uint32_t resolveTargetMpNum(const MWWorld::Ptr& victim) const;
+        void sendCastPacket(
+            const std::string& spellId, const std::string& castAnimation, bool release, const MWWorld::Ptr& target);
 
         NetworkClient& mClient;
         Protocol&      mProtocol;

@@ -51,7 +51,7 @@ namespace MWWorld
 
         /// If caster is an actor, the actor's facing orientation is used. Otherwise fallbackDirection is used.
         void launchMagicBolt(const ESM::RefId& spellId, const MWWorld::Ptr& caster, const osg::Vec3f& fallbackDirection,
-            ESM::RefNum item);
+            ESM::RefNum item, bool visualOnly = false);
 
         void launchProjectile(const MWWorld::Ptr& actor, const MWWorld::ConstPtr& projectile, const osg::Vec3f& pos,
             const osg::Quat& orient, const MWWorld::Ptr& bow, float speed, float attackStrength);
@@ -109,6 +109,7 @@ namespace MWWorld
             float mSpeed;
             // Refnum of the casting item
             ESM::RefNum mItem;
+            bool mVisualOnly = false;
 
             std::vector<MWBase::Sound*> mSounds;
             std::set<ESM::RefId> mSoundIds;

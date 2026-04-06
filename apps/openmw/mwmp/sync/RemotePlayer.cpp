@@ -35,6 +35,7 @@
 #include "../../mwworld/inventorystore.hpp"
 #include "../../mwworld/manualref.hpp"
 #include "../../mwworld/ptr.hpp"
+#include <components/esm3/loadench.hpp>
 #include <components/esm3/loadcrea.hpp>
 #include <components/esm3/loadarmo.hpp>
 #include <components/esm3/loadsoun.hpp>
@@ -1481,71 +1482,106 @@ namespace mwmp
         const std::string range = cs.castAnimation.empty() ? "self" : cs.castAnimation;
 
         Log(Debug::Info) << "[MP] RemotePlayer " << mName << ": onCast"
+                         << " phase=" << (cs.release ? "release" : "start")
                          << " spellId='" << cs.spellId << "'"
                          << " range='" << range << "'"
                          << " success=" << cs.success
                          << " targetGuid=" << cs.targetGuid;
 
         MWBase::World* world = MWBase::Environment::get().getWorld();
-        if (!world) return;
+        if (!world)
+            return;
 
-        // ── 1. Play the skeleton animation (spellcast group, range-typed keys) ──────
-        BasePlayer animState;
-        animState.animPlay.groupName = "spellcast";
-        animState.animPlay.priority  = 7;
-        animState.animPlay.loops     = 0;
-        animState.animPlay.startKey  = range + " start";
-        animState.animPlay.stopKey   = range + " stop";
-        onAnimPlay(animState);
-
-        // ── 2. VFX_Hands glow on both hand bones (mirrors character.cpp CC path) ──
-        // character.cpp adds this from the *last* effect's particle texture.
-        // We replicate it using the same ESM lookup the CC uses.
-        if (!cs.spellId.empty())
+        MWWorld::Ptr targetPtr;
+        if (cs.targetGuid != 0)
         {
-            const MWWorld::ESMStore& store = world->getStore();
-            const ESM::Spell* spell = store.get<ESM::Spell>().search(
-                ESM::RefId::stringRefId(cs.spellId));
-
-            if (spell && !spell->mEffects.mList.empty())
+            if (cs.targetGuid == Main::get().getPlayerSync().localPlayer().guid)
+                targetPtr = world->getPlayerPtr();
+            else if (auto* rp = Main::get().getPlayerList().getPlayer(cs.targetGuid))
+                targetPtr = rp->getNpcPtr();
+        }
+        else if (!cs.targetRefId.empty())
+        {
+            try
             {
-                // VFX_Hands — coloured glow driven by the last effect's particle texture
-                const ESM::MagicEffect* lastEffect = store.get<ESM::MagicEffect>().find(
-                    spell->mEffects.mList.back().mData.mEffectID);
+                targetPtr = world->getPtr(ESM::RefId::stringRefId(cs.targetRefId), false);
+            }
+            catch (...) {}
+        }
 
-                const ESM::Static* handsStatic = store.get<ESM::Static>().find(
-                    ESM::RefId::stringRefId("VFX_Hands"));
+        const MWWorld::ESMStore& store = world->getStore();
+        const ESM::RefId spellRefId = ESM::RefId::stringRefId(cs.spellId);
+        const ESM::Spell* spell = store.get<ESM::Spell>().search(spellRefId);
+        const ESM::Enchantment* enchantment = spell ? nullptr : store.get<ESM::Enchantment>().search(spellRefId);
+        const ESM::EffectList* effects = spell ? &spell->mEffects : (enchantment ? &enchantment->mEffects : nullptr);
+
+        if (!cs.release)
+        {
+            if (!cs.castAnimation.empty())
+            {
+                BasePlayer animState;
+                animState.animPlay.groupName = "spellcast";
+                animState.animPlay.priority = 7;
+                animState.animPlay.loops = 0;
+                animState.animPlay.startKey = range + " start";
+                animState.animPlay.stopKey = range + " stop";
+                onAnimPlay(animState);
+            }
+
+            if (effects && !effects->mList.empty())
+            {
+                const ESM::MagicEffect* lastEffect = store.get<ESM::MagicEffect>().find(
+                    effects->mList.back().mData.mEffectID);
+                const ESM::Static* handsStatic = store.get<ESM::Static>().find(ESM::RefId::stringRefId("VFX_Hands"));
 
                 MWRender::Animation* anim = world->getAnimation(mNpcPtr);
                 if (anim && handsStatic && !handsStatic->mModel.empty())
                 {
-                    const VFS::Path::Normalized model
-                        = Misc::ResourceHelpers::correctMeshPath(
-                            VFS::Path::Normalized(handsStatic->mModel));
+                    const VFS::Path::Normalized model = Misc::ResourceHelpers::correctMeshPath(
+                        VFS::Path::Normalized(handsStatic->mModel));
 
                     anim->addEffect(model.value(), "", false, "Bip01 L Hand", lastEffect->mParticle);
                     anim->addEffect(model.value(), "", false, "Bip01 R Hand", lastEffect->mParticle);
                 }
 
-                // ── 3. Per-effect casting VFX + sound via playSpellCastingEffects ──
-                // This is the same call the CC makes; it plays the casting mesh on the
-                // caster (e.g. VFX_DefaultCast or the effect-specific casting mesh) and
-                // the per-school or per-effect casting sound.
-                MWMechanics::CastSpell cast(mNpcPtr, MWWorld::Ptr(),
-                    /*isProjectile=*/false, /*scriptedSpell=*/false);
-                cast.playSpellCastingEffects(spell);
+                MWMechanics::CastSpell cast(mNpcPtr, MWWorld::Ptr(), false, false);
+                if (spell)
+                    cast.playSpellCastingEffects(spell);
+                else if (enchantment)
+                    cast.playSpellCastingEffects(enchantment);
 
                 Log(Debug::Verbose) << "[MP] RemotePlayer " << mName
                                     << ": cast VFX+sound applied for spellId='" << cs.spellId << "'";
             }
-            else
+            else if (!cs.spellId.empty())
             {
                 Log(Debug::Warning) << "[MP] RemotePlayer " << mName
-                                    << ": spell '" << cs.spellId << "' not found in ESM store — no VFX";
+                                    << ": spell '" << cs.spellId << "' not found in ESM store - no cast VFX";
             }
+
+            return;
         }
 
-        // Phase 7E: resolve target and apply spell effects via MWMechanics.
+        if (range == "target")
+        {
+            osg::Vec3f fallbackDirection(0.f, 1.f, 0.f);
+            if (!targetPtr.isEmpty())
+                fallbackDirection = targetPtr.getRefData().getPosition().asVec3() - mNpcPtr.getRefData().getPosition().asVec3();
+
+            const bool authoritativeImpact = !targetPtr.isEmpty() && targetPtr == world->getPlayerPtr();
+            world->launchMagicBolt(spellRefId, mNpcPtr, fallbackDirection, ESM::RefNum(), !authoritativeImpact);
+            return;
+        }
+
+        if (!targetPtr.isEmpty() && targetPtr == world->getPlayerPtr() && effects)
+        {
+            MWMechanics::CastSpell cast(mNpcPtr, targetPtr, false, false);
+            cast.mId = spellRefId;
+            cast.mSourceName = spell ? spell->mName : cs.spellId;
+            cast.mHitPosition = targetPtr.getRefData().getPosition().asVec3();
+            cast.inflict(targetPtr, *effects,
+                range == "touch" ? ESM::RT_Touch : ESM::RT_Self);
+        }
     }
 
     // ---------------------------------------------------------------------------
