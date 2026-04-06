@@ -40,9 +40,11 @@
 #include "../../mwworld/inventorystore.hpp"
 #include "../../mwmechanics/creaturestats.hpp"
 #include "../../mwmechanics/npcstats.hpp"
+#include "../../mwmechanics/weapontype.hpp"
 #include "../../mwworld/player.hpp"
 #include "../../mwworld/livecellref.hpp"
 #include <components/esm3/loadnpc.hpp>
+#include <components/esm3/loadweap.hpp>
 #include "../../mwmechanics/movement.hpp"
 #include <components/openmw-mp/Packets/Player/PacketPlayerAnimFlags.hpp>
 #include <components/openmw-mp/Packets/Player/PacketPlayerAttack.hpp>
@@ -80,6 +82,33 @@ namespace
             return left.enchantmentCharge < right.enchantmentCharge;
         if (left.soul != right.soul) return left.soul < right.soul;
         return left.count < right.count;
+    }
+
+    int attackTypeFromWeapon(const MWWorld::Ptr& weapon)
+    {
+        if (weapon.isEmpty() || weapon.getType() != ESM::Weapon::sRecordId)
+            return 0;
+
+        const int weaponTypeId = weapon.get<ESM::Weapon>()->mBase->mData.mType;
+        const ESM::WeaponType::Class weaponClass = MWMechanics::getWeaponType(weaponTypeId)->mWeaponClass;
+        if (weaponClass == ESM::WeaponType::Thrown)
+            return 3;
+        if (weaponClass == ESM::WeaponType::Ranged)
+            return 2;
+        return 0;
+    }
+
+    MWWorld::Ptr getEquippedWeapon(const MWWorld::Ptr& actor)
+    {
+        if (actor.isEmpty() || !actor.getClass().hasInventoryStore(actor))
+            return {};
+
+        MWWorld::InventoryStore& inv = actor.getClass().getInventoryStore(actor);
+        const MWWorld::ContainerStoreIterator weapon = inv.getSlot(MWWorld::InventoryStore::Slot_CarriedRight);
+        if (weapon == inv.end() || weapon->getType() != ESM::Weapon::sRecordId)
+            return {};
+
+        return *weapon;
     }
 }
 
@@ -954,6 +983,7 @@ void PlayerSync::sendAttack()
     // (character.cpp send hook), so it's always fresh when we get here.
     if (pressed)
     {
+        mLocal.attack.type = attackTypeFromWeapon(getEquippedWeapon(player));
         std::string atkType;
         if (auto* bn = player.getRefData().getBaseNode();
             bn && bn->getUserValue("mp_attack_type", atkType))
@@ -968,8 +998,8 @@ void PlayerSync::sendAttack()
     mClient.sendReliable(pkt.encode(mSeqCounter++));
 }
 
-void PlayerSync::notifyLocalHit(
-    const MWWorld::Ptr& victim, float damage, bool healthDamage, bool knocked, const osg::Vec3f& hitPos)
+void PlayerSync::notifyLocalHit(const MWWorld::Ptr& victim, float damage, bool healthDamage, bool knocked,
+    const osg::Vec3f& hitPos, int attackType, float attackStrength)
 {
     if (mLocal.guid == 0 || victim.isEmpty())
         return;
@@ -991,6 +1021,8 @@ void PlayerSync::notifyLocalHit(
     mLocal.attack.miss = false;
     mLocal.attack.knocked = knocked;
     mLocal.attack.healthDamage = healthDamage;
+    mLocal.attack.type = attackType;
+    mLocal.attack.strength = attackStrength;
     mLocal.attack.damage = damage;
     mLocal.attack.target = victim.getCellRef().getRefId().serializeText();
     mLocal.attack.targetMpNum = resolveTargetMpNum(victim);

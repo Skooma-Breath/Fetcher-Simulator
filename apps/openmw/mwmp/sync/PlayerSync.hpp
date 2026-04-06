@@ -36,8 +36,8 @@ namespace mwmp
 
         // Force-flush all state immediately (e.g. just after connect)
         void forceFullSync();
-        void notifyLocalHit(
-            const MWWorld::Ptr& victim, float damage, bool healthDamage, bool knocked, const osg::Vec3f& hitPos);
+        void notifyLocalHit(const MWWorld::Ptr& victim, float damage, bool healthDamage, bool knocked,
+            const osg::Vec3f& hitPos, int attackType = 0, float attackStrength = 0.f);
 
         // Server told us our position was wrong - snap to authoritative value
         void applyServerPositionCorrection(const BasePlayer& authoritative);

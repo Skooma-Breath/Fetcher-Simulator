@@ -20,6 +20,11 @@
 #include "../mwbase/windowmanager.hpp"
 #include "../mwbase/world.hpp"
 
+#ifdef BUILD_MULTIPLAYER
+#include "../mwmp/Main.hpp"
+#include "../mwmp/sync/PlayerSync.hpp"
+#endif
+
 #include "../mwworld/class.hpp"
 #include "../mwworld/esmstore.hpp"
 #include "../mwworld/globals.hpp"
@@ -32,6 +37,7 @@
 #include "pathfinding.hpp"
 #include "spellcasting.hpp"
 #include "spellresistance.hpp"
+#include "weapontype.hpp"
 
 namespace
 {
@@ -304,6 +310,24 @@ namespace MWMechanics
 
             MWBase::Environment::get().getLuaManager()->onHit(attacker, victim, weapon, projectile, 0, attackStrength,
                 damage, true, hitPosition, true, MWMechanics::DamageSourceType::Ranged);
+
+#ifdef BUILD_MULTIPLAYER
+            if (attacker == getPlayer() && mwmp::Main::isInitialised())
+            {
+                const MWMechanics::CreatureStats& victimStats = victim.getClass().getCreatureStats(victim);
+                const bool knocked = victimStats.getKnockedDown()
+                    || victimStats.getFatigue().getCurrent() < 0.f
+                    || victimStats.getFatigue().getBase() == 0.f;
+                const int attackType
+                    = (!projectile.isEmpty() && projectile.getType() == ESM::Weapon::sRecordId
+                          && getWeaponType(projectile.get<ESM::Weapon>()->mBase->mData.mType)->mWeaponClass
+                              == ESM::WeaponType::Thrown)
+                    ? 3
+                    : 2;
+                mwmp::Main::get().getPlayerSync().notifyLocalHit(
+                    victim, damage, true, knocked, hitPosition, attackType, attackStrength);
+            }
+#endif
         }
     }
 
