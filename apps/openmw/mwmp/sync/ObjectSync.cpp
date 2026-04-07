@@ -7,6 +7,7 @@
 #include <components/esm3/loaddoor.hpp>
 
 #include "../../mwbase/environment.hpp"
+#include "../../mwbase/soundmanager.hpp"
 #include "../../mwbase/world.hpp"
 #include "../../mwworld/cellreflist.hpp"
 #include "../../mwworld/cellstore.hpp"
@@ -81,6 +82,14 @@ bool ObjectSync::tryApplyDoorState(const std::string& refId,
                 const_cast<MWWorld::LiveCellRefBase*>(
                     static_cast<const MWWorld::LiveCellRefBase*>(&liveRef)),
                 store);
+
+            if (MWBase::SoundManager* sound = MWBase::Environment::get().getSoundManager())
+            {
+                const ESM::RefId& soundId = isOpen ? liveRef.mBase->mOpenSound : liveRef.mBase->mCloseSound;
+                if (!soundId.empty())
+                    sound->playSound3D(doorPtr, soundId, 1.0f, 1.0f);
+            }
+
             world->activateDoor(doorPtr, targetState);
             Log(Debug::Info) << "[MP] ObjectSync: applied door state"
                              << " refId=" << refId << " open=" << isOpen;

@@ -81,6 +81,8 @@ namespace mwmp
         void applyInterpolationToWorld();
         void applyAnimationStateToActor();
         void applyDynamicStatsToActor();
+        void applyEquipmentState(const BasePlayer& state, bool playSounds);
+        void applyInventoryState(const BasePlayer& state, bool playSounds);
 
         // ---- interpolation ----
         void updateInterpolation(float dt);
@@ -97,6 +99,8 @@ namespace mwmp
         MWWorld::Ptr mNpcPtr;
         bool         mIsSpawned = false;
         bool         mMechanicsRegistered = false;
+        bool         mEquipmentSoundReady = false;
+        bool         mInventorySoundReady = false;
         std::unique_ptr<Nameplate> mNameplate;
 
         // --- trySpawn cooldown ---

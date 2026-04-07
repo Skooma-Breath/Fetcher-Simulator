@@ -1030,6 +1030,15 @@ namespace MWMechanics
         const bool isPlayer = (ptr == getPlayer());
 
         const auto& actorClass = ptr.getClass();
+        if (!isPlayer
+            && actorClass.getCreatureStats(ptr).getMovementFlag(MWMechanics::CreatureStats::Flag_NetworkPlayerNpc))
+        {
+            // Remote player NPCs are fully driven by multiplayer equipment sync.
+            // Letting local NPC light-management auto-equip/unequip torches fights
+            // the replicated left-hand state and causes visible candle flicker.
+            return;
+        }
+
         auto& inventoryStore = actorClass.getInventoryStore(ptr);
 
         auto heldIter = inventoryStore.getSlot(MWWorld::InventoryStore::Slot_CarriedLeft);

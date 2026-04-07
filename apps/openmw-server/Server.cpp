@@ -83,6 +83,33 @@ namespace
     {
         return cellId + "|" + refId + "|" + std::to_string(refNum);
     }
+
+    std::string makeCellKey(const mwmp::CellId& cell)
+    {
+        if (!cell.isExterior)
+            return cell.cellName;
+
+        char buf[32];
+        std::snprintf(buf, sizeof(buf), "EXT:%d,%d", cell.gridX, cell.gridY);
+        return buf;
+    }
+
+    bool cellMatches(const mwmp::CellId& playerCell, const std::string& cellId)
+    {
+        if (cellId.rfind("EXT:", 0) == 0)
+        {
+            int gridX = 0;
+            int gridY = 0;
+            if (std::sscanf(cellId.c_str(), "EXT:%d,%d", &gridX, &gridY) != 2)
+                return false;
+
+            return playerCell.isExterior
+                && playerCell.gridX == gridX
+                && playerCell.gridY == gridY;
+        }
+
+        return !playerCell.isExterior && playerCell.cellName == cellId;
+    }
 }
 
 namespace mwmp
@@ -1083,8 +1110,9 @@ void MPServer::handlePlayerCellChange(ConnectedClient& c, const uint8_t* data, s
                  ScriptPlayer{ c.guid, this }, newCell, oldCell);
 
     broadcastToAll(std::vector<uint8_t>(data, data + size), c.conn);
-    if (!newCell.empty())
-        sendCellStateToClient(c.conn, newCell);
+    const std::string cellKey = makeCellKey(c.player.cell);
+    if (!cellKey.empty())
+        sendCellStateToClient(c.conn, cellKey);
 }
 
 // ---------------------------------------------------------------------------
@@ -1617,7 +1645,7 @@ void MPServer::broadcastToCell(const std::string& cellId,
     for (auto& [conn, client] : mClients)
     {
         if (conn == except || !client.charSelectComplete) continue;
-        if (client.player.cell.cellName != cellId) continue;
+        if (!cellMatches(client.player.cell, cellId)) continue;
         mInterface->SendMessageToConnection(
             conn, data.data(), static_cast<uint32_t>(data.size()), flags, nullptr);
     }

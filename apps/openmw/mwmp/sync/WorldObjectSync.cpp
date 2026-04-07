@@ -46,6 +46,37 @@ namespace
         }
         return true;
     }
+
+    MWWorld::CellStore* findActiveCellById(MWWorld::World& world, const std::string& cellId)
+    {
+        auto& scene = world.getWorldScene();
+        for (MWWorld::CellStore* store : scene.getActiveCells())
+        {
+            if (store == nullptr)
+                continue;
+
+            const MWWorld::Cell* cell = store->getCell();
+            if (cell == nullptr)
+                continue;
+
+            if (cellId.rfind("EXT:", 0) == 0)
+            {
+                int gridX = 0;
+                int gridY = 0;
+                if (std::sscanf(cellId.c_str(), "EXT:%d,%d", &gridX, &gridY) != 2)
+                    return nullptr;
+
+                if (cell->isExterior() && cell->getGridX() == gridX && cell->getGridY() == gridY)
+                    return store;
+            }
+            else if (!cell->isExterior() && std::string(cell->getNameId()) == cellId)
+            {
+                return store;
+            }
+        }
+
+        return nullptr;
+    }
 }
 
 WorldObjectSync::WorldObjectSync(NetworkClient& client)
@@ -304,7 +335,7 @@ MWWorld::Ptr WorldObjectSync::getObjectByMpNum(uint32_t mpNum) const
 // ---------------------------------------------------------------------------
 bool WorldObjectSync::tryPlaceObject(uint32_t mpNum, const std::string& refId,
                                       int count, const Position& pos,
-                                      const std::string& /*cellId*/)
+                                      const std::string& cellId)
 {
     MWBase::World* world = MWBase::Environment::get().getWorld();
     if (!world) return false;
@@ -321,11 +352,11 @@ bool WorldObjectSync::tryPlaceObject(uint32_t mpNum, const std::string& refId,
         return false;
     }
 
-    // Place at the saved position. We use the player as a reference anchor
-    // to find a valid CellStore, then call placeObject.
-    MWWorld::Ptr player = world->getPlayerPtr();
-    if (player.isEmpty()) return false;
-    MWWorld::CellStore* cell = player.getCell();
+    // Place into the target active cell from the packet. This matters for
+    // exterior grids where the observer's current cell may differ from the
+    // object's actual destination cell.
+    auto* worldImpl = static_cast<MWWorld::World*>(world);
+    MWWorld::CellStore* cell = findActiveCellById(*worldImpl, cellId);
     if (!cell) return false;
 
     ESM::Position esmPos;

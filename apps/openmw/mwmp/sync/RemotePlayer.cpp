@@ -2,6 +2,8 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdio>
+#include <unordered_map>
 
 #include <components/debug/debuglog.hpp>
 #include <components/esm/refid.hpp>
@@ -35,6 +37,7 @@
 #include "../../mwworld/inventorystore.hpp"
 #include "../../mwworld/manualref.hpp"
 #include "../../mwworld/ptr.hpp"
+#include "../../mwworld/worldimp.hpp"
 #include <components/esm3/loadench.hpp>
 #include <components/esm3/loadcrea.hpp>
 #include <components/esm3/loadarmo.hpp>
@@ -101,6 +104,115 @@ namespace mwmp
                 return {};
 
             return *weapon;
+        }
+
+        MWWorld::CellStore* findActiveCell(MWWorld::World& world, const CellId& cellState)
+        {
+            auto& scene = world.getWorldScene();
+            for (MWWorld::CellStore* store : scene.getActiveCells())
+            {
+                if (store == nullptr)
+                    continue;
+
+                const MWWorld::Cell* cell = store->getCell();
+                if (cell == nullptr)
+                    continue;
+
+                if (cellState.isExterior)
+                {
+                    if (cell->isExterior() && cell->getGridX() == cellState.gridX && cell->getGridY() == cellState.gridY)
+                        return store;
+                }
+                else if (!cell->isExterior() && std::string(cell->getNameId()) == cellState.cellName)
+                {
+                    return store;
+                }
+            }
+
+            return nullptr;
+        }
+
+        bool sameCosmeticItem(const Item& left, const Item& right)
+        {
+            return left.refId == right.refId && left.count == right.count;
+        }
+
+        bool sameCosmeticInventory(const std::vector<Item>& left, const std::vector<Item>& right)
+        {
+            if (left.size() != right.size())
+                return false;
+
+            for (std::size_t i = 0; i < left.size(); ++i)
+            {
+                if (!sameCosmeticItem(left[i], right[i]))
+                    return false;
+            }
+
+            return true;
+        }
+
+        void playItemSoundForActor(const MWWorld::Ptr& actor, const Item& item, bool pickedUp)
+        {
+            if (actor.isEmpty() || item.refId.empty())
+                return;
+
+            MWBase::World* world = MWBase::Environment::get().getWorld();
+            MWBase::SoundManager* sound = MWBase::Environment::get().getSoundManager();
+            if (!world || !sound)
+                return;
+
+            MWWorld::ManualRef ref(world->getStore(), ESM::RefId::stringRefId(item.refId), std::max(1, item.count));
+            if (ref.getPtr().isEmpty())
+                return;
+
+            const ESM::RefId& soundId = pickedUp
+                ? ref.getPtr().getClass().getUpSoundId(ref.getPtr())
+                : ref.getPtr().getClass().getDownSoundId(ref.getPtr());
+            if (soundId.empty())
+                return;
+
+            sound->playSound3D(actor, soundId, 1.0f, 1.0f);
+        }
+
+        bool playInventoryDiffSound(const MWWorld::Ptr& actor,
+                                    const std::vector<Item>& oldItems,
+                                    const std::vector<Item>& newItems)
+        {
+            std::unordered_map<std::string, int> oldCounts;
+            std::unordered_map<std::string, int> newCounts;
+
+            for (const auto& item : oldItems)
+                oldCounts[item.refId] += item.count;
+            for (const auto& item : newItems)
+                newCounts[item.refId] += item.count;
+
+            for (const auto& [refId, newCount] : newCounts)
+            {
+                const int oldCount = oldCounts[refId];
+                if (newCount > oldCount)
+                {
+                    Item soundItem;
+                    soundItem.refId = refId;
+                    soundItem.count = newCount - oldCount;
+                    playItemSoundForActor(actor, soundItem, /*pickedUp=*/true);
+                    return true;
+                }
+            }
+
+            for (const auto& [refId, oldCount] : oldCounts)
+            {
+                const int newCount = newCounts[refId];
+                if (oldCount > newCount)
+                {
+                    Item soundItem;
+                    soundItem.refId = refId;
+                    soundItem.count = oldCount - newCount;
+                    playItemSoundForActor(actor, soundItem, /*pickedUp=*/false);
+                    return true;
+                }
+            }
+
+            return false;
         }
 
         void playReplicatedImpactSound(const MWWorld::Ptr& attacker, const MWWorld::Ptr& target, const Attack& atk)
@@ -649,22 +761,11 @@ namespace mwmp
             return;
         }
 
-        MWWorld::Ptr localPlayer = world->getPlayerPtr();
-        if (localPlayer.isEmpty())
-        {
-            Log(Debug::Warning) << "[MP] trySpawn(" << mName << "): local player empty";
-            return;
-        }
-        if (!localPlayer.isInCell())
-        {
-            Log(Debug::Warning) << "[MP] trySpawn(" << mName << "): local player not in cell";
-            return;
-        }
-
-        MWWorld::CellStore* cell = localPlayer.getCell();
+        auto* worldImpl = static_cast<MWWorld::World*>(world);
+        MWWorld::CellStore* cell = findActiveCell(*worldImpl, mState.cell);
         if (!cell)
         {
-            Log(Debug::Warning) << "[MP] trySpawn(" << mName << "): local CellStore null";
+            Log(Debug::Warning) << "[MP] trySpawn(" << mName << "): target CellStore not active";
             return;
         }
 
@@ -749,6 +850,7 @@ namespace mwmp
 
             // Clear all AI packages — remote players are driven by network, not AI
             mNpcPtr.getClass().getCreatureStats(mNpcPtr).getAiSequence().clear();
+            mNpcPtr.getClass().getInventoryStore(mNpcPtr).clear();
 
             // Mark this NPC as a network-driven remote player so that CharacterController
             // always takes the first-person movement code path (no TurnToMovementDirection
@@ -789,7 +891,10 @@ namespace mwmp
             Log(Debug::Info) << "[MP] RemotePlayer " << mName << ": spawned in world at (" << pos.pos[0] << ", "
                              << pos.pos[1] << ", " << pos.pos[2] << ")";
 
-            onEquipmentUpdate(mState);
+            applyInventoryState(mState, /*playSounds=*/false);
+            applyEquipmentState(mState, /*playSounds=*/false);
+            mInventorySoundReady = true;
+            mEquipmentSoundReady = true;
         }
         catch (const std::exception& e)
         {
@@ -1080,9 +1185,34 @@ namespace mwmp
     // ---------------------------------------------------------------------------
     void RemotePlayer::onEquipmentUpdate(const BasePlayer& state)
     {
+        applyEquipmentState(state, mEquipmentSoundReady && mIsSpawned && !mNpcPtr.isEmpty());
+        if (mIsSpawned && !mNpcPtr.isEmpty())
+            mEquipmentSoundReady = true;
+    }
+
+    void RemotePlayer::applyEquipmentState(const BasePlayer& state, bool playSounds)
+    {
+        const auto previousEquipment = mState.equipment;
         mState.equipment = state.equipment;
-        if (!mIsSpawned || mNpcPtr.isEmpty())
+        if (mNpcPtr.isEmpty())
             return;
+
+        if (playSounds)
+        {
+            for (int slot = 0; slot < BasePlayer::NUM_EQUIPMENT_SLOTS; ++slot)
+            {
+                const std::string& oldRefId = previousEquipment[slot].item.refId;
+                const std::string& newRefId = state.equipment[slot].item.refId;
+                if (oldRefId == newRefId)
+                    continue;
+
+                if (!newRefId.empty())
+                    playItemSoundForActor(mNpcPtr, state.equipment[slot].item, /*pickedUp=*/true);
+                else if (!oldRefId.empty())
+                    playItemSoundForActor(mNpcPtr, previousEquipment[slot].item, /*pickedUp=*/false);
+                break;
+            }
+        }
 
         MWWorld::InventoryStore& inv = mNpcPtr.getClass().getInventoryStore(mNpcPtr);
         for (int slot = 0; slot < BasePlayer::NUM_EQUIPMENT_SLOTS; ++slot)
@@ -1137,9 +1267,10 @@ namespace mwmp
     // ---------------------------------------------------------------------------
     void RemotePlayer::onCellChange(const BasePlayer& state)
     {
-        const bool cellNameChanged = (mState.cell.cellName != state.cell.cellName);
-        const bool exteriorChanged = (mState.cell.isExterior != state.cell.isExterior);
-        const bool gridChanged = (mState.cell.gridX != state.cell.gridX || mState.cell.gridY != state.cell.gridY);
+        const CellId oldCellState = mState.cell;
+        const bool cellNameChanged = (oldCellState.cellName != state.cell.cellName);
+        const bool exteriorChanged = (oldCellState.isExterior != state.cell.isExterior);
+        const bool gridChanged = (oldCellState.gridX != state.cell.gridX || oldCellState.gridY != state.cell.gridY);
 
         const bool actuallyChanged = cellNameChanged || exteriorChanged || gridChanged;
 
@@ -1172,10 +1303,10 @@ namespace mwmp
             // Only despawn for: interior<->exterior transitions, or grid jumps > 1
             // (which indicate a teleport rather than a normal border crossing).
             bool skipDespawn = false;
-            if (!exteriorChanged && mState.cell.isExterior && state.cell.isExterior)
+            if (!exteriorChanged && oldCellState.isExterior && state.cell.isExterior)
             {
-                const int dx = std::abs(state.cell.gridX - mState.cell.gridX);
-                const int dy = std::abs(state.cell.gridY - mState.cell.gridY);
+                const int dx = std::abs(state.cell.gridX - oldCellState.gridX);
+                const int dy = std::abs(state.cell.gridY - oldCellState.gridY);
                 if (dx <= Constants::CellGridRadius && dy <= Constants::CellGridRadius)
                     skipDespawn = true;
             }
@@ -1587,15 +1718,38 @@ namespace mwmp
     // ---------------------------------------------------------------------------
     void RemotePlayer::onInventoryUpdate(const BasePlayer& state)
     {
-        if (!mIsSpawned || mNpcPtr.isEmpty())
-            return;
+        applyInventoryState(state, mInventorySoundReady && mIsSpawned && !mNpcPtr.isEmpty());
+        if (mIsSpawned && !mNpcPtr.isEmpty())
+            mInventorySoundReady = true;
+    }
 
+    void RemotePlayer::applyInventoryState(const BasePlayer& state, bool playSounds)
+    {
+        const auto previousChanges = mState.inventoryChanges;
         mState.inventoryChanges = state.inventoryChanges;
         const auto& changes = state.inventoryChanges;
+        if (mNpcPtr.isEmpty())
+            return;
+
+        if (playSounds)
+        {
+            using Action = BasePlayer::InventoryChanges::Action;
+            if (changes.action == Action::Add && !changes.items.empty())
+                playItemSoundForActor(mNpcPtr, changes.items.front(), /*pickedUp=*/true);
+            else if (changes.action == Action::Remove && !changes.items.empty())
+                playItemSoundForActor(mNpcPtr, changes.items.front(), /*pickedUp=*/false);
+            else if (changes.action == Action::Set && !sameCosmeticInventory(previousChanges.items, changes.items))
+                playInventoryDiffSound(mNpcPtr, previousChanges.items, changes.items);
+        }
 
         MWWorld::ContainerStore& store = mNpcPtr.getClass().getContainerStore(mNpcPtr);
 
         using Action = BasePlayer::InventoryChanges::Action;
+
+        // Ignore pure charge/duration churn for cosmetics. This avoids remote
+        // lights rapidly clearing and re-equipping every second as they burn down.
+        if (changes.action == Action::Set && sameCosmeticInventory(previousChanges.items, changes.items))
+            return;
 
         switch (changes.action)
         {
@@ -1625,7 +1779,7 @@ namespace mwmp
         // A full inventory Set clears the underlying InventoryStore slots, so
         // re-apply the last authoritative equipment snapshot afterward to keep
         // the visible weapon/armor state in sync with the remote actor.
-        onEquipmentUpdate(mState);
+        applyEquipmentState(mState, /*playSounds=*/false);
     }
 
     // ---------------------------------------------------------------------------
