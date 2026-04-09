@@ -247,6 +247,13 @@ void Main::frame(float dt)
                 pkt.setPlayer(&mPlayerSync->localPlayer());
                 mClient->sendReliable(pkt.encode());
 
+                // New characters need the same post-appearance full sync that
+                // returning players send after their race/head/hair are live in
+                // the player NPC record. Without this, already connected peers
+                // never receive PlayerBaseInfo for the freshly created character
+                // and won't spawn them until a later relog.
+                mPlayerSync->forceFullSync();
+
             }
 
         }
