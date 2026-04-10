@@ -5,6 +5,8 @@
 #include <string>
 #include <vector>
 
+#include <components/openmw-mp/Packets/Object/PacketDoorState.hpp>
+
 namespace mwmp { class NetworkClient; }
 
 namespace mwmp
@@ -28,11 +30,19 @@ namespace mwmp
         void update(float dt);
 
     private:
+        struct OutgoingDoor
+        {
+            std::string cellId;
+            DoorEntry entry;
+        };
+
         // Try to find and activate a door across all active cells.
         // Returns true if the door was found and activated.
         bool tryApplyDoorState(const std::string& refId, uint32_t refNum, bool isOpen);
+        void flushOutgoingDoorStates();
 
         NetworkClient& mClient;
+        std::vector<OutgoingDoor> mOutgoingDoors;
 
         struct PendingDoor
         {

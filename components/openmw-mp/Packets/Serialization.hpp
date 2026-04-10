@@ -4,6 +4,7 @@
 #include <cstdint>
 #include <cstring>
 #include <string>
+#include <string_view>
 #include <vector>
 #include <stdexcept>
 #include <type_traits>
@@ -33,6 +34,14 @@ namespace mwmp
             auto len = static_cast<uint16_t>(s.size());
             write(len);
             const auto* p = reinterpret_cast<const uint8_t*>(s.data());
+            mBuffer.insert(mBuffer.end(), p, p + len);
+        }
+
+        void writeBytes(std::string_view bytes)
+        {
+            auto len = static_cast<uint32_t>(bytes.size());
+            write(len);
+            const auto* p = reinterpret_cast<const uint8_t*>(bytes.data());
             mBuffer.insert(mBuffer.end(), p, p + len);
         }
 
@@ -92,6 +101,16 @@ namespace mwmp
             std::string s(reinterpret_cast<const char*>(mData + mPos), len);
             mPos += len;
             return s;
+        }
+
+        std::string readBytes()
+        {
+            uint32_t len = 0;
+            read(len);
+            need(len);
+            std::string bytes(reinterpret_cast<const char*>(mData + mPos), len);
+            mPos += len;
+            return bytes;
         }
 
         template<typename T>

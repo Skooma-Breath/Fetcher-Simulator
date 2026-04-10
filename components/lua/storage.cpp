@@ -293,6 +293,19 @@ namespace LuaUtil
         fout.close();
     }
 
+    std::vector<LuaStorage::SerializedValue> LuaStorage::getSerializedValues() const
+    {
+        checkIfActive();
+
+        std::vector<SerializedValue> values;
+        for (const auto& [sectionName, section] : mData)
+        {
+            for (const auto& [key, value] : section->mValues)
+                values.push_back({ std::string(sectionName), key, value.serialized() });
+        }
+        return values;
+    }
+
     const std::shared_ptr<LuaStorage::Section>& LuaStorage::getSection(std::string_view sectionName)
     {
         checkIfActive();

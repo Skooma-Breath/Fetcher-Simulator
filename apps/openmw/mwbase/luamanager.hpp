@@ -5,6 +5,7 @@
 #include <map>
 #include <string>
 #include <variant>
+#include <vector>
 
 #include <SDL_events.h>
 
@@ -170,6 +171,19 @@ namespace MWBase
         virtual void handleConsoleCommand(
             const std::string& consoleMode, const std::string& command, const MWWorld::Ptr& selectedPtr)
             = 0;
+
+        virtual void receiveGlobalEvent(std::string eventName, std::string eventData) = 0;
+
+        struct GlobalStorageValue
+        {
+            std::string mSection;
+            std::string mKey;
+            std::string mValue;
+        };
+
+        virtual void receiveGlobalStorageSnapshot(std::vector<GlobalStorageValue> values) = 0;
+        virtual void receiveGlobalStorageDelta(GlobalStorageValue value) = 0;
+        virtual void receiveGlobalStorageSection(std::string section, std::vector<GlobalStorageValue> values) = 0;
 
         virtual std::string formatResourceUsageStats() const = 0;
     };

@@ -3,6 +3,10 @@
 #include <components/lua/asyncpackage.hpp>
 #include <components/lua/utilpackage.hpp>
 
+#ifdef BUILD_MULTIPLAYER
+#include "../mwmp/MpNetworkBridge.hpp"
+#endif
+
 #include "../mwbase/environment.hpp"
 #include "../mwbase/world.hpp"
 #include "../mwworld/datetimemanager.hpp"
@@ -39,6 +43,9 @@ namespace MWLua
             { "openmw.markup", initMarkupPackage(context) },
             { "openmw.util", LuaUtil::initUtilPackage(lua) },
             { "openmw.vfs", initVFSPackage(context) },
+#ifdef BUILD_MULTIPLAYER
+            { "mp", mwmp::initClientMpPackage(context) },
+#endif
         };
     }
 

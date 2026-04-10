@@ -1,0 +1,178 @@
+#ifndef OPENMW_SERVER_LUASERVERCONTEXT_HPP
+#define OPENMW_SERVER_LUASERVERCONTEXT_HPP
+
+#include <atomic>
+#include <array>
+#include <condition_variable>
+#include <filesystem>
+#include <mutex>
+#include <memory>
+#include <optional>
+#include <string>
+#include <thread>
+#include <unordered_map>
+#include <vector>
+
+#include <components/lua/configuration.hpp>
+#include <components/lua/luastate.hpp>
+#include <components/lua/scriptscontainer.hpp>
+#include <components/lua/storage.hpp>
+#include <components/openmw-mp/Base/BasePlayer.hpp>
+#include <components/openmw-mp/Packets/Lua/PacketLuaStorage.hpp>
+#include <components/vfs/manager.hpp>
+
+#include "MpEventQueue.hpp"
+#include "OutboundQueue.hpp"
+
+namespace mwmp
+{
+
+class MPServer;
+
+struct LuaPlayerSnapshot
+{
+    uint32_t guid = 0;
+    std::string name;
+    std::string cell;
+    std::string nickname;
+    float x = 0.f;
+    float y = 0.f;
+    float z = 0.f;
+    DynamicStats dynamicStats;
+    std::array<Skill, BasePlayer::NUM_SKILLS> skills;
+    std::vector<Item> inventory;
+};
+
+class LuaServerContext
+{
+public:
+    explicit LuaServerContext(MPServer* server);
+    ~LuaServerContext();
+
+    LuaServerContext(const LuaServerContext&) = delete;
+    LuaServerContext& operator=(const LuaServerContext&) = delete;
+
+    bool isLoaded() const { return mLoaded; }
+    bool isRunning() const;
+
+    void start();
+    void stop();
+    void drainOutbound();
+    void syncSnapshot(double uptime, float worldHour, const std::vector<LuaPlayerSnapshot>& players);
+
+    void onServerInit();
+    void onPlayerConnect(uint32_t guid, const std::string& name);
+    void onPlayerDisconnect(uint32_t guid, const std::string& name, const std::string& reason);
+    void onPlayerCellChange(
+        uint32_t guid, const std::string& name, const std::string& newCell, const std::string& oldCell);
+    void onPlayerSendMessage(uint32_t guid, const std::string& name, const std::string& message);
+    void onDoorState(const std::string& cellId, const std::string& refId, bool isOpen);
+    void onWorldWeather(const std::string& region, int current, int next, float transitionFactor);
+    void onLuaEvent(uint32_t pid, const std::string& eventName, const LuaUtil::BinaryData& data);
+    void requestGlobalStorageSnapshot(uint32_t guid);
+
+    std::string getString(
+        const std::string& tableName, const std::string& key, const std::string& defaultVal = "") const;
+    int getInt(const std::string& tableName, const std::string& key, int defaultVal = 0) const;
+    bool getBool(const std::string& tableName, const std::string& key, bool defaultVal = false) const;
+    std::optional<LuaPlayerSnapshot> getPlayer(uint32_t guid) const;
+    std::vector<LuaPlayerSnapshot> getPlayers() const;
+    int getPlayerCount() const;
+    double getUptime() const;
+    float getWorldHour() const;
+
+    void queueBroadcastServerMessage(const std::string& text);
+    void queueBroadcastServerMessageToCell(const std::string& cellId, const std::string& text);
+    void queueSendServerMessage(uint32_t guid, const std::string& text);
+    void queueRelayPlayerChat(uint32_t guid, const std::string& text);
+    void queueKickClient(uint32_t guid, const std::string& reason);
+    void queueSetPlayerNickname(uint32_t guid, const std::string& nickname);
+    void queueSetWorldHour(float hour);
+    void queueBroadcastLuaEvent(const std::string& eventName, const LuaUtil::BinaryData& data);
+    void queueBroadcastLuaEventToCell(
+        const std::string& cellId, const std::string& eventName, const LuaUtil::BinaryData& data);
+    void queueSendLuaEvent(uint32_t guid, const std::string& eventName, const LuaUtil::BinaryData& data);
+    void queueBroadcastLuaStorageDelta(
+        const std::string& section, const std::string& key, const LuaUtil::BinaryData& value);
+    void queueBroadcastLuaStorageSection(const std::string& section, std::vector<LuaStorageEntry> entries);
+
+    void setPlayerData(uint32_t guid, const std::string& key, const std::string& value);
+    std::optional<std::string> getPlayerData(uint32_t guid, const std::string& key) const;
+    void clearPlayerData(uint32_t guid);
+
+private:
+    struct SnapshotState
+    {
+        double uptime = 0.0;
+        float worldHour = 0.f;
+        std::vector<LuaPlayerSnapshot> players;
+    };
+
+    std::filesystem::path resolveScriptsDir() const;
+    void buildVfs();
+    void initConfiguration();
+    void initLua();
+    void loadScripts();
+    std::size_t dispatchQueuedEvents();
+    void processStorageSnapshotRequests();
+    std::vector<LuaStorageEntry> makeGlobalStorageSnapshot() const;
+    void luaTickLoop();
+
+    LuaUtil::BinaryData makeEmptyPayload() const;
+    LuaUtil::BinaryData makeTickPayload() const;
+    LuaUtil::BinaryData makePlayerPayload(uint32_t guid, const std::string& name) const;
+    LuaUtil::BinaryData makeDisconnectPayload(uint32_t guid, const std::string& name, const std::string& reason) const;
+    LuaUtil::BinaryData makeCellChangePayload(uint32_t guid, const std::string& name,
+        const std::string& newCell, const std::string& oldCell) const;
+    LuaUtil::BinaryData makeChatPayload(uint32_t guid, const std::string& name, const std::string& message) const;
+    LuaUtil::BinaryData makeDoorPayload(const std::string& cellId, const std::string& refId, bool isOpen) const;
+    LuaUtil::BinaryData makeWeatherPayload(
+        const std::string& region, int current, int next, float transitionFactor) const;
+
+    void enqueueEvent(uint32_t pid, std::string name, LuaUtil::BinaryData data);
+
+    class StorageSyncListener final : public LuaUtil::LuaStorage::Listener
+    {
+    public:
+        explicit StorageSyncListener(LuaServerContext* context)
+            : mContext(context)
+        {
+        }
+
+        void valueChanged(std::string_view section, std::string_view key, const sol::object& value) const override;
+        void sectionReplaced(std::string_view section, const sol::optional<sol::table>& values) const override;
+
+    private:
+        LuaServerContext* mContext = nullptr;
+    };
+
+    MPServer*                                  mServer = nullptr;
+    std::filesystem::path                      mScriptsDir;
+    VFS::Manager                               mVfs;
+    LuaUtil::ScriptsConfiguration              mConfiguration;
+    std::unique_ptr<LuaUtil::LuaState>         mLua;
+    std::unique_ptr<LuaUtil::ScriptsContainer> mGlobalScripts;
+    LuaUtil::LuaStorage                        mGlobalStorage;
+    StorageSyncListener                        mStorageSyncListener { this };
+    MpEventQueue                               mInboundQueue;
+    OutboundQueue                              mOutboundQueue;
+    mutable std::mutex                         mStorageSnapshotMutex;
+    std::vector<uint32_t>                      mStorageSnapshotRequests;
+    mutable std::mutex                         mSnapshotMutex;
+    SnapshotState                              mSnapshot;
+    mutable std::mutex                         mPlayerDataMutex;
+    std::unordered_map<uint32_t, std::unordered_map<std::string, std::string>> mPlayerScriptData;
+    std::thread                                mLuaThread;
+    mutable std::mutex                         mWakeMutex;
+    std::condition_variable                    mWakeCondition;
+    std::atomic<bool>                          mStopRequested { false };
+    std::atomic<bool>                          mThreadRunning { false };
+    float                                      mTickIntervalSeconds = 0.05f;
+    int                                        mDiagnosticsIntervalSeconds = 5;
+    double                                     mSlowTickLogThresholdMs = 8.0;
+    bool                                       mLoaded = false;
+};
+
+} // namespace mwmp
+
+#endif // OPENMW_SERVER_LUASERVERCONTEXT_HPP

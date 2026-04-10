@@ -1,21 +1,25 @@
 set(OPENMW_SERVER_SOURCES
     main.cpp
     Server.cpp
-    ScriptEngine.cpp
+    LuaServerContext.cpp
     MasterServerClient.cpp
     PlayerDatabase.cpp
     bindings/PlayerBindings.cpp
     bindings/ServerBindings.cpp
+    bindings/TypesStubBindings.cpp
     ${CMAKE_SOURCE_DIR}/extern/bcrypt/bcrypt_impl.cpp
 )
 
 set(OPENMW_SERVER_HEADERS
     Server.hpp
-    ScriptEngine.hpp
+    LuaServerContext.hpp
+    MpEventQueue.hpp
+    OutboundQueue.hpp
     MasterServerClient.hpp
     PlayerDatabase.hpp
     bindings/PlayerBindings.hpp
     bindings/ServerBindings.hpp
+    bindings/TypesStubBindings.hpp
 )
 
 source_group("apps\\openmw-server" FILES
@@ -40,6 +44,8 @@ target_include_directories(openmw-server PRIVATE
 
 target_compile_definitions(openmw-server PRIVATE
     VALVE_CRYPTO_ENABLE_25519   # exposes CCrypto::GenerateSigningKeyPair, CECSigning* etc.
+    OPENMW_SERVER_SOURCE_SCRIPTS_DIR="${CMAKE_SOURCE_DIR}/apps/openmw-server/scripts"
+    OPENMW_SERVER_SOURCE_LUA_LIBS_DIR="${CMAKE_SOURCE_DIR}/components/lua"
 )
 
 target_link_libraries(openmw-server
@@ -52,3 +58,9 @@ target_link_libraries(openmw-server
 target_compile_features(openmw-server PRIVATE cxx_std_20)
 
 install(TARGETS openmw-server RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
+
+add_custom_command(TARGET openmw-server POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_directory
+        "${CMAKE_SOURCE_DIR}/apps/openmw-server/scripts"
+        "$<TARGET_FILE_DIR:openmw-server>/server-scripts"
+)

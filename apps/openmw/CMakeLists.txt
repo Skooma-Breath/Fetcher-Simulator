@@ -129,7 +129,7 @@ if (BUILD_MULTIPLAYER)
         AccountDialog CharacterSelectDialog KeyLinkDialog
     )
     add_openmw_dir (mwmp
-        Main Identity
+        Main Identity MpNetworkBridge
     )
     add_compile_definitions(BUILD_MULTIPLAYER)
 endif()

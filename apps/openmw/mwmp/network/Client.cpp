@@ -111,7 +111,7 @@ namespace mwmp
     // -----------------------------------------------------------------------
     void NetworkClient::sendReliable(const std::vector<uint8_t>& data)
     {
-        Log(Debug::Info) << "[MP] sendReliable called state=" << (int)mState << " size=" << data.size();
+        Log(Debug::Verbose) << "[MP] sendReliable called state=" << (int)mState << " size=" << data.size();
         if (mState != ConnectionState::Connected || data.empty())
             return;
 

@@ -4,6 +4,8 @@
 #include <map>
 #include <sol/sol.hpp>
 #include <stdexcept>
+#include <string>
+#include <vector>
 
 #include "asyncpackage.hpp"
 #include "serialization.hpp"
@@ -25,9 +27,17 @@ namespace LuaUtil
 
         explicit LuaStorage() {}
 
+        struct SerializedValue
+        {
+            std::string mSection;
+            std::string mKey;
+            BinaryData mValue;
+        };
+
         void clearTemporaryAndRemoveCallbacks();
         void load(lua_State* state, const std::filesystem::path& path);
         void save(lua_State* state, const std::filesystem::path& path) const;
+        std::vector<SerializedValue> getSerializedValues() const;
 
         sol::object getSection(
             lua_State* state, std::string_view sectionName, bool readOnly, bool forMenuScripts = false);
@@ -73,6 +83,7 @@ namespace LuaUtil
             }
             sol::object getCopy(lua_State* state) const;
             sol::object getReadOnly(lua_State* state) const;
+            const BinaryData& serialized() const { return mSerializedValue; }
 
         private:
             std::string mSerializedValue;

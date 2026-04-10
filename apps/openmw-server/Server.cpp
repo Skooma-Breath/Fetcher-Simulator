@@ -40,6 +40,8 @@
 #include <components/openmw-mp/Packets/Player/PacketPlayerDeath.hpp>
 #include <components/openmw-mp/Packets/Player/PacketPlayerResurrect.hpp>
 #include <components/openmw-mp/Packets/Player/PacketChatMessage.hpp>
+#include <components/openmw-mp/Packets/Lua/PacketLuaEvent.hpp>
+#include <components/openmw-mp/Packets/Lua/PacketLuaStorage.hpp>
 #include <components/openmw-mp/Packets/Object/PacketObjectPlace.hpp>
 #include <components/openmw-mp/Packets/Object/PacketObjectDelete.hpp>
 #include <components/openmw-mp/Packets/Object/PacketObjectMove.hpp>
@@ -138,6 +140,19 @@ void MPServer::broadcastServerMessage(const std::string& text)
 }
 
 // ---------------------------------------------------------------------------
+void MPServer::broadcastServerMessageToCell(const std::string& cellId, const std::string& text)
+{
+    PacketChatMessage pkt;
+    BasePlayer serverPlayer;
+    serverPlayer.guid = 0;
+    serverPlayer.name = "Server";
+    pkt.setPlayer(&serverPlayer);
+    pkt.message = text;
+    pkt.channel = "";
+    broadcastToCell(cellId, pkt.encode());
+}
+
+// ---------------------------------------------------------------------------
 void MPServer::sendServerMessage(uint32_t guid, const std::string& text)
 {
     for (auto& [conn, client] : mClients)
@@ -155,6 +170,83 @@ void MPServer::sendServerMessage(uint32_t guid, const std::string& text)
             return;
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+void MPServer::relayPlayerChat(uint32_t guid, const std::string& text)
+{
+    ConnectedClient* c = findClientByGuid(guid);
+    if (!c || !c->handshakeComplete)
+        return;
+
+    PacketChatMessage pkt;
+    c->player.name = c->name;
+    pkt.setPlayer(&c->player);
+    pkt.message = text;
+    pkt.channel = "";
+    broadcastToAll(pkt.encode());
+}
+
+// ---------------------------------------------------------------------------
+void MPServer::broadcastLuaEvent(uint32_t pid, const std::string& eventName, const std::string& eventData)
+{
+    PacketLuaEvent pkt;
+    pkt.pid = pid;
+    pkt.eventName = eventName;
+    pkt.eventData = eventData;
+    broadcastToAll(pkt.encode());
+}
+
+// ---------------------------------------------------------------------------
+void MPServer::broadcastLuaEventToCell(
+    const std::string& cellId, uint32_t pid, const std::string& eventName, const std::string& eventData)
+{
+    PacketLuaEvent pkt;
+    pkt.pid = pid;
+    pkt.eventName = eventName;
+    pkt.eventData = eventData;
+    broadcastToCell(cellId, pkt.encode());
+}
+
+// ---------------------------------------------------------------------------
+void MPServer::sendLuaEvent(
+    uint32_t guid, uint32_t pid, const std::string& eventName, const std::string& eventData)
+{
+    ConnectedClient* client = findClientByGuid(guid);
+    if (!client || !client->handshakeComplete)
+        return;
+
+    PacketLuaEvent pkt;
+    pkt.pid = pid;
+    pkt.eventName = eventName;
+    pkt.eventData = eventData;
+    sendTo(client->conn, pkt.encode());
+}
+
+// ---------------------------------------------------------------------------
+void MPServer::broadcastLuaStorage(
+    LuaStorageAction action, const std::string& section, const std::vector<LuaStorageEntry>& entries)
+{
+    PacketLuaStorage pkt;
+    pkt.action = action;
+    pkt.section = section;
+    pkt.entries = entries;
+    broadcastToAll(pkt.encode());
+}
+
+// ---------------------------------------------------------------------------
+void MPServer::sendLuaStorage(uint32_t guid, LuaStorageAction action,
+    const std::string& section, const std::vector<LuaStorageEntry>& entries)
+{
+    ConnectedClient* client = findClientByGuid(guid);
+    if (!client || !client->charSelectComplete)
+        return;
+
+    PacketLuaStorage pkt;
+    pkt.action = action;
+    pkt.section = section;
+    pkt.entries = entries;
+    sendTo(client->conn, pkt.encode());
 }
 
 // ---------------------------------------------------------------------------
@@ -220,14 +312,11 @@ void MPServer::run()
         // Non-fatal — server runs without persistence if DB unavailable.
     }
 
-    // Load server scripts and fire OnServerInit before entering the loop.
-    mScript.loadScriptsFrom("server-scripts");
-
     // If config.lua set Config.SPAWN_CELL, let it override the C++ default.
     // mDefaultSpawnCell may already be set by main.cpp (CLI flag); only
     // override when it is still the compiled-in default ("toddtest").
     {
-        std::string raw = mScript.getString("Config", "SPAWN_CELL", "");
+        std::string raw = mLua.getString("Config", "SPAWN_CELL", "");
         if (!raw.empty())
         {
             // Normalise "x, y" coords: strip spaces that follow a comma so
@@ -247,11 +336,13 @@ void MPServer::run()
     }
 
     // Read Config.MAX_CHARS_PER_ACCOUNT from config.lua (0 = unlimited).
-    mMaxCharsPerAccount = mScript.getInt("Config", "MAX_CHARS_PER_ACCOUNT", mMaxCharsPerAccount);
+    mMaxCharsPerAccount = mLua.getInt("Config", "MAX_CHARS_PER_ACCOUNT", mMaxCharsPerAccount);
     Log(Debug::Info) << "[Server] Max chars per account: "
                      << (mMaxCharsPerAccount == 0 ? "unlimited" : std::to_string(mMaxCharsPerAccount));
 
-    mScript.call("OnServerInit");
+    syncLuaSnapshot();
+    mLua.start();
+    mLua.onServerInit();
 
     // Register with the master server (async — does not block the tick loop).
     if (!mMasterUrl.empty())
@@ -278,8 +369,10 @@ void MPServer::run()
         last = now;
 
         mInterface->RunCallbacks();
-        tick(dt);
         processIncomingMessages();
+        tick(dt);
+        mLua.drainOutbound();
+        syncLuaSnapshot();
 
         // 20 Hz server tick
         std::this_thread::sleep_for(std::chrono::milliseconds(50));
@@ -291,6 +384,8 @@ void MPServer::run()
 // ---------------------------------------------------------------------------
 void MPServer::shutdown()
 {
+    mLua.stop();
+
     // Tell the master server we are gone immediately (synchronous, best-effort).
     mMasterClient.unregister();
 
@@ -340,8 +435,6 @@ void MPServer::tick(float dt)
         if (!mClients.empty())
             broadcastToAll(buildWorldTimePacket());
     }
-
-    mScript.call("OnServerTick", dt);
 
     // Send a heartbeat to the master server at most once every 30 seconds.
     mMasterClient.tickHeartbeat(dt, getPlayerCount());
@@ -419,8 +512,7 @@ void MPServer::onClientDisconnected(HSteamNetConnection conn, const std::string&
 
     if (client.charSelectComplete)
     {
-        mScript.call("OnPlayerDisconnect",
-                     ScriptPlayer{ client.guid, this }, reason);
+        mLua.onPlayerDisconnect(client.guid, client.name, reason);
 
         // Notify all others
         PacketDisconnect pkt;
@@ -430,7 +522,9 @@ void MPServer::onClientDisconnected(HSteamNetConnection conn, const std::string&
     }
 
     mInterface->CloseConnection(conn, 0, nullptr, false);
+    mLua.clearPlayerData(client.guid);
     mClients.erase(it);
+    syncLuaSnapshot();
 }
 
 // ---------------------------------------------------------------------------
@@ -491,6 +585,7 @@ void MPServer::onClientMessage(ConnectedClient& client,
         case PacketType::PlayerDeath:      handlePlayerDeath(client, data, size);        break;
         case PacketType::PlayerResurrect:  handlePlayerResurrect(client, data, size);    break;
         case PacketType::ChatMessage:      handleChatMessage(client, data, size);        break;
+        case PacketType::PacketLuaEvent:   handleLuaEvent(client, data, size);           break;
         case PacketType::ObjectPlace:      handleObjectPlace(client, data, size);        break;
         case PacketType::ObjectDelete:     handleObjectDelete(client, data, size);       break;
         case PacketType::ObjectMove:       handleObjectMove(client, data, size);         break;
@@ -1013,7 +1108,9 @@ void MPServer::handleCharacterSelect(ConnectedClient& c, const uint8_t* data, si
     if (mWorld.hasWeather)
         sendTo(c.conn, buildWorldWeatherPacket());
 
-    mScript.call("OnPlayerConnect", ScriptPlayer{ c.guid, this });
+    syncLuaSnapshot();
+    mLua.requestGlobalStorageSnapshot(c.guid);
+    mLua.onPlayerConnect(c.guid, c.name);
 }
 
 // ---------------------------------------------------------------------------
@@ -1098,16 +1195,16 @@ void MPServer::handlePlayerPosition(ConnectedClient& c, const uint8_t* data, siz
 // ---------------------------------------------------------------------------
 void MPServer::handlePlayerCellChange(ConnectedClient& c, const uint8_t* data, size_t size)
 {
-    std::string oldCell = c.player.cell.cellName;
+    std::string oldCell = makeCellKey(c.player.cell);
     PacketPlayerCellChange pkt;
     pkt.setPlayer(&c.player);
     if (!pkt.decode(data, size)) return;
 
-    const std::string& newCell = c.player.cell.cellName;
+    const std::string newCell = makeCellKey(c.player.cell);
     Log(Debug::Info) << "[Server] " << c.name << " → cell: " << newCell;
 
-    mScript.call("OnPlayerCellChange",
-                 ScriptPlayer{ c.guid, this }, newCell, oldCell);
+    syncLuaSnapshot();
+    mLua.onPlayerCellChange(c.guid, c.name, newCell, oldCell);
 
     broadcastToAll(std::vector<uint8_t>(data, data + size), c.conn);
     const std::string cellKey = makeCellKey(c.player.cell);
@@ -1242,6 +1339,7 @@ void MPServer::handlePlayerInventory(ConnectedClient& c, const uint8_t* data, si
         }
     }
 
+    syncLuaSnapshot();
     broadcastToAll(std::vector<uint8_t>(data, data + size), c.conn);
 }
 
@@ -1251,6 +1349,7 @@ void MPServer::handlePlayerStatsDynamic(ConnectedClient& c, const uint8_t* data,
     PacketPlayerStatsDynamic pkt;
     pkt.setPlayer(&c.player);
     if (!pkt.decode(data, size)) return;
+    syncLuaSnapshot();
     broadcastToAll(std::vector<uint8_t>(data, data + size), c.conn);
 }
 
@@ -1322,11 +1421,8 @@ void MPServer::handleWeather(ConnectedClient& c, const uint8_t* data, size_t siz
     // Relay to all non-host clients.
     broadcastToAll(std::vector<uint8_t>(data, data + size), c.conn);
 
-    mScript.call("OnWorldWeather",
-                 mWorld.weatherRegion,
-                 mWorld.weatherCurrent,
-                 mWorld.weatherNext,
-                 mWorld.weatherTransition);
+    mLua.onWorldWeather(
+        mWorld.weatherRegion, mWorld.weatherCurrent, mWorld.weatherNext, mWorld.weatherTransition);
 }
 
 // ---------------------------------------------------------------------------
@@ -1511,7 +1607,7 @@ void MPServer::handleDoorState(ConnectedClient& c, const uint8_t* data, size_t s
 
     // Notify scripts — fire once per door entry.
     for (const auto& entry : pkt.doors)
-        mScript.call("OnDoorState", pkt.cellId, entry.refId, entry.isOpen);
+        mLua.onDoorState(pkt.cellId, entry.refId, entry.isOpen);
 }
 
 // ---------------------------------------------------------------------------
@@ -1534,15 +1630,24 @@ void MPServer::handleChatMessage(ConnectedClient& c, const uint8_t* data, size_t
                      << " yr=" << mWorld.year << "): "
                      << pkt.message;
 
-    // OnPlayerSendMessage can return false to suppress relay.
-    bool relay = true;
-    mScript.callWithReturn("OnPlayerSendMessage",
-                           relay,
-                           ScriptPlayer{ c.guid, this },
-                           pkt.message);
-
-    if (relay)
+    if (mLua.isLoaded())
+        mLua.onPlayerSendMessage(c.guid, c.name, pkt.message);
+    else
         broadcastToAll(pkt.encode());  // re-encoded with authoritative name
+}
+
+// ---------------------------------------------------------------------------
+void MPServer::handleLuaEvent(ConnectedClient& c, const uint8_t* data, size_t size)
+{
+    PacketLuaEvent pkt;
+    if (!pkt.decode(data, size)) return;
+
+    Log(Debug::Verbose) << "[Server] LuaEvent from " << c.name
+                        << " pid=" << c.guid
+                        << " name=" << pkt.eventName
+                        << " bytes=" << pkt.eventData.size();
+
+    mLua.onLuaEvent(c.guid, pkt.eventName, pkt.eventData);
 }
 
 // ---------------------------------------------------------------------------
@@ -1598,6 +1703,7 @@ void MPServer::setPlayerNickname(uint32_t guid, const std::string& nickname)
     PacketPlayerBaseInfo pkt;
     pkt.setPlayer(&c->player);
     broadcastToAll(pkt.encode());
+    syncLuaSnapshot();
 
     Log(Debug::Info) << "[Server] " << c->slotName
                      << " nickname set to '" << displayName << "'";
@@ -1610,6 +1716,37 @@ int MPServer::getPlayerCount() const
         if (client.charSelectComplete)
             ++count;
     return count;
+}
+
+// ---------------------------------------------------------------------------
+void MPServer::syncLuaSnapshot()
+{
+    if (!mLua.isLoaded())
+        return;
+
+    std::vector<LuaPlayerSnapshot> players;
+    players.reserve(mClients.size());
+
+    for (const auto& [conn, client] : mClients)
+    {
+        if (!client.charSelectComplete)
+            continue;
+
+        LuaPlayerSnapshot snapshot;
+        snapshot.guid = client.guid;
+        snapshot.name = client.name;
+        snapshot.cell = makeCellKey(client.player.cell);
+        snapshot.nickname = client.nickname;
+        snapshot.x = client.player.position.pos[0];
+        snapshot.y = client.player.position.pos[1];
+        snapshot.z = client.player.position.pos[2];
+        snapshot.dynamicStats = client.player.dynamicStats;
+        snapshot.skills = client.player.skills;
+        snapshot.inventory = client.player.inventoryChanges.items;
+        players.push_back(std::move(snapshot));
+    }
+
+    mLua.syncSnapshot(getUptime(), mWorld.gameHour, players);
 }
 
 // ---------------------------------------------------------------------------

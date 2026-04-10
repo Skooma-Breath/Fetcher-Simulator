@@ -3,7 +3,9 @@
 
 #include <filesystem>
 #include <map>
+#include <mutex>
 #include <set>
+#include <vector>
 
 #include <osg/Stats>
 
@@ -150,6 +152,11 @@ namespace MWLua
 
         void handleConsoleCommand(
             const std::string& consoleMode, const std::string& command, const MWWorld::Ptr& selectedPtr) override;
+        void receiveGlobalEvent(std::string eventName, std::string eventData) override;
+        void receiveGlobalStorageSnapshot(std::vector<MWBase::LuaManager::GlobalStorageValue> values) override;
+        void receiveGlobalStorageDelta(MWBase::LuaManager::GlobalStorageValue value) override;
+        void receiveGlobalStorageSection(
+            std::string section, std::vector<MWBase::LuaManager::GlobalStorageValue> values) override;
 
         // Used to call Lua callbacks from C++
         void queueCallback(LuaUtil::Callback callback, sol::main_object arg)
@@ -251,9 +258,12 @@ namespace MWLua
 
         LuaUtil::LuaStorage mGlobalStorage;
         LuaUtil::LuaStorage mPlayerStorage;
+        bool mGlobalStorageMirroredFromServer = false;
 
         LuaUtil::InputAction::Registry mInputActions;
         LuaUtil::InputTrigger::Registry mInputTriggers;
+        std::mutex mInboundGlobalEventsMutex;
+        std::vector<LuaEvents::Global> mInboundGlobalEvents;
 
         LuaUtil::ScriptTracker mScriptTracker;
     };

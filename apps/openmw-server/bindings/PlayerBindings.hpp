@@ -1,10 +1,15 @@
 #ifndef OPENMW_SERVER_PLAYERBINDINGS_HPP
 #define OPENMW_SERVER_PLAYERBINDINGS_HPP
 
+#include <cstdint>
 #include <string>
 
-namespace sol  { class state; }
-namespace mwmp { class MPServer; }
+#include <sol/forward.hpp>
+
+#include "../LuaServerContext.hpp"
+
+namespace LuaUtil { class LuaView; }
+namespace mwmp { class LuaServerContext; }
 
 namespace mwmp
 {
@@ -18,15 +23,15 @@ namespace mwmp
 // ---------------------------------------------------------------------------
 struct ScriptPlayer
 {
-    uint32_t  guid   = 0;
-    MPServer* server = nullptr;
+    LuaPlayerSnapshot data;
+    LuaServerContext* context = nullptr;
 };
 
 // ---------------------------------------------------------------------------
-// Registers the Player usertype and mp.getPlayer() / mp.getPlayers()
-// into the Lua state. Called once from ScriptEngine::registerCoreBindings().
+// Registers the Player usertype and attaches player-related helpers to the
+// provided mp package table.
 // ---------------------------------------------------------------------------
-void registerPlayerBindings(sol::state& lua, MPServer* server);
+void initPlayerBindings(LuaUtil::LuaView& view, sol::table& mp, LuaServerContext* context);
 
 } // namespace mwmp
 

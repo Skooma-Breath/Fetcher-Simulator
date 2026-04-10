@@ -1,6 +1,7 @@
 #include "ObjectSync.hpp"
 
 #include <algorithm>
+#include <utility>
 
 #include <components/debug/debuglog.hpp>
 #include <components/openmw-mp/Packets/Object/PacketDoorState.hpp>
@@ -37,15 +38,6 @@ void ObjectSync::onDoorStateChanged(const std::string& cellId,
                                     bool               isLocked,
                                     int                lockLevel)
 {
-    Log(Debug::Verbose) << "[MP] ObjectSync: sending door state"
-                        << " refId=" << refId
-                        << " cell=" << cellId
-                        << " open=" << isOpen;
-
-    PacketDoorState pkt;
-    pkt.authorGuid = Main::get().getPlayerSync().localPlayer().guid;
-    pkt.cellId     = cellId;
-
     DoorEntry entry;
     entry.cellId    = cellId;
     entry.refId     = refId;
@@ -53,9 +45,28 @@ void ObjectSync::onDoorStateChanged(const std::string& cellId,
     entry.isOpen    = isOpen;
     entry.isLocked  = isLocked;
     entry.lockLevel = lockLevel;
-    pkt.doors.push_back(entry);
 
-    mClient.sendReliable(pkt.encode());
+    mOutgoingDoors.push_back({ cellId, std::move(entry) });
+}
+
+// ---------------------------------------------------------------------------
+void ObjectSync::flushOutgoingDoorStates()
+{
+    if (mOutgoingDoors.empty())
+        return;
+
+    std::vector<OutgoingDoor> outgoing;
+    outgoing.swap(mOutgoingDoors);
+
+    for (const auto& door : outgoing)
+    {
+        PacketDoorState pkt;
+        pkt.authorGuid = Main::get().getPlayerSync().localPlayer().guid;
+        pkt.cellId = door.cellId;
+        pkt.doors.push_back(door.entry);
+
+        mClient.sendReliable(pkt.encode());
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -91,8 +102,6 @@ bool ObjectSync::tryApplyDoorState(const std::string& refId,
             }
 
             world->activateDoor(doorPtr, targetState);
-            Log(Debug::Info) << "[MP] ObjectSync: applied door state"
-                             << " refId=" << refId << " open=" << isOpen;
             return true;
         }
     }
@@ -105,9 +114,6 @@ void ObjectSync::onServerDoorState(const std::string& cellId,
                                    uint32_t           refNum,
                                    bool               isOpen)
 {
-    Log(Debug::Info) << "[MP] ObjectSync: received door state"
-                     << " refId=" << refId << " open=" << isOpen;
-
     if (!tryApplyDoorState(refId, refNum, isOpen))
     {
         // Cell not loaded yet (e.g. catch-up packet arrived during loading).
@@ -120,6 +126,8 @@ void ObjectSync::onServerDoorState(const std::string& cellId,
 // ---------------------------------------------------------------------------
 void ObjectSync::update(float dt)
 {
+    flushOutgoingDoorStates();
+
     if (mPendingDoors.empty()) return;
 
     static constexpr float RETRY_RATE = 0.2f; // retry every 200ms

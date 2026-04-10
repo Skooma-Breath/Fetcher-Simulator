@@ -28,6 +28,7 @@ end
 
 local handlersPerObject = {}
 local handlersPerType = {}
+local globalHandlers = {}
 
 handlersPerType[types.ESM4Book] = { ESM4BookActivation }
 handlersPerType[types.ESM4Door] = { ESM4DoorActivation }
@@ -39,7 +40,7 @@ local function onActivate(obj, actor)
     if obj.parentContainer then
         return
     end
-    local handled = auxUtil.callMultipleEventHandlers({ handlersPerObject[obj.id], handlersPerType[obj.type] }, obj, actor)
+    local handled = auxUtil.callMultipleEventHandlers({ globalHandlers, handlersPerObject[obj.id], handlersPerType[obj.type] }, obj, actor)
     if handled then
         return
     end
@@ -56,7 +57,16 @@ return {
     interface = {
         --- Interface version
         -- @field [parent=#Activation] #number version
-        version = 0,
+        version = 1,
+
+        --- Add a new activation handler for all activatable objects.
+        -- If `handler(object, actor)` returns false, object handlers, type
+        -- handlers, and the standard activation action will be skipped.
+        -- @function [parent=#Activation] addGlobalHandler
+        -- @param #function handler The handler.
+        addGlobalHandler = function(handler)
+            globalHandlers[#globalHandlers + 1] = handler
+        end,
 
         --- Add a new activation handler for a specific object.
         -- If `handler(object, actor)` returns false, other handlers for

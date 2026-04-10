@@ -1,17 +1,22 @@
 #include "ServerBindings.hpp"
 
+#include <components/lua/serialization.hpp>
+#include <components/lua/storage.hpp>
+#include <components/lua/luastate.hpp>
 #include <sol/sol.hpp>
 #include <components/debug/debuglog.hpp>
 
-#include "../Server.hpp"
+#include "PlayerBindings.hpp"
+#include "../LuaServerContext.hpp"
 
 namespace mwmp
 {
 
-void registerServerBindings(sol::state& lua, MPServer* server)
+sol::table initMpPackage(LuaUtil::LuaView& view, LuaServerContext* context, LuaUtil::LuaStorage* storage)
 {
-    // Create (or fetch) the global `mp` table.
-    sol::table mp = lua["mp"].get_or_create<sol::table>();
+    sol::table mp = view.newTable();
+
+    initPlayerBindings(view, mp, context);
 
     // ── Logging ──────────────────────────────────────────────────────────
     // mp.log(text) — routes through the OpenMW log system so script output
@@ -23,16 +28,46 @@ void registerServerBindings(sol::state& lua, MPServer* server)
 
     // ── Messaging ────────────────────────────────────────────────────────
     // mp.broadcast(text) — send a chat message from "Server" to all players.
-    mp.set_function("broadcast", [server](const std::string& text)
+    mp.set_function("broadcast", sol::overload(
+        [context](const std::string& text)
+        {
+            if (context) context->queueBroadcastServerMessage(text);
+        },
+        [context](const std::string& eventName, const sol::table& data)
+        {
+            if (context) context->queueBroadcastLuaEvent(eventName, LuaUtil::serialize(data));
+        }));
+
+    mp.set_function("broadcastToCell", sol::overload(
+        [context](const std::string& cellId, const std::string& text)
+        {
+            if (context) context->queueBroadcastServerMessageToCell(cellId, text);
+        },
+        [context](const std::string& cellId, const std::string& eventName, const sol::table& data)
+        {
+            if (context) context->queueBroadcastLuaEventToCell(cellId, eventName, LuaUtil::serialize(data));
+        }));
+
+    mp.set_function("send", [context](uint32_t guid, const std::string& eventName, const sol::table& data)
     {
-        if (server) server->broadcastServerMessage(text);
+        if (context) context->queueSendLuaEvent(guid, eventName, LuaUtil::serialize(data));
+    });
+
+    mp.set_function("kick", [context](uint32_t guid, const std::string& reason)
+    {
+        if (context) context->queueKickClient(guid, reason);
+    });
+
+    mp.set_function("isServer", []() -> bool
+    {
+        return true;
     });
 
     // ── Player queries ───────────────────────────────────────────────────
     // mp.getPlayerCount() — number of fully connected (post-handshake) players.
-    mp.set_function("getPlayerCount", [server]() -> int
+    mp.set_function("getPlayerCount", [context]() -> int
     {
-        return server ? server->getPlayerCount() : 0;
+        return context ? context->getPlayerCount() : 0;
     });
 
     // mp.getPlayers() — returns a table of all ScriptPlayer usertypes.
@@ -42,23 +77,45 @@ void registerServerBindings(sol::state& lua, MPServer* server)
 
     // ── Server info ──────────────────────────────────────────────────────
     // mp.getUptime() — seconds of real time since server start (float).
-    mp.set_function("getUptime", [server]() -> double
+    mp.set_function("getUptime", [context]() -> double
     {
-        return server ? server->getUptime() : 0.0;
+        return context ? context->getUptime() : 0.0;
     });
 
     // ── World time ───────────────────────────────────────────────────────
     // mp.getWorldTime() — current authoritative game hour (0..24, float).
-    mp.set_function("getWorldTime", [server]() -> float
+    mp.set_function("getWorldTime", [context]() -> float
     {
-        return server ? server->getWorldHour() : 0.f;
+        return context ? context->getWorldHour() : 0.f;
+    });
+
+    mp.set_function("getTime", [context]() -> float
+    {
+        return context ? context->getWorldHour() : 0.f;
     });
 
     // mp.setWorldTime(hour) — override the server clock.
-    mp.set_function("setWorldTime", [server](float hour)
+    mp.set_function("setWorldTime", [context](float hour)
     {
-        if (server) server->setWorldHour(hour);
+        if (context) context->queueSetWorldHour(hour);
     });
+
+    mp.set_function("setTime", [context](float hour)
+    {
+        if (context) context->queueSetWorldHour(hour);
+    });
+
+    // mp.relayChat(guid, text) — relay a player-authored chat message with
+    // the server-authoritative display name for the sender.
+    mp.set_function("relayChat", [context](uint32_t guid, const std::string& text)
+    {
+        if (context) context->queueRelayPlayerChat(guid, text);
+    });
+
+    if (storage)
+        mp["storage"] = LuaUtil::LuaStorage::initGlobalPackage(view, storage);
+
+    return mp;
 }
 
 } // namespace mwmp

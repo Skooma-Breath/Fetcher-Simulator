@@ -21,7 +21,7 @@
 #include <components/openmw-mp/NetworkMessages.hpp>
 #include <components/openmw-mp/Packets/Object/PacketDoorState.hpp>
 
-#include "ScriptEngine.hpp"
+#include "LuaServerContext.hpp"
 #include "MasterServerClient.hpp"
 #include "PlayerDatabase.hpp"
 #include <optional>
@@ -84,7 +84,17 @@ public:
 
     // Send a chat message from the "Server" sender to all or one player.
     void broadcastServerMessage(const std::string& text);
+    void broadcastServerMessageToCell(const std::string& cellId, const std::string& text);
     void sendServerMessage(uint32_t guid, const std::string& text);
+    void relayPlayerChat(uint32_t guid, const std::string& text);
+    void broadcastLuaEvent(uint32_t pid, const std::string& eventName, const std::string& eventData);
+    void broadcastLuaEventToCell(
+        const std::string& cellId, uint32_t pid, const std::string& eventName, const std::string& eventData);
+    void sendLuaEvent(uint32_t guid, uint32_t pid, const std::string& eventName, const std::string& eventData);
+    void broadcastLuaStorage(
+        LuaStorageAction action, const std::string& section, const std::vector<LuaStorageEntry>& entries);
+    void sendLuaStorage(uint32_t guid, LuaStorageAction action,
+        const std::string& section, const std::vector<LuaStorageEntry>& entries);
 
     // Disconnect a player by guid with a reason string.
     void kickClient(uint32_t guid, const std::string& reason);
@@ -165,6 +175,7 @@ private:
     void handlePlayerDeath      (ConnectedClient& c, const uint8_t* data, size_t size);
     void handlePlayerResurrect  (ConnectedClient& c, const uint8_t* data, size_t size);
     void handleChatMessage      (ConnectedClient& c, const uint8_t* data, size_t size);
+    void handleLuaEvent         (ConnectedClient& c, const uint8_t* data, size_t size);
     void handleObjectPlace      (ConnectedClient& c, const uint8_t* data, size_t size);
     void handleObjectDelete     (ConnectedClient& c, const uint8_t* data, size_t size);
     void handleObjectMove       (ConnectedClient& c, const uint8_t* data, size_t size);
@@ -190,6 +201,7 @@ private:
     // ── Packet builders ───────────────────────────────────────────────────
     std::vector<uint8_t> buildWorldTimePacket()    const;
     std::vector<uint8_t> buildWorldWeatherPacket() const;
+    void syncLuaSnapshot();
 
     // ── State ─────────────────────────────────────────────────────────────
     ISteamNetworkingSockets* mInterface    = nullptr;
@@ -235,7 +247,7 @@ private:
     } mWorld;
 
     // ── Scripting ─────────────────────────────────────────────────────────
-    ScriptEngine mScript { this };
+    LuaServerContext mLua { this };
 
     // ── Master server ──────────────────────────────────────────────────────
     // Populated from server.cfg / command-line before run() is called.

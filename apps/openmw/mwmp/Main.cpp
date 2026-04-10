@@ -1,5 +1,6 @@
 #include "Main.hpp"
 #include "Identity.hpp"
+#include "MpNetworkBridge.hpp"
 #include <cstring>
 
 #include <stdexcept>
@@ -25,6 +26,8 @@
 #include <components/openmw-mp/Packets/Player/PacketPlayerAttack.hpp>
 #include <components/openmw-mp/Packets/Player/PacketPlayerCast.hpp>
 #include <components/openmw-mp/Packets/Player/PacketPlayerInventory.hpp>
+#include <components/openmw-mp/Packets/Lua/PacketLuaEvent.hpp>
+#include <components/openmw-mp/Packets/Lua/PacketLuaStorage.hpp>
 
 #include "network/Client.hpp"
 #include "network/Protocol.hpp"
@@ -152,6 +155,7 @@ Main::Main()
     mWorldObjectSync = std::make_unique<WorldObjectSync>(*mClient);
     mWorldStateSync= std::make_unique<WorldStateSync>(*mClient);
     mChatWindow = std::make_unique<ChatWindow>(*mClient);
+    mNetworkBridge = std::make_unique<MpNetworkBridge>();
 }
 
 Main::~Main()
@@ -166,6 +170,8 @@ void Main::frame(float dt)
     if (!mClient) return;
 
     mClient->update();
+    if (mNetworkBridge && mClient->isConnected())
+        mNetworkBridge->drainOutgoing(*mClient);
 
     // Handle unexpected server disconnect — return player to main menu.
     if (mUnexpectedDisconnect)
@@ -787,6 +793,26 @@ void Main::registerProtocolHandlers()
 
             auto* rp = mPlayerList->getPlayer(tmp.guid);
             if (rp) rp->onResurrect(tmp);
+        });
+
+    proto.registerHandler(PacketType::PacketLuaEvent,
+        [this](const uint8_t* data, size_t size)
+        {
+            PacketLuaEvent pkt;
+            if (!pkt.decode(data, size)) return;
+
+            if (mNetworkBridge)
+                mNetworkBridge->queueInbound({ pkt.pid, std::move(pkt.eventName), std::move(pkt.eventData) });
+        });
+
+    proto.registerHandler(PacketType::PacketLuaStorage,
+        [this](const uint8_t* data, size_t size)
+        {
+            PacketLuaStorage pkt;
+            if (!pkt.decode(data, size)) return;
+
+            if (mNetworkBridge)
+                mNetworkBridge->queueStorage(pkt.action, std::move(pkt.section), std::move(pkt.entries));
         });
 
     Log(Debug::Info) << "[MP] Protocol handlers registered";

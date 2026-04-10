@@ -1,14 +1,19 @@
 #ifndef OPENMW_SERVER_SERVERBINDINGS_HPP
 #define OPENMW_SERVER_SERVERBINDINGS_HPP
 
-namespace sol  { class state; }
-namespace mwmp { class MPServer; }
+#include <sol/forward.hpp>
+
+namespace LuaUtil
+{
+    class LuaStorage;
+    class LuaView;
+}
+namespace mwmp { class LuaServerContext; }
 
 namespace mwmp
 {
-    // Registers the mp.* server-level functions into the Lua state.
-    // Called once from ScriptEngine::registerCoreBindings().
-    void registerServerBindings(sol::state& lua, MPServer* server);
+    // Builds the mp package for server-side Lua sandboxes.
+    sol::table initMpPackage(LuaUtil::LuaView& view, LuaServerContext* context, LuaUtil::LuaStorage* storage);
 }
 
 #endif // OPENMW_SERVER_SERVERBINDINGS_HPP

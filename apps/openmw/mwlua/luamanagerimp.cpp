@@ -25,6 +25,11 @@
 #include "../mwbase/windowmanager.hpp"
 #include "../mwbase/world.hpp"
 
+#ifdef BUILD_MULTIPLAYER
+#include "../mwmp/Main.hpp"
+#include "../mwmp/MpNetworkBridge.hpp"
+#endif
+
 #include "../mwrender/bonegroup.hpp"
 #include "../mwrender/postprocessor.hpp"
 
@@ -170,6 +175,7 @@ namespace MWLua
 
     void LuaManager::loadPermanentStorage(const std::filesystem::path& userConfigPath)
     {
+        mGlobalStorageMirroredFromServer = false;
         mPlayerStorage.setActive(true);
         mGlobalStorage.setActive(true);
         const auto globalPath = userConfigPath / "global_storage.bin";
@@ -186,8 +192,10 @@ namespace MWLua
     void LuaManager::savePermanentStorage(const std::filesystem::path& userConfigPath)
     {
         mLua.protectedCall([&](LuaUtil::LuaView& view) {
-            if (mGlobalScriptsStarted)
+            if (mGlobalScriptsStarted && !mGlobalStorageMirroredFromServer)
                 mGlobalStorage.save(view.sol(), userConfigPath / "global_storage.bin");
+            else if (mGlobalScriptsStarted)
+                Log(Debug::Info) << "Skipping Lua global storage save because it is mirrored from the multiplayer server";
             mPlayerStorage.save(view.sol(), userConfigPath / "player_storage.bin");
         });
     }
@@ -232,6 +240,19 @@ namespace MWLua
         mGlobalScripts.statsNextFrame();
         for (LocalScripts* scripts : mActiveLocalScripts)
             scripts->statsNextFrame();
+
+#ifdef BUILD_MULTIPLAYER
+        if (mwmp::Main::isInitialised())
+            mwmp::Main::get().getNetworkBridge().processIncoming(*this);
+#endif
+
+        std::vector<LuaEvents::Global> inboundEvents;
+        {
+            std::lock_guard<std::mutex> lock(mInboundGlobalEventsMutex);
+            inboundEvents.swap(mInboundGlobalEvents);
+        }
+        for (auto& event : inboundEvents)
+            mLuaEvents.addGlobalEvent(std::move(event));
 
         mLuaEvents.finalizeEventBatch();
 
@@ -860,6 +881,76 @@ namespace MWLua
         if (!processed)
             MWBase::Environment::get().getWindowManager()->printToConsole(
                 "No Lua handlers for console\n", MWBase::WindowManager::sConsoleColor_Error);
+    }
+
+    void LuaManager::receiveGlobalEvent(std::string eventName, std::string eventData)
+    {
+        std::lock_guard<std::mutex> lock(mInboundGlobalEventsMutex);
+        mInboundGlobalEvents.push_back({ std::move(eventName), std::move(eventData) });
+    }
+
+    void LuaManager::receiveGlobalStorageSnapshot(std::vector<MWBase::LuaManager::GlobalStorageValue> values)
+    {
+        if (!mInitialized)
+            return;
+
+        mGlobalStorageMirroredFromServer = true;
+        mLua.protectedCall([&](LuaUtil::LuaView& view) {
+            sol::table existingSections = mGlobalStorage.getAllSections(view.sol().lua_state());
+            for (const auto& [sectionName, _] : existingSections)
+                mGlobalStorage.setSectionValues(LuaUtil::cast<std::string>(sectionName), sol::nullopt);
+
+            std::map<std::string, sol::table> sections;
+            for (const auto& value : values)
+            {
+                auto [it, inserted] = sections.emplace(value.mSection, sol::table(view.sol(), sol::create));
+                it->second[value.mKey] = LuaUtil::deserialize(
+                    view.sol().lua_state(), value.mValue, mGlobalSerializer.get());
+            }
+
+            for (const auto& [section, sectionValues] : sections)
+            {
+                sol::optional<sol::table> optionalValues = sectionValues;
+                mGlobalStorage.setSectionValues(section, optionalValues);
+            }
+        });
+    }
+
+    void LuaManager::receiveGlobalStorageDelta(MWBase::LuaManager::GlobalStorageValue value)
+    {
+        if (!mInitialized)
+            return;
+
+        mGlobalStorageMirroredFromServer = true;
+        mLua.protectedCall([&](LuaUtil::LuaView& view) {
+            sol::object object = LuaUtil::deserialize(view.sol().lua_state(), value.mValue, mGlobalSerializer.get());
+            mGlobalStorage.setSingleValue(value.mSection, value.mKey, object);
+        });
+    }
+
+    void LuaManager::receiveGlobalStorageSection(
+        std::string section, std::vector<MWBase::LuaManager::GlobalStorageValue> values)
+    {
+        if (!mInitialized)
+            return;
+
+        mGlobalStorageMirroredFromServer = true;
+        mLua.protectedCall([&](LuaUtil::LuaView& view) {
+            if (values.empty())
+            {
+                mGlobalStorage.setSectionValues(section, sol::nullopt);
+                return;
+            }
+
+            sol::table sectionValues(view.sol(), sol::create);
+            for (const auto& value : values)
+            {
+                sectionValues[value.mKey] = LuaUtil::deserialize(
+                    view.sol().lua_state(), value.mValue, mGlobalSerializer.get());
+            }
+            sol::optional<sol::table> optionalValues = sectionValues;
+            mGlobalStorage.setSectionValues(section, optionalValues);
+        });
     }
 
     LuaManager::DelayedAction::DelayedAction(LuaUtil::LuaState* state, std::function<void()> fn, std::string_view name)

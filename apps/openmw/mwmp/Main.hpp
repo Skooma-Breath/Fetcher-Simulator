@@ -21,6 +21,7 @@ namespace mwmp
     class WorldObjectSync;
     class WorldStateSync;
     class ChatWindow;
+    class MpNetworkBridge;
 
     // -----------------------------------------------------------------------
     // Main — singleton that owns every multiplayer subsystem.
@@ -61,6 +62,7 @@ namespace mwmp
         WorldObjectSync& getWorldObjectSync() { return *mWorldObjectSync; }
         WorldStateSync& getWorldStateSync() { return *mWorldStateSync; }
         ChatWindow& getChatWindow() { return *mChatWindow; }
+        MpNetworkBridge& getNetworkBridge() { return *mNetworkBridge; }
         bool hasChatWindow() const { return mChatWindow != nullptr; }
 
         // Connection state queries (used by AccountDialog to poll results)
@@ -129,6 +131,7 @@ namespace mwmp
         std::unique_ptr<WorldObjectSync> mWorldObjectSync;
         std::unique_ptr<WorldStateSync> mWorldStateSync;
         std::unique_ptr<ChatWindow> mChatWindow;
+        std::unique_ptr<MpNetworkBridge> mNetworkBridge;
 
         std::string mPlayerName;
         bool        mWorldReady           = false;
