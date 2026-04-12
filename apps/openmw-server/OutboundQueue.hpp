@@ -26,13 +26,17 @@ enum class OutboundLuaActionType
     SendLuaEvent,
     BroadcastLuaStorage,
     SendLuaStorage,
+    GrantInventoryItem,
+    RemovePlacedObject,
 };
 
 struct OutboundLuaAction
 {
     OutboundLuaActionType type = OutboundLuaActionType::BroadcastServerMessage;
     uint32_t guid = 0;
+    uint32_t mpNum = 0;
     float worldHour = 0.f;
+    int itemCount = 0;
     std::string text;
     std::string eventName;
     std::string cellId;

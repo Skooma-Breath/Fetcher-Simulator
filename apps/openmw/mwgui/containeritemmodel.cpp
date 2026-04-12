@@ -1,10 +1,14 @@
 #include "containeritemmodel.hpp"
 
 #include <algorithm>
+#include <cstdio>
 
 #include "../mwmechanics/actorutil.hpp"
 #include "../mwmechanics/creaturestats.hpp"
 
+#include "../mwmp/Main.hpp"
+#include "../mwmp/sync/WorldObjectSync.hpp"
+#include "../mwworld/cellstore.hpp"
 #include "../mwworld/class.hpp"
 #include "../mwworld/containerstore.hpp"
 #include "../mwworld/manualref.hpp"
@@ -35,6 +39,37 @@ namespace
         return store.stacks(left, right);
     }
 
+    std::string makeCellId(const MWWorld::Ptr& ptr)
+    {
+        const MWWorld::CellStore* store = ptr.getCell();
+        if (!store || !store->getCell())
+            return {};
+
+        const MWWorld::Cell* cell = store->getCell();
+        if (cell->isExterior())
+        {
+            char buf[32];
+            std::snprintf(buf, sizeof(buf), "EXT:%d,%d", cell->getGridX(), cell->getGridY());
+            return buf;
+        }
+
+        return std::string(cell->getNameId());
+    }
+
+    void appendOrMerge(std::vector<mwmp::ContainerItem>& items, const mwmp::ContainerItem& item)
+    {
+        auto it = std::find_if(items.begin(), items.end(),
+            [&](const mwmp::ContainerItem& current)
+            {
+                return current.refId == item.refId && current.charge == item.charge;
+            });
+
+        if (it == items.end())
+            items.push_back(item);
+        else
+            it->count += item.count;
+    }
+
 }
 
 namespace MWGui
@@ -59,6 +94,15 @@ namespace MWGui
     {
         MWWorld::ContainerStore& store = source.getClass().getContainerStore(source);
         mItemSources.emplace_back(source, store.resolveTemporarily());
+
+        if (source.getType() == ESM::Container::sRecordId)
+        {
+            mSyncInfo.enabled = true;
+            mSyncInfo.cellId = makeCellId(source);
+            mSyncInfo.refId = source.getCellRef().getRefId().serializeText();
+            mSyncInfo.refNum = source.getCellRef().getRefNum().mIndex;
+            mSyncInfo.mpNum = mwmp::Main::get().getWorldObjectSync().getMpNumForObject(source);
+        }
     }
 
     bool ContainerItemModel::allowedToUseItems() const
@@ -106,7 +150,9 @@ namespace MWGui
         MWWorld::ContainerStore& store = source.first.getClass().getContainerStore(source.first);
         if (item.mBase.getContainerStore() == &store)
             throw std::runtime_error("Item to add needs to be from a different container!");
-        return *store.add(item.mBase, static_cast<int>(count), allowAutoEquip);
+        MWWorld::Ptr added = *store.add(item.mBase, static_cast<int>(count), allowAutoEquip);
+        queueContainerDelta(mwmp::ContainerAction::Add, added, static_cast<int>(count));
+        return added;
     }
 
     MWWorld::Ptr ContainerItemModel::copyItem(const ItemStack& item, size_t count, bool allowAutoEquip)
@@ -116,7 +162,9 @@ namespace MWGui
         if (item.mBase.getContainerStore() == &store)
             throw std::runtime_error("Item to copy needs to be from a different container!");
         MWWorld::ManualRef newRef(*MWBase::Environment::get().getESMStore(), item.mBase, static_cast<int>(count));
-        return *store.add(newRef.getPtr(), static_cast<int>(count), allowAutoEquip);
+        MWWorld::Ptr added = *store.add(newRef.getPtr(), static_cast<int>(count), allowAutoEquip);
+        queueContainerDelta(mwmp::ContainerAction::Add, added, static_cast<int>(count));
+        return added;
     }
 
     void ContainerItemModel::removeItem(const ItemStack& item, size_t count)
@@ -138,7 +186,10 @@ namespace MWGui
                     else
                         toRemove -= store.remove(*it, toRemove);
                     if (toRemove <= 0)
+                    {
+                        queueContainerDelta(mwmp::ContainerAction::Remove, item.mBase, static_cast<int>(count));
                         return;
+                    }
                 }
             }
         }
@@ -153,7 +204,10 @@ namespace MWGui
                     source.getCellRef().setCount(std::max(0, refCount - toRemove));
                 toRemove -= refCount;
                 if (toRemove <= 0)
+                {
+                    queueContainerDelta(mwmp::ContainerAction::Remove, item.mBase, static_cast<int>(count));
                     return;
+                }
             }
         }
 
@@ -214,6 +268,25 @@ namespace MWGui
             }
         }
     }
+
+    void ContainerItemModel::beginSyncBatch(mwmp::ContainerAction action)
+    {
+        if (!mSyncInfo.enabled)
+            return;
+
+        mBatchAction = action;
+        mBatchItems.clear();
+    }
+
+    void ContainerItemModel::endSyncBatch()
+    {
+        if (!mBatchAction.has_value())
+            return;
+
+        flushSyncBatch();
+        mBatchAction.reset();
+    }
+
     bool ContainerItemModel::onDropItem(const MWWorld::Ptr& item, int count)
     {
         if (mItemSources.empty())
@@ -277,6 +350,39 @@ namespace MWGui
                 return true;
         }
         return false;
+    }
+
+    void ContainerItemModel::queueContainerDelta(mwmp::ContainerAction action, const MWWorld::Ptr& item, int count)
+    {
+        if (!mSyncInfo.enabled || count <= 0)
+            return;
+
+        mwmp::ContainerItem delta;
+        delta.refId = item.getCellRef().getRefId().serializeText();
+        delta.count = count;
+        delta.charge = static_cast<int>(item.getCellRef().getCharge());
+
+        if (mBatchAction.has_value())
+        {
+            if (mBatchAction.value() != action)
+                flushSyncBatch();
+            mBatchAction = action;
+            appendOrMerge(mBatchItems, delta);
+            return;
+        }
+
+        mwmp::Main::get().getWorldObjectSync().onLocalContainerChanged(
+            mSyncInfo.cellId, mSyncInfo.refId, mSyncInfo.refNum, mSyncInfo.mpNum, action, {delta});
+    }
+
+    void ContainerItemModel::flushSyncBatch()
+    {
+        if (!mSyncInfo.enabled || !mBatchAction.has_value() || mBatchItems.empty())
+            return;
+
+        mwmp::Main::get().getWorldObjectSync().onLocalContainerChanged(
+            mSyncInfo.cellId, mSyncInfo.refId, mSyncInfo.refNum, mSyncInfo.mpNum, mBatchAction.value(), mBatchItems);
+        mBatchItems.clear();
     }
 
 }

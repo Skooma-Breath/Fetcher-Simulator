@@ -34,9 +34,6 @@ handlersPerType[types.ESM4Book] = { ESM4BookActivation }
 handlersPerType[types.ESM4Door] = { ESM4DoorActivation }
 
 local function onActivate(obj, actor)
-    if world.isWorldPaused() then
-        return
-    end
     if obj.parentContainer then
         return
     end

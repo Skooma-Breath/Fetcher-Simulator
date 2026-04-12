@@ -50,7 +50,7 @@ namespace mwmp
 
         // Called when the local player modifies container contents (take/add).
         void onLocalContainerChanged(const std::string& cellId,
-                                     const std::string& refId, uint32_t refNum,
+                                     const std::string& refId, uint32_t refNum, uint32_t mpNum,
                                      ContainerAction action,
                                      const std::vector<ContainerItem>& items);
 
@@ -68,6 +68,7 @@ namespace mwmp
 
         // --- lookup ---
         MWWorld::Ptr getObjectByMpNum(uint32_t mpNum) const;
+        uint32_t getMpNumForObject(const MWWorld::Ptr& ptr) const;
 
     private:
         // ---- world helpers ----
@@ -77,11 +78,14 @@ namespace mwmp
         bool tryDeleteObject(uint32_t mpNum);
         bool tryMoveObject  (uint32_t mpNum, const Position& pos);
         bool tryApplyContainer(const ContainerRecord& record, ContainerAction action);
+        void registerObject(uint32_t mpNum, const MWWorld::Ptr& ptr);
+        void unregisterObject(uint32_t mpNum);
 
         NetworkClient& mClient;
 
         // mpNum → live world Ptr
         std::unordered_map<uint32_t, MWWorld::Ptr> mObjects;
+        std::unordered_map<ESM::RefNum, uint32_t> mMpNumsByObjectId;
 
         // Pending operations that arrived before the target cell was loaded
         struct PendingPlace  { uint32_t mpNum; std::string refId; int count;

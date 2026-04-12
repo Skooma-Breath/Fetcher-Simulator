@@ -113,6 +113,8 @@ public:
 
     // Look up a live client by guid. Returns nullptr if not found / disconnected.
     ConnectedClient* findClientByGuid(uint32_t guid);
+    bool grantPlayerInventoryItem(uint32_t guid, const std::string& refId, int count);
+    bool removePlacedObjectByMpNum(uint32_t mpNum, const std::string& cellId);
 
     // Iterate all fully-connected (post-handshake) players.
     // Used by script bindings to build the mp.getPlayers() table.
@@ -202,6 +204,10 @@ private:
     std::vector<uint8_t> buildWorldTimePacket()    const;
     std::vector<uint8_t> buildWorldWeatherPacket() const;
     void syncLuaSnapshot();
+    void syncLuaAuthorityState();
+    void sendAuthoritativeInventory(ConnectedClient& c);
+    bool grantInventoryItem(ConnectedClient& c, const std::string& refId, int count);
+    bool removePlacedObjectAuthoritative(uint32_t mpNum, const std::string& cellId);
 
     // ── State ─────────────────────────────────────────────────────────────
     ISteamNetworkingSockets* mInterface    = nullptr;

@@ -1,6 +1,7 @@
 local mp = require("mp")
 local Config = require("config")
 local types = require("openmw.types")
+local intentPolicy = require("intent_policy")
 
 ------------------------------------------------------------------------
 -- Config
@@ -11,6 +12,7 @@ local MOTD = Config.MOTD or "Welcome to the server!  Type !help for commands."
 local COMMAND_PREFIX = Config.COMMAND_PREFIX or "!"
 local ANNOUNCE_JOIN_LEAVE = Config.ANNOUNCE_JOIN_LEAVE ~= false
 local LOG_CHAT = Config.LOG_CHAT == true
+local ALLOW_UNVERIFIED_ACTIVATE = Config.ALLOW_UNVERIFIED_ACTIVATE == true
 local LOGIN_PREFIX = COMMAND_PREFIX .. "login "
 local KICK_PREFIX = COMMAND_PREFIX .. "kick "
 local SETTIME_PREFIX = COMMAND_PREFIX .. "settime "
@@ -136,6 +138,55 @@ local function playerPosition(player)
     }
 end
 
+local function toPositiveInteger(value)
+    local number = tonumber(value)
+    if not number or number <= 0 then
+        return nil
+    end
+    return math.floor(number)
+end
+
+local function plainPosition(position)
+    position = position or {}
+    return {
+        x = tonumber(position.x) or 0,
+        y = tonumber(position.y) or 0,
+        z = tonumber(position.z) or 0,
+        rx = tonumber(position.rx) or 0,
+        ry = tonumber(position.ry) or 0,
+        rz = tonumber(position.rz) or 0,
+    }
+end
+
+local function resolveVerifiedTarget(object)
+    object = object or {}
+
+    local mpNum = toPositiveInteger(object.mpNum)
+    if not mpNum then
+        return nil
+    end
+
+    local placed = mp.getObjectByMpNum(mpNum)
+    if not placed then
+        return nil
+    end
+
+    return {
+        action = "take",
+        source = "server-placed-object",
+        object = {
+            id = object.id,
+            mpNum = placed.mpNum,
+            recordId = placed.refId,
+            type = object.type,
+            typeName = object.typeName,
+            cell = placed.cell,
+            position = plainPosition(placed.position),
+            count = placed.count,
+        },
+    }
+end
+
 local function doorKey(cellId, refId, objectId)
     return string.format("%s:%s:%s", tostring(cellId or ""), tostring(refId or ""), tostring(objectId or ""))
 end
@@ -187,17 +238,24 @@ local function classifyActivation(object)
     return "activate", "fallback"
 end
 
-local function enrichActivationResult(result, object, accepted)
-    local action, source = classifyActivation(object)
+local function enrichActivationResult(result, object, accepted, forcedAction, forcedSource)
+    local action, source
+    if forcedAction then
+        action = forcedAction
+        source = forcedSource or "server-verified"
+    else
+        action, source = classifyActivation(object)
+    end
     result.action = action
     result.classificationSource = source
     result.object = {
         id = object.id,
+        mpNum = object.mpNum,
         recordId = object.recordId,
         type = object.type,
         typeName = object.typeName,
         cell = object.cell,
-        position = object.position,
+        position = plainPosition(object.position),
     }
 
     if not accepted then
@@ -232,16 +290,47 @@ local function enrichActivationResult(result, object, accepted)
     end
 end
 
-local function handleActivate(data)
+local function buildActivateIntentContext(data)
     data = data or {}
     local player = getPlayer(data.pid)
     if not player then
-        mp.log(string.format("[core] Activate rejected: missing player pid=%s", tostring(data.pid)))
-        return
+        return {
+            data = data,
+            player = nil,
+            actor = data.actor or {},
+            object = data.object or {},
+            verifiedTarget = nil,
+            result = {
+                seq = data.seq,
+                clientActivationId = data.clientActivationId,
+                accepted = false,
+                reason = "missing_player",
+                serverVerified = false,
+                originPid = data.pid,
+                actorGuid = 0,
+                actorName = "",
+                actorId = nil,
+                objectId = data.object and data.object.id or nil,
+                objectMpNum = data.object and data.object.mpNum or nil,
+                objectRecordId = data.object and data.object.recordId or nil,
+                objectType = data.object and data.object.type or nil,
+                objectCell = data.object and data.object.cell or nil,
+                verificationSource = "missing-player",
+                distance = -1,
+                maxDistance = Config.ACTIVATION_MAX_DISTANCE or 250,
+                serverHour = mp.getWorldTime(),
+                applyStandardAction = false,
+                mutation = "intent-missing-player",
+            },
+        }
     end
 
     local object = data.object or {}
     local actor = data.actor or {}
+    local verifiedTarget = resolveVerifiedTarget(object)
+    if verifiedTarget then
+        object = verifiedTarget.object
+    end
     local maxDistance = Config.ACTIVATION_MAX_DISTANCE or 250
     local distance = distance3(playerPosition(player), object.position)
     local sameCell = not object.cell or object.cell == "" or object.cell == player.cell
@@ -255,46 +344,127 @@ local function handleActivate(data)
         reason = "cell_mismatch"
     end
 
+    local serverVerified = verifiedTarget ~= nil or ALLOW_UNVERIFIED_ACTIVATE
+    if accepted and not serverVerified then
+        accepted = false
+        reason = "unverified_target"
+    end
+
     local result = {
         seq = data.seq,
         clientActivationId = data.clientActivationId,
         accepted = accepted,
         reason = reason,
+        serverVerified = serverVerified,
         originPid = data.pid,
         actorGuid = player.guid,
         actorName = player.name,
         actorId = actor.id,
         objectId = object.id,
+        objectMpNum = object.mpNum,
         objectRecordId = object.recordId,
         objectType = object.type,
         objectCell = object.cell,
+        verificationSource = verifiedTarget and verifiedTarget.source or "client-payload",
         distance = distance or -1,
         maxDistance = maxDistance,
         serverHour = mp.getWorldTime(),
+        applyStandardAction = accepted,
     }
-    enrichActivationResult(result, object, accepted)
+    enrichActivationResult(
+        result,
+        object,
+        accepted,
+        verifiedTarget and verifiedTarget.action or nil,
+        verifiedTarget and verifiedTarget.source or nil
+    )
 
-    if player.cell and player.cell ~= "" then
-        mp.broadcastToCell(player.cell, "ActivateResult", result)
+    if not result.accepted then
+        result.applyStandardAction = false
+    end
+
+    return {
+        eventName = "Activate",
+        data = data,
+        player = player,
+        actor = actor,
+        object = object,
+        verifiedTarget = verifiedTarget,
+        result = result,
+    }
+end
+
+intentPolicy.registerIntent("Activate", buildActivateIntentContext)
+
+local function handleActivate(data)
+    local context = intentPolicy.evaluate("Activate", data)
+    local player = getPlayer(data and data.pid)
+    local object = data and data.object or {}
+
+    if context.ops and #context.ops > 0 then
+        local ok, err = mp.applyOps(context.ops)
+        context.ops = nil
+        if not ok then
+            context.accepted = false
+            context.reason = "intent_ops_failed"
+            context.mutation = "intent-ops-failed"
+            context.applyStandardAction = false
+            context.failedStage = context.failedStage or "ops"
+            context.failedError = err
+        end
+    end
+
+    if player and player.cell and player.cell ~= "" then
+        mp.broadcastToCell(player.cell, "ActivateResult", context)
     else
-        mp.broadcast("ActivateResult", result)
+        mp.broadcast("ActivateResult", context)
     end
 
     mp.log(string.format(
-        "[core] Activate seq=%s by %s action=%s object=%s recordId=%s type=%s distance=%.1f accepted=%s reason=%s state=%s mutation=%s",
-        tostring(data.seq),
-        player.name,
-        tostring(result.action),
+        "[core] Activate seq=%s by %s action=%s object=%s recordId=%s type=%s distance=%.1f accepted=%s verified=%s reason=%s state=%s mutation=%s",
+        tostring(data and data.seq),
+        tostring(player and player.name or "<missing>"),
+        tostring(context.action),
         tostring(object.id),
         tostring(object.recordId),
         tostring(object.typeName or object.type),
-        distance or -1,
-        tostring(accepted),
-        tostring(reason),
-        tostring(result.state),
-        tostring(result.mutation)
+        tonumber(context.distance) or -1,
+        tostring(context.accepted),
+        tostring(context.serverVerified),
+        tostring(context.reason),
+        tostring(context.state),
+        tostring(context.mutation)
     ))
 end
+
+intentPolicy.registerHandler("Activate", "demo_common_pants_gold_reward", function(context)
+    local object = context.object or {}
+    local result = context.result
+    if not result.accepted then
+        return nil
+    end
+    if tostring(object.recordId or ""):lower() ~= "common_pants_01" then
+        return nil
+    end
+    if not object.mpNum or not object.cell or object.cell == "" then
+        return {
+            accepted = false,
+            reason = "server_override_unverified_target",
+            mutation = "server-override-rejected",
+            applyStandardAction = false,
+        }
+    end
+
+    return {
+        applyStandardAction = false,
+        mutation = "server-inventory-grant",
+        ops = {
+            intentPolicy.ops.removePlacedObject(object.mpNum, object.cell),
+            intentPolicy.ops.grantInventory(context.player.guid, "gold_001", 50000),
+        },
+        stop = true,
+    }
+end)
 
 local function handleChat(player, data)
     local msg = data.message or ""
@@ -595,6 +765,12 @@ local function handleChat(player, data)
 end
 
 return {
+    interfaceName = "IntentPolicy",
+    interface = {
+        evaluateIntent = function(intentName, data)
+            return intentPolicy.evaluate(intentName, data)
+        end,
+    },
     eventHandlers = {
         OnServerInit = function(_)
             mp.log("[core] Server ready — " .. mp.getPlayerCount() .. " player(s) connected.")

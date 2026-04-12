@@ -7,11 +7,33 @@
 #include "../mwbase/environment.hpp"
 #include "../mwbase/luamanager.hpp"
 #include "../mwlua/context.hpp"
+#include "../mwlua/object.hpp"
 #include "Main.hpp"
 #include "network/Client.hpp"
+#include "sync/WorldObjectSync.hpp"
 
 namespace mwmp
 {
+    namespace
+    {
+        template <class ObjectT>
+        sol::optional<uint32_t> getObjectMpNum(const ObjectT& object)
+        {
+            if (!Main::isInitialised())
+                return sol::nullopt;
+
+            const MWWorld::Ptr& ptr = object.ptrOrEmpty();
+            if (ptr.isEmpty())
+                return sol::nullopt;
+
+            const uint32_t mpNum = Main::get().getWorldObjectSync().getMpNumForObject(ptr);
+            if (mpNum == 0)
+                return sol::nullopt;
+
+            return mpNum;
+        }
+    }
+
     void MpNetworkBridge::queueInbound(LuaEvent event)
     {
         std::lock_guard<std::mutex> lock(mInboundMutex);
@@ -117,6 +139,14 @@ namespace mwmp
         mp.set_function("isServer", []() -> bool {
             return false;
         });
+
+        mp.set_function("getObjectMpNum", sol::overload(
+            [](const MWLua::LObject& object) -> sol::optional<uint32_t> {
+                return getObjectMpNum(object);
+            },
+            [](const MWLua::GObject& object) -> sol::optional<uint32_t> {
+                return getObjectMpNum(object);
+            }));
 
         return LuaUtil::makeReadOnly(mp);
     }

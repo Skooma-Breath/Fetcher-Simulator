@@ -49,6 +49,7 @@ namespace MWGui
         void onFrame(float dt) override;
 
         void pickUpObject(MWWorld::Ptr object);
+        void pickUpObjectDirect(MWWorld::Ptr object);
 
         MWWorld::Ptr getAvatarSelectedItem(int x, int y);
 
@@ -152,6 +153,7 @@ namespace MWGui
 
         void updateEncumbranceBar();
         void notifyContentChanged();
+        void pickUpObjectImpl(MWWorld::Ptr object, bool viaActivationBridge);
         void dirtyPreview();
         void updatePreviewSize();
         void updateArmorRating();

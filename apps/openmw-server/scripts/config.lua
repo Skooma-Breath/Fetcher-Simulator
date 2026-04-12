@@ -19,9 +19,17 @@ Config.ADMIN_PASSWORD = "changeme"
 
 Config.START_HOUR = 8.0
 Config.TIME_SCALE = 30.0
-Config.LUA_TICK_RATE = 20
+-- Periodic server Lua still runs at 60 Hz for ordinary script events.
+-- Immediate intent evaluation wakes the Lua thread on demand for hot paths
+-- like Activate, so these settings mainly cover the non-blocking tick work.
+Config.LUA_TICK_RATE = 60
 Config.LUA_TICK_DIAGNOSTICS_INTERVAL = 5
 Config.LUA_SLOW_TICK_MS = 8
+-- Immediate intent evaluation wakes the Lua thread on demand and waits
+-- briefly for a decision instead of waiting for the next periodic tick.
+Config.IMMEDIATE_INTENT_TIMEOUT_MS = 50
+-- Keep this off until the server can verify static-world refs from a content index.
+Config.ALLOW_UNVERIFIED_ACTIVATE = false
 
 ------------------------------------------------------------------------
 -- Characters

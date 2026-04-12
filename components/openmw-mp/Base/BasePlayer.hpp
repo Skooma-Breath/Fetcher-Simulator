@@ -78,7 +78,13 @@ namespace mwmp
         std::array<EquipmentItem, NUM_EQUIPMENT_SLOTS> equipment;
 
         // ------------------------------------------------------------------
-        // Inventory changes (delta updates)
+        // Inventory sync payload.
+        //
+        // Clients currently send Set snapshots, but the wire format also allows
+        // Add/Remove deltas. The dedicated server folds those updates back into
+        // this same vector so it can keep an authoritative full inventory
+        // mirror for persistence and Lua snapshot reads without maintaining a
+        // second copy.
         // ------------------------------------------------------------------
         struct InventoryChanges
         {

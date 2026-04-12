@@ -803,6 +803,16 @@ namespace MWGui
 
     void InventoryWindow::pickUpObject(MWWorld::Ptr object)
     {
+        pickUpObjectImpl(std::move(object), true);
+    }
+
+    void InventoryWindow::pickUpObjectDirect(MWWorld::Ptr object)
+    {
+        pickUpObjectImpl(std::move(object), false);
+    }
+
+    void InventoryWindow::pickUpObjectImpl(MWWorld::Ptr object, bool viaActivationBridge)
+    {
         // If the inventory is not yet enabled, don't pick anything up
         if (!MWBase::Environment::get().getWindowManager()->isAllowed(GW_Inventory))
             return;
@@ -819,11 +829,21 @@ namespace MWGui
         if (!object.getClass().hasToolTip(object))
             return;
 
+        MWWorld::Ptr player = MWMechanics::getPlayer();
+
+        if (viaActivationBridge)
+        {
+            const MWMechanics::NpcStats& playerStats = player.getClass().getNpcStats(player);
+            if (playerStats.isParalyzed() || playerStats.getKnockedDown() || playerStats.isDead())
+                return;
+
+            MWBase::Environment::get().getLuaManager()->objectActivated(object, player);
+            return;
+        }
+
         int count = object.getCellRef().getCount();
         if (object.getClass().isGold(object))
             count *= object.getClass().getValue(object);
-
-        MWWorld::Ptr player = MWMechanics::getPlayer();
         MWBase::Environment::get().getWorld()->breakInvisibility(player);
 
         if (!object.getRefData().activate())

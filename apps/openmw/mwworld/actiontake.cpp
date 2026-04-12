@@ -25,7 +25,7 @@ namespace MWWorld
             MWGui::GuiMode mode = MWBase::Environment::get().getWindowManager()->getMode();
             if (mode == MWGui::GM_Inventory || mode == MWGui::GM_Container)
             {
-                MWBase::Environment::get().getWindowManager()->getInventoryWindow()->pickUpObject(getTarget());
+                MWBase::Environment::get().getWindowManager()->getInventoryWindow()->pickUpObjectDirect(getTarget());
                 return;
             }
         }

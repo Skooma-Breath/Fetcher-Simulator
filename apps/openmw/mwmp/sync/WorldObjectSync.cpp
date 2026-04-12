@@ -77,6 +77,23 @@ namespace
 
         return nullptr;
     }
+
+    void appendOrMerge(std::vector<ContainerItem>& items, const ContainerItem& item)
+    {
+        if (item.refId.empty() || item.count <= 0)
+            return;
+
+        auto it = std::find_if(items.begin(), items.end(),
+            [&](const ContainerItem& current)
+            {
+                return current.refId == item.refId && current.charge == item.charge;
+            });
+
+        if (it == items.end())
+            items.push_back(item);
+        else
+            it->count += item.count;
+    }
 }
 
 WorldObjectSync::WorldObjectSync(NetworkClient& client)
@@ -149,7 +166,9 @@ void WorldObjectSync::onLocalObjectPlaced(const MWWorld::Ptr& ptr, const std::st
     pkt.object.cellId  = cellId;
     mPendingLocalPlace.push_back({ptr, refId, count, pos, cellId});
     mClient.sendReliable(pkt.encode());
-    Log(Debug::Verbose) << "[MP] WorldObjectSync: sent ObjectPlace refId=" << refId;
+    Log(Debug::Info) << "[MP] WorldObjectSync: sent ObjectPlace refId=" << refId
+                     << " cell=" << cellId
+                     << " count=" << count;
 }
 
 void WorldObjectSync::onLocalObjectDeleted(const MWWorld::Ptr& ptr)
@@ -157,15 +176,7 @@ void WorldObjectSync::onLocalObjectDeleted(const MWWorld::Ptr& ptr)
     if (mSuppressLocalDelete || ptr.isEmpty() || !ptr.isInCell())
         return;
 
-    uint32_t mpNum = 0;
-    for (const auto& [candidateMpNum, objectPtr] : mObjects)
-    {
-        if (objectPtr == ptr)
-        {
-            mpNum = candidateMpNum;
-            break;
-        }
-    }
+    const uint32_t mpNum = getMpNumForObject(ptr);
 
     if (mpNum == 0)
         return;
@@ -229,7 +240,7 @@ void WorldObjectSync::onLocalContainerOpened(const std::string& cellId,
                 ci.refId  = it->getCellRef().getRefId().toString();
                 ci.count  = it->getCellRef().getCount();
                 ci.charge = static_cast<int>(it->getCellRef().getCharge());
-                pkt.container.items.push_back(ci);
+                appendOrMerge(pkt.container.items, ci);
             }
             found = true;
             return false;
@@ -240,7 +251,8 @@ void WorldObjectSync::onLocalContainerOpened(const std::string& cellId,
     }
 
     mClient.sendReliable(pkt.encode());
-    Log(Debug::Verbose) << "[MP] WorldObjectSync: sent Container(Set) refId=" << refId;
+    Log(Debug::Verbose) << "[MP] WorldObjectSync: sent Container(Set) refId=" << refId
+                        << " items=" << pkt.container.items.size();
 }
 
 // ---------------------------------------------------------------------------
@@ -249,6 +261,7 @@ void WorldObjectSync::onLocalContainerOpened(const std::string& cellId,
 void WorldObjectSync::onLocalContainerChanged(const std::string& cellId,
                                                const std::string& refId,
                                                uint32_t refNum,
+                                               uint32_t mpNum,
                                                ContainerAction action,
                                                const std::vector<ContainerItem>& items)
 {
@@ -256,9 +269,14 @@ void WorldObjectSync::onLocalContainerChanged(const std::string& cellId,
     pkt.container.cellId  = cellId;
     pkt.container.refId   = refId;
     pkt.container.refNum  = refNum;
+    pkt.container.mpNum   = mpNum;
     pkt.container.items   = items;
     pkt.mAction = static_cast<uint8_t>(action);
     mClient.sendReliable(pkt.encode());
+    Log(Debug::Verbose) << "[MP] WorldObjectSync: sent Container(" << static_cast<int>(action)
+                        << ") refId=" << refId
+                        << " refNum=" << refNum
+                        << " items=" << items.size();
 }
 
 // ---------------------------------------------------------------------------
@@ -280,7 +298,7 @@ void WorldObjectSync::onServerObjectPlace(uint32_t mpNum, const std::string& ref
         });
     if (localIt != mPendingLocalPlace.end())
     {
-        mObjects[mpNum] = localIt->ptr;
+        registerObject(mpNum, localIt->ptr);
         mPendingLocalPlace.erase(localIt);
         Log(Debug::Verbose) << "[MP] WorldObjectSync: registered local ObjectPlace mpNum=" << mpNum;
         return;
@@ -329,6 +347,37 @@ MWWorld::Ptr WorldObjectSync::getObjectByMpNum(uint32_t mpNum) const
     return (it != mObjects.end()) ? it->second : MWWorld::Ptr();
 }
 
+uint32_t WorldObjectSync::getMpNumForObject(const MWWorld::Ptr& ptr) const
+{
+    if (ptr.isEmpty())
+        return 0;
+
+    auto it = mMpNumsByObjectId.find(ptr.getCellRef().getRefNum());
+    return it != mMpNumsByObjectId.end() ? it->second : 0;
+}
+
+void WorldObjectSync::registerObject(uint32_t mpNum, const MWWorld::Ptr& ptr)
+{
+    if (ptr.isEmpty())
+        return;
+
+    unregisterObject(mpNum);
+    mObjects[mpNum] = ptr;
+    mMpNumsByObjectId[ptr.getCellRef().getRefNum()] = mpNum;
+}
+
+void WorldObjectSync::unregisterObject(uint32_t mpNum)
+{
+    auto it = mObjects.find(mpNum);
+    if (it == mObjects.end())
+        return;
+
+    if (!it->second.isEmpty())
+        mMpNumsByObjectId.erase(it->second.getCellRef().getRefNum());
+
+    mObjects.erase(it);
+}
+
 // ---------------------------------------------------------------------------
 // tryPlaceObject — attempt to spawn the object in the world right now.
 // Returns true on success (object is now registered in mObjects).
@@ -370,7 +419,7 @@ bool WorldObjectSync::tryPlaceObject(uint32_t mpNum, const std::string& refId,
         return false;
     }
 
-    mObjects[mpNum] = placed;
+    registerObject(mpNum, placed);
     Log(Debug::Info) << "[MP] WorldObjectSync: placed refId=" << refId
                      << " mpNum=" << mpNum;
     return true;
@@ -385,14 +434,16 @@ bool WorldObjectSync::tryDeleteObject(uint32_t mpNum)
     MWBase::World* world = MWBase::Environment::get().getWorld();
     if (!world) return false;
 
-    if (!it->second.isEmpty())
+    MWWorld::Ptr object = it->second;
+    unregisterObject(mpNum);
+
+    if (!object.isEmpty())
     {
         mSuppressLocalDelete = true;
-        world->deleteObject(it->second);
+        world->deleteObject(object);
         mSuppressLocalDelete = false;
         Log(Debug::Info) << "[MP] WorldObjectSync: deleted mpNum=" << mpNum;
     }
-    mObjects.erase(it);
     return true;
 }
 

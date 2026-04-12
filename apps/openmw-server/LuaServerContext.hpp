@@ -13,6 +13,7 @@
 #include <unordered_map>
 #include <vector>
 
+#include <components/openmw-mp/Base/BaseObject.hpp>
 #include <components/lua/configuration.hpp>
 #include <components/lua/luastate.hpp>
 #include <components/lua/scriptscontainer.hpp>
@@ -70,6 +71,8 @@ public:
     void onWorldWeather(const std::string& region, int current, int next, float transitionFactor);
     void onLuaEvent(uint32_t pid, const std::string& eventName, const LuaUtil::BinaryData& data);
     void requestGlobalStorageSnapshot(uint32_t guid);
+    std::optional<LuaUtil::BinaryData> evaluateImmediateIntent(
+        uint32_t pid, const std::string& eventName, const LuaUtil::BinaryData& data, std::string* error = nullptr);
 
     std::string getString(
         const std::string& tableName, const std::string& key, const std::string& defaultVal = "") const;
@@ -80,6 +83,7 @@ public:
     int getPlayerCount() const;
     double getUptime() const;
     float getWorldHour() const;
+    std::optional<PlacedObject> getPlacedObject(uint32_t mpNum) const;
 
     void queueBroadcastServerMessage(const std::string& text);
     void queueBroadcastServerMessageToCell(const std::string& cellId, const std::string& text);
@@ -95,10 +99,16 @@ public:
     void queueBroadcastLuaStorageDelta(
         const std::string& section, const std::string& key, const LuaUtil::BinaryData& value);
     void queueBroadcastLuaStorageSection(const std::string& section, std::vector<LuaStorageEntry> entries);
+    bool queueIntentOps(const sol::table& ops, std::string* error = nullptr);
+    void queueGrantInventoryItem(uint32_t guid, const std::string& refId, int count);
+    void queueRemovePlacedObject(uint32_t mpNum, const std::string& cellId);
 
     void setPlayerData(uint32_t guid, const std::string& key, const std::string& value);
     std::optional<std::string> getPlayerData(uint32_t guid, const std::string& key) const;
     void clearPlayerData(uint32_t guid);
+    void syncPlacedObjects(std::vector<PlacedObject> objects);
+    void upsertPlacedObject(PlacedObject object);
+    void removePlacedObject(uint32_t mpNum);
 
 private:
     struct SnapshotState
@@ -108,15 +118,30 @@ private:
         std::vector<LuaPlayerSnapshot> players;
     };
 
+    struct ImmediateIntentRequest
+    {
+        uint32_t pid = 0;
+        std::string eventName;
+        LuaUtil::BinaryData data;
+        std::optional<LuaUtil::BinaryData> response;
+        std::string error;
+        bool completed = false;
+        std::mutex mutex;
+        std::condition_variable condition;
+    };
+
     std::filesystem::path resolveScriptsDir() const;
     void buildVfs();
     void initConfiguration();
     void initLua();
     void loadScripts();
     std::size_t dispatchQueuedEvents();
+    std::size_t processImmediateIntentRequests();
     void processStorageSnapshotRequests();
     std::vector<LuaStorageEntry> makeGlobalStorageSnapshot() const;
     void luaTickLoop();
+    std::optional<LuaUtil::BinaryData> evaluateImmediateIntentOnLuaThread(
+        uint32_t pid, const std::string& eventName, const LuaUtil::BinaryData& data);
 
     LuaUtil::BinaryData makeEmptyPayload() const;
     LuaUtil::BinaryData makeTickPayload() const;
@@ -158,10 +183,14 @@ private:
     OutboundQueue                              mOutboundQueue;
     mutable std::mutex                         mStorageSnapshotMutex;
     std::vector<uint32_t>                      mStorageSnapshotRequests;
+    mutable std::mutex                         mImmediateIntentMutex;
+    std::vector<std::shared_ptr<ImmediateIntentRequest>> mImmediateIntentRequests;
     mutable std::mutex                         mSnapshotMutex;
     SnapshotState                              mSnapshot;
     mutable std::mutex                         mPlayerDataMutex;
     std::unordered_map<uint32_t, std::unordered_map<std::string, std::string>> mPlayerScriptData;
+    mutable std::mutex                         mPlacedObjectsMutex;
+    std::unordered_map<uint32_t, PlacedObject> mPlacedObjectsByMpNum;
     std::thread                                mLuaThread;
     mutable std::mutex                         mWakeMutex;
     std::condition_variable                    mWakeCondition;
@@ -169,6 +198,7 @@ private:
     std::atomic<bool>                          mThreadRunning { false };
     float                                      mTickIntervalSeconds = 0.05f;
     int                                        mDiagnosticsIntervalSeconds = 5;
+    int                                        mImmediateIntentTimeoutMs = 50;
     double                                     mSlowTickLogThresholdMs = 8.0;
     bool                                       mLoaded = false;
 };

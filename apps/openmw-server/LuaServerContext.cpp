@@ -27,10 +27,19 @@ namespace
         LuaUtil::BinaryData data;
         lua.protectedCall([&](LuaUtil::LuaView& view) {
             sol::table payload = view.newTable();
-            fill(view, payload);
+            fill(payload);
             data = LuaUtil::serialize(payload);
         });
         return data;
+    }
+
+    template <typename Fill>
+    LuaUtil::BinaryData makeMainThreadSerializedTable(Fill&& fill)
+    {
+        sol::state tempLua;
+        sol::table payload = tempLua.create_table();
+        fill(payload);
+        return LuaUtil::serialize(payload);
     }
 
     LuaUtil::BinaryData injectPidIntoPayload(const LuaUtil::LuaState& lua, uint32_t pid, const LuaUtil::BinaryData& data)
@@ -151,6 +160,7 @@ void LuaServerContext::start()
     const int tickRate = std::max(configuredTickRate, 1);
     mTickIntervalSeconds = 1.f / static_cast<float>(tickRate);
     mDiagnosticsIntervalSeconds = std::max(getInt("Config", "LUA_TICK_DIAGNOSTICS_INTERVAL", 5), 0);
+    mImmediateIntentTimeoutMs = std::max(getInt("Config", "IMMEDIATE_INTENT_TIMEOUT_MS", 50), 1);
     mSlowTickLogThresholdMs = static_cast<double>(std::max(getInt("Config", "LUA_SLOW_TICK_MS", 8), 0));
 
     mStopRequested = false;
@@ -224,6 +234,12 @@ void LuaServerContext::drainOutbound()
             case OutboundLuaActionType::SendLuaStorage:
                 mServer->sendLuaStorage(action.guid, action.storageAction, action.storageSection, action.storageEntries);
                 break;
+            case OutboundLuaActionType::GrantInventoryItem:
+                mServer->grantPlayerInventoryItem(action.guid, action.text, action.itemCount);
+                break;
+            case OutboundLuaActionType::RemovePlacedObject:
+                mServer->removePlacedObjectByMpNum(action.mpNum, action.cellId);
+                break;
         }
     }
 }
@@ -249,7 +265,7 @@ void LuaServerContext::onPlayerConnect(uint32_t guid, const std::string& name)
     if (!mLoaded)
         return;
 
-    enqueueEvent(guid, "OnPlayerConnect", makePlayerPayload(guid, name));
+    enqueueEvent(0, "OnPlayerConnect", makePlayerPayload(guid, name));
 }
 
 void LuaServerContext::onPlayerDisconnect(uint32_t guid, const std::string& name, const std::string& reason)
@@ -257,7 +273,7 @@ void LuaServerContext::onPlayerDisconnect(uint32_t guid, const std::string& name
     if (!mLoaded)
         return;
 
-    enqueueEvent(guid, "OnPlayerDisconnect", makeDisconnectPayload(guid, name, reason));
+    enqueueEvent(0, "OnPlayerDisconnect", makeDisconnectPayload(guid, name, reason));
 }
 
 void LuaServerContext::onPlayerCellChange(
@@ -266,7 +282,7 @@ void LuaServerContext::onPlayerCellChange(
     if (!mLoaded)
         return;
 
-    enqueueEvent(guid, "OnPlayerCellChange", makeCellChangePayload(guid, name, newCell, oldCell));
+    enqueueEvent(0, "OnPlayerCellChange", makeCellChangePayload(guid, name, newCell, oldCell));
 }
 
 void LuaServerContext::onPlayerSendMessage(uint32_t guid, const std::string& name, const std::string& message)
@@ -274,7 +290,7 @@ void LuaServerContext::onPlayerSendMessage(uint32_t guid, const std::string& nam
     if (!mLoaded)
         return;
 
-    enqueueEvent(guid, "OnPlayerSendMessage", makeChatPayload(guid, name, message));
+    enqueueEvent(0, "OnPlayerSendMessage", makeChatPayload(guid, name, message));
 }
 
 void LuaServerContext::onDoorState(const std::string& cellId, const std::string& refId, bool isOpen)
@@ -299,6 +315,42 @@ void LuaServerContext::onLuaEvent(uint32_t pid, const std::string& eventName, co
         return;
 
     enqueueEvent(pid, eventName, data);
+}
+
+std::optional<LuaUtil::BinaryData> LuaServerContext::evaluateImmediateIntent(
+    uint32_t pid, const std::string& eventName, const LuaUtil::BinaryData& data, std::string* error)
+{
+    if (!mLoaded)
+    {
+        if (error)
+            *error = "lua_not_loaded";
+        return std::nullopt;
+    }
+
+    auto request = std::make_shared<ImmediateIntentRequest>();
+    request->pid = pid;
+    request->eventName = eventName;
+    request->data = data;
+
+    {
+        std::lock_guard<std::mutex> lock(mImmediateIntentMutex);
+        mImmediateIntentRequests.push_back(request);
+    }
+    mWakeCondition.notify_all();
+
+    std::unique_lock<std::mutex> lock(request->mutex);
+    const bool completed = request->condition.wait_for(
+        lock, std::chrono::milliseconds(mImmediateIntentTimeoutMs), [&request]() { return request->completed; });
+    if (!completed)
+    {
+        if (error)
+            *error = "timeout";
+        return std::nullopt;
+    }
+
+    if (error)
+        *error = request->error;
+    return request->response;
 }
 
 void LuaServerContext::requestGlobalStorageSnapshot(uint32_t guid)
@@ -396,9 +448,71 @@ float LuaServerContext::getWorldHour() const
     return mSnapshot.worldHour;
 }
 
+std::optional<PlacedObject> LuaServerContext::getPlacedObject(uint32_t mpNum) const
+{
+    std::lock_guard<std::mutex> lock(mPlacedObjectsMutex);
+    auto it = mPlacedObjectsByMpNum.find(mpNum);
+    if (it == mPlacedObjectsByMpNum.end())
+        return std::nullopt;
+    return it->second;
+}
+
+bool LuaServerContext::queueIntentOps(const sol::table& ops, std::string* error)
+{
+    const std::size_t opCount = ops.size();
+    for (std::size_t i = 1; i <= opCount; ++i)
+    {
+        sol::optional<sol::table> op = ops.get<sol::optional<sol::table>>(i);
+        if (!op)
+        {
+            if (error)
+                *error = "op_" + std::to_string(i) + "_not_table";
+            return false;
+        }
+
+        const std::string type = op->get_or("type", std::string());
+        if (type == "GrantInventory" || type == "grantInventory")
+        {
+            const uint32_t guid = op->get_or("guid", 0u);
+            const std::string refId = op->get_or("refId", std::string());
+            const int count = op->get_or("count", 0);
+            if (guid == 0 || refId.empty() || count <= 0)
+            {
+                if (error)
+                    *error = "grant_inventory_invalid";
+                return false;
+            }
+            queueGrantInventoryItem(guid, refId, count);
+        }
+        else if (type == "RemovePlacedObject" || type == "removePlacedObject")
+        {
+            const uint32_t mpNum = op->get_or("mpNum", 0u);
+            const std::string cellId = op->get_or("cellId", op->get_or("cell", std::string()));
+            if (mpNum == 0 || cellId.empty())
+            {
+                if (error)
+                    *error = "remove_placed_object_invalid";
+                return false;
+            }
+            queueRemovePlacedObject(mpNum, cellId);
+        }
+        else
+        {
+            if (error)
+                *error = "unsupported_op_type:" + type;
+            return false;
+        }
+    }
+
+    return true;
+}
+
 void LuaServerContext::queueBroadcastServerMessage(const std::string& text)
 {
-    mOutboundQueue.push({ OutboundLuaActionType::BroadcastServerMessage, 0, 0.f, text });
+    OutboundLuaAction action;
+    action.type = OutboundLuaActionType::BroadcastServerMessage;
+    action.text = text;
+    mOutboundQueue.push(std::move(action));
 }
 
 void LuaServerContext::queueBroadcastServerMessageToCell(const std::string& cellId, const std::string& text)
@@ -412,22 +526,38 @@ void LuaServerContext::queueBroadcastServerMessageToCell(const std::string& cell
 
 void LuaServerContext::queueSendServerMessage(uint32_t guid, const std::string& text)
 {
-    mOutboundQueue.push({ OutboundLuaActionType::SendServerMessage, guid, 0.f, text });
+    OutboundLuaAction action;
+    action.type = OutboundLuaActionType::SendServerMessage;
+    action.guid = guid;
+    action.text = text;
+    mOutboundQueue.push(std::move(action));
 }
 
 void LuaServerContext::queueRelayPlayerChat(uint32_t guid, const std::string& text)
 {
-    mOutboundQueue.push({ OutboundLuaActionType::RelayPlayerChat, guid, 0.f, text });
+    OutboundLuaAction action;
+    action.type = OutboundLuaActionType::RelayPlayerChat;
+    action.guid = guid;
+    action.text = text;
+    mOutboundQueue.push(std::move(action));
 }
 
 void LuaServerContext::queueKickClient(uint32_t guid, const std::string& reason)
 {
-    mOutboundQueue.push({ OutboundLuaActionType::KickClient, guid, 0.f, reason });
+    OutboundLuaAction action;
+    action.type = OutboundLuaActionType::KickClient;
+    action.guid = guid;
+    action.text = reason;
+    mOutboundQueue.push(std::move(action));
 }
 
 void LuaServerContext::queueSetPlayerNickname(uint32_t guid, const std::string& nickname)
 {
-    mOutboundQueue.push({ OutboundLuaActionType::SetPlayerNickname, guid, 0.f, nickname });
+    OutboundLuaAction action;
+    action.type = OutboundLuaActionType::SetPlayerNickname;
+    action.guid = guid;
+    action.text = nickname;
+    mOutboundQueue.push(std::move(action));
 }
 
 void LuaServerContext::queueSetWorldHour(float hour)
@@ -488,6 +618,25 @@ void LuaServerContext::queueBroadcastLuaStorageSection(const std::string& sectio
     mOutboundQueue.push(std::move(action));
 }
 
+void LuaServerContext::queueGrantInventoryItem(uint32_t guid, const std::string& refId, int count)
+{
+    OutboundLuaAction action;
+    action.type = OutboundLuaActionType::GrantInventoryItem;
+    action.guid = guid;
+    action.text = refId;
+    action.itemCount = count;
+    mOutboundQueue.push(std::move(action));
+}
+
+void LuaServerContext::queueRemovePlacedObject(uint32_t mpNum, const std::string& cellId)
+{
+    OutboundLuaAction action;
+    action.type = OutboundLuaActionType::RemovePlacedObject;
+    action.mpNum = mpNum;
+    action.cellId = cellId;
+    mOutboundQueue.push(std::move(action));
+}
+
 void LuaServerContext::setPlayerData(uint32_t guid, const std::string& key, const std::string& value)
 {
     std::lock_guard<std::mutex> lock(mPlayerDataMutex);
@@ -512,6 +661,36 @@ void LuaServerContext::clearPlayerData(uint32_t guid)
 {
     std::lock_guard<std::mutex> lock(mPlayerDataMutex);
     mPlayerScriptData.erase(guid);
+}
+
+void LuaServerContext::syncPlacedObjects(std::vector<PlacedObject> objects)
+{
+    std::lock_guard<std::mutex> lock(mPlacedObjectsMutex);
+    mPlacedObjectsByMpNum.clear();
+    for (auto& object : objects)
+    {
+        if (object.mpNum == 0)
+            continue;
+        mPlacedObjectsByMpNum[object.mpNum] = std::move(object);
+    }
+}
+
+void LuaServerContext::upsertPlacedObject(PlacedObject object)
+{
+    if (object.mpNum == 0)
+        return;
+
+    std::lock_guard<std::mutex> lock(mPlacedObjectsMutex);
+    mPlacedObjectsByMpNum[object.mpNum] = std::move(object);
+}
+
+void LuaServerContext::removePlacedObject(uint32_t mpNum)
+{
+    if (mpNum == 0)
+        return;
+
+    std::lock_guard<std::mutex> lock(mPlacedObjectsMutex);
+    mPlacedObjectsByMpNum.erase(mpNum);
 }
 
 std::filesystem::path LuaServerContext::resolveScriptsDir() const
@@ -635,6 +814,40 @@ std::size_t LuaServerContext::dispatchQueuedEvents()
     return events.size();
 }
 
+std::size_t LuaServerContext::processImmediateIntentRequests()
+{
+    if (!mLoaded)
+        return 0;
+
+    std::vector<std::shared_ptr<ImmediateIntentRequest>> requests;
+    {
+        std::lock_guard<std::mutex> lock(mImmediateIntentMutex);
+        requests.swap(mImmediateIntentRequests);
+    }
+
+    for (const auto& request : requests)
+    {
+        try
+        {
+            request->response = evaluateImmediateIntentOnLuaThread(request->pid, request->eventName, request->data);
+            if (!request->response)
+                request->error = "no_result";
+        }
+        catch (const std::exception& e)
+        {
+            request->error = e.what();
+        }
+
+        {
+            std::lock_guard<std::mutex> requestLock(request->mutex);
+            request->completed = true;
+        }
+        request->condition.notify_all();
+    }
+
+    return requests.size();
+}
+
 void LuaServerContext::processStorageSnapshotRequests()
 {
     std::vector<uint32_t> requests;
@@ -686,8 +899,9 @@ void LuaServerContext::luaTickLoop()
 
         try
         {
+            processedEvents += processImmediateIntentRequests();
             processStorageSnapshotRequests();
-            processedEvents = dispatchQueuedEvents();
+            processedEvents += dispatchQueuedEvents();
             mGlobalScripts->receiveEvent("OnServerTick", makeTickPayload());
             mGlobalScripts->update(mTickIntervalSeconds);
         }
@@ -728,25 +942,54 @@ void LuaServerContext::luaTickLoop()
         }
 
         std::unique_lock<std::mutex> lock(mWakeMutex);
-        mWakeCondition.wait_until(lock, nextWake, [this]() { return mStopRequested.load(); });
+        mWakeCondition.wait_until(lock, nextWake);
     }
+}
+
+std::optional<LuaUtil::BinaryData> LuaServerContext::evaluateImmediateIntentOnLuaThread(
+    uint32_t pid, const std::string& eventName, const LuaUtil::BinaryData& data)
+{
+    if (!mGlobalScripts)
+        throw std::runtime_error("global_scripts_missing");
+
+    std::optional<LuaUtil::BinaryData> out;
+    mLua->protectedCall([&](LuaUtil::LuaView& view) {
+        LuaUtil::BinaryData payload = injectPidIntoPayload(*mLua, pid, data);
+        sol::object payloadObject = LuaUtil::deserialize(view.sol().lua_state(), payload);
+        auto resultObject = mGlobalScripts->callPublicInterface<sol::object>("IntentPolicy", "evaluateIntent", eventName, payloadObject);
+        if (!resultObject || !resultObject->is<sol::table>())
+            throw std::runtime_error("intent_policy_interface_missing");
+
+        sol::table result = resultObject->as<sol::table>();
+        sol::object opsObject = result["ops"];
+        if (opsObject.is<sol::table>())
+        {
+            std::string opError;
+            if (!queueIntentOps(opsObject.as<sol::table>(), &opError))
+                throw std::runtime_error("intent_ops_error:" + opError);
+            result["ops"] = sol::nil;
+        }
+
+        out = LuaUtil::serialize(result);
+    });
+    return out;
 }
 
 LuaUtil::BinaryData LuaServerContext::makeEmptyPayload() const
 {
-    return makeSerializedTable(*mLua, [](LuaUtil::LuaView&, sol::table&) {});
+    return makeMainThreadSerializedTable([](sol::table&) {});
 }
 
 LuaUtil::BinaryData LuaServerContext::makeTickPayload() const
 {
-    return makeSerializedTable(*mLua, [this](LuaUtil::LuaView&, sol::table& payload) {
+    return makeSerializedTable(*mLua, [this](sol::table& payload) {
         payload["dt"] = mTickIntervalSeconds;
     });
 }
 
 LuaUtil::BinaryData LuaServerContext::makePlayerPayload(uint32_t guid, const std::string& name) const
 {
-    return makeSerializedTable(*mLua, [guid, &name](LuaUtil::LuaView&, sol::table& payload) {
+    return makeMainThreadSerializedTable([guid, &name](sol::table& payload) {
         payload["guid"] = guid;
         payload["name"] = name;
     });
@@ -755,7 +998,7 @@ LuaUtil::BinaryData LuaServerContext::makePlayerPayload(uint32_t guid, const std
 LuaUtil::BinaryData LuaServerContext::makeDisconnectPayload(
     uint32_t guid, const std::string& name, const std::string& reason) const
 {
-    return makeSerializedTable(*mLua, [guid, &name, &reason](LuaUtil::LuaView&, sol::table& payload) {
+    return makeMainThreadSerializedTable([guid, &name, &reason](sol::table& payload) {
         payload["guid"] = guid;
         payload["name"] = name;
         payload["reason"] = reason;
@@ -765,7 +1008,7 @@ LuaUtil::BinaryData LuaServerContext::makeDisconnectPayload(
 LuaUtil::BinaryData LuaServerContext::makeCellChangePayload(uint32_t guid, const std::string& name,
     const std::string& newCell, const std::string& oldCell) const
 {
-    return makeSerializedTable(*mLua, [guid, &name, &newCell, &oldCell](LuaUtil::LuaView&, sol::table& payload) {
+    return makeMainThreadSerializedTable([guid, &name, &newCell, &oldCell](sol::table& payload) {
         payload["guid"] = guid;
         payload["name"] = name;
         payload["newCell"] = newCell;
@@ -776,7 +1019,7 @@ LuaUtil::BinaryData LuaServerContext::makeCellChangePayload(uint32_t guid, const
 LuaUtil::BinaryData LuaServerContext::makeChatPayload(
     uint32_t guid, const std::string& name, const std::string& message) const
 {
-    return makeSerializedTable(*mLua, [guid, &name, &message](LuaUtil::LuaView&, sol::table& payload) {
+    return makeMainThreadSerializedTable([guid, &name, &message](sol::table& payload) {
         payload["guid"] = guid;
         payload["name"] = name;
         payload["message"] = message;
@@ -786,7 +1029,7 @@ LuaUtil::BinaryData LuaServerContext::makeChatPayload(
 LuaUtil::BinaryData LuaServerContext::makeDoorPayload(
     const std::string& cellId, const std::string& refId, bool isOpen) const
 {
-    return makeSerializedTable(*mLua, [&cellId, &refId, isOpen](LuaUtil::LuaView&, sol::table& payload) {
+    return makeMainThreadSerializedTable([&cellId, &refId, isOpen](sol::table& payload) {
         payload["cellId"] = cellId;
         payload["refId"] = refId;
         payload["isOpen"] = isOpen;
@@ -796,7 +1039,7 @@ LuaUtil::BinaryData LuaServerContext::makeDoorPayload(
 LuaUtil::BinaryData LuaServerContext::makeWeatherPayload(
     const std::string& region, int current, int next, float transitionFactor) const
 {
-    return makeSerializedTable(*mLua, [&region, current, next, transitionFactor](LuaUtil::LuaView&, sol::table& payload) {
+    return makeMainThreadSerializedTable([&region, current, next, transitionFactor](sol::table& payload) {
         payload["region"] = region;
         payload["current"] = current;
         payload["next"] = next;
@@ -807,6 +1050,7 @@ LuaUtil::BinaryData LuaServerContext::makeWeatherPayload(
 void LuaServerContext::enqueueEvent(uint32_t pid, std::string name, LuaUtil::BinaryData data)
 {
     mInboundQueue.push({ pid, std::move(name), std::move(data) });
+    mWakeCondition.notify_all();
 }
 
 void LuaServerContext::StorageSyncListener::valueChanged(

@@ -113,6 +113,12 @@ namespace LuaUtil
         // (including `nil`) has no effect.
         void receiveEvent(std::string_view eventName, std::string_view eventData);
 
+        template <typename T, typename... Args>
+        std::optional<T> callPublicInterface(std::string_view interfaceName, std::string_view identifier, const Args&... args)
+        {
+            return callInterface<T>(interfaceName, identifier, args...);
+        }
+
         // Serializer defines how to serialize/deserialize userdata. If serializer is not provided,
         // only built-in types and types from util package can be serialized.
         void setSerializer(const UserdataSerializer* serializer) { mSerializer = serializer; }

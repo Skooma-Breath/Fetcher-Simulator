@@ -21,7 +21,9 @@
 #include <iostream>
 #include <sstream>
 #include <stdexcept>
+#include <string_view>
 #include <thread>
+#include <variant>
 
 #include <components/debug/debuglog.hpp>
 #include <components/openmw-mp/Packets/BasePacket.hpp>
@@ -54,6 +56,260 @@
 // Format: specialization, attr[0], attr[1], skills[0..4][0..1], isPlayable, services
 namespace
 {
+    constexpr unsigned char sLuaFormatVersion = 0;
+    constexpr unsigned char sLuaShortStringFlag = 0x20;
+
+    enum class SerializedLuaType : unsigned char
+    {
+        Number = 0x0,
+        LongString = 0x1,
+        Boolean = 0x2,
+        TableStart = 0x3,
+        TableEnd = 0x4,
+    };
+
+    struct LuaWireValue;
+    using LuaWireTable = std::vector<std::pair<std::string, LuaWireValue>>;
+
+    struct LuaWireValue
+    {
+        using Variant = std::variant<std::monostate, double, bool, std::string, LuaWireTable>;
+        Variant value;
+
+        LuaWireValue() = default;
+        LuaWireValue(double v)
+            : value(v)
+        {
+        }
+        LuaWireValue(bool v)
+            : value(v)
+        {
+        }
+        LuaWireValue(std::string v)
+            : value(std::move(v))
+        {
+        }
+        LuaWireValue(const char* v)
+            : value(std::string(v))
+        {
+        }
+        LuaWireValue(LuaWireTable v)
+            : value(std::move(v))
+        {
+        }
+    };
+
+    template <typename T>
+    T readLuaValue(std::string_view& data)
+    {
+        if (data.size() < sizeof(T))
+            throw std::runtime_error("Unexpected end of Lua event payload");
+
+        T value;
+        std::memcpy(&value, data.data(), sizeof(T));
+        data.remove_prefix(sizeof(T));
+        return value;
+    }
+
+    std::string readLuaString(std::string_view& data, std::size_t size)
+    {
+        if (data.size() < size)
+            throw std::runtime_error("Unexpected end of Lua string payload");
+
+        std::string value(data.substr(0, size));
+        data.remove_prefix(size);
+        return value;
+    }
+
+    LuaWireValue parseLuaWireValue(std::string_view& data)
+    {
+        if (data.empty())
+            throw std::runtime_error("Unexpected end of Lua payload");
+
+        const unsigned char type = static_cast<unsigned char>(data.front());
+        data.remove_prefix(1);
+
+        if (type & sLuaShortStringFlag)
+            return LuaWireValue(readLuaString(data, type & 0x1f));
+
+        switch (static_cast<SerializedLuaType>(type))
+        {
+            case SerializedLuaType::Number:
+                return LuaWireValue(readLuaValue<double>(data));
+            case SerializedLuaType::LongString:
+                return LuaWireValue(readLuaString(data, readLuaValue<std::uint32_t>(data)));
+            case SerializedLuaType::Boolean:
+                return LuaWireValue(readLuaValue<char>(data) != 0);
+            case SerializedLuaType::TableStart:
+            {
+                LuaWireTable table;
+                while (!data.empty() && static_cast<unsigned char>(data.front()) != static_cast<unsigned char>(SerializedLuaType::TableEnd))
+                {
+                    LuaWireValue key = parseLuaWireValue(data);
+                    LuaWireValue value = parseLuaWireValue(data);
+                    if (const auto* stringKey = std::get_if<std::string>(&key.value))
+                        table.emplace_back(*stringKey, std::move(value));
+                }
+
+                if (data.empty())
+                    throw std::runtime_error("Unexpected end of Lua table payload");
+
+                data.remove_prefix(1);
+                return LuaWireValue(std::move(table));
+            }
+            case SerializedLuaType::TableEnd:
+                throw std::runtime_error("Unexpected end-of-table marker in Lua payload");
+        }
+
+        throw std::runtime_error("Unsupported Lua payload type");
+    }
+
+    LuaWireTable parseLuaWireTable(const std::string& data)
+    {
+        std::string_view view(data);
+        if (view.empty())
+            return {};
+        if (static_cast<unsigned char>(view.front()) != sLuaFormatVersion)
+            throw std::runtime_error("Unsupported Lua payload format version");
+
+        view.remove_prefix(1);
+        LuaWireValue root = parseLuaWireValue(view);
+        if (!view.empty())
+            throw std::runtime_error("Unexpected trailing bytes in Lua payload");
+
+        if (const auto* table = std::get_if<LuaWireTable>(&root.value))
+            return *table;
+
+        throw std::runtime_error("Expected table payload");
+    }
+
+    const LuaWireValue* findLuaField(const LuaWireTable& table, std::string_view key)
+    {
+        for (const auto& [field, value] : table)
+        {
+            if (field == key)
+                return &value;
+        }
+        return nullptr;
+    }
+
+    const LuaWireTable* getLuaTableField(const LuaWireTable& table, std::string_view key)
+    {
+        const LuaWireValue* value = findLuaField(table, key);
+        return value ? std::get_if<LuaWireTable>(&value->value) : nullptr;
+    }
+
+    std::string getLuaStringField(const LuaWireTable& table, std::string_view key, std::string defaultValue = {})
+    {
+        const LuaWireValue* value = findLuaField(table, key);
+        if (!value)
+            return defaultValue;
+        if (const auto* str = std::get_if<std::string>(&value->value))
+            return *str;
+        return defaultValue;
+    }
+
+    double getLuaNumberField(const LuaWireTable& table, std::string_view key, double defaultValue = 0.0)
+    {
+        const LuaWireValue* value = findLuaField(table, key);
+        if (!value)
+            return defaultValue;
+        if (const auto* number = std::get_if<double>(&value->value))
+            return *number;
+        return defaultValue;
+    }
+
+    bool getLuaBoolField(const LuaWireTable& table, std::string_view key, bool defaultValue = false)
+    {
+        const LuaWireValue* value = findLuaField(table, key);
+        if (!value)
+            return defaultValue;
+        if (const auto* boolean = std::get_if<bool>(&value->value))
+            return *boolean;
+        return defaultValue;
+    }
+
+    void appendLuaBytes(std::string& out, const void* bytes, std::size_t size)
+    {
+        out.append(static_cast<const char*>(bytes), size);
+    }
+
+    template <typename T>
+    void appendLuaPod(std::string& out, T value)
+    {
+        appendLuaBytes(out, &value, sizeof(T));
+    }
+
+    void serializeLuaWireValue(std::string& out, const LuaWireValue& value);
+
+    void appendLuaString(std::string& out, std::string_view value)
+    {
+        if (value.size() < 32)
+        {
+            out.push_back(static_cast<char>(sLuaShortStringFlag | static_cast<unsigned char>(value.size())));
+        }
+        else
+        {
+            out.push_back(static_cast<char>(SerializedLuaType::LongString));
+            appendLuaPod<std::uint32_t>(out, static_cast<std::uint32_t>(value.size()));
+        }
+
+        out.append(value.data(), value.size());
+    }
+
+    void serializeLuaWireTable(std::string& out, const LuaWireTable& table)
+    {
+        out.push_back(static_cast<char>(SerializedLuaType::TableStart));
+        for (const auto& [key, value] : table)
+        {
+            appendLuaString(out, key);
+            serializeLuaWireValue(out, value);
+        }
+        out.push_back(static_cast<char>(SerializedLuaType::TableEnd));
+    }
+
+    void serializeLuaWireValue(std::string& out, const LuaWireValue& value)
+    {
+        if (std::holds_alternative<std::monostate>(value.value))
+            throw std::runtime_error("Can not serialize nil into ActivateResult payload");
+
+        if (const auto* number = std::get_if<double>(&value.value))
+        {
+            out.push_back(static_cast<char>(SerializedLuaType::Number));
+            appendLuaPod<double>(out, *number);
+            return;
+        }
+
+        if (const auto* boolean = std::get_if<bool>(&value.value))
+        {
+            out.push_back(static_cast<char>(SerializedLuaType::Boolean));
+            out.push_back(*boolean ? 1 : 0);
+            return;
+        }
+
+        if (const auto* stringValue = std::get_if<std::string>(&value.value))
+        {
+            appendLuaString(out, *stringValue);
+            return;
+        }
+
+        if (const auto* table = std::get_if<LuaWireTable>(&value.value))
+        {
+            serializeLuaWireTable(out, *table);
+            return;
+        }
+
+        throw std::runtime_error("Unsupported ActivateResult payload value");
+    }
+
+    std::string serializeLuaWireTable(const LuaWireTable& table)
+    {
+        std::string out;
+        out.push_back(static_cast<char>(sLuaFormatVersion));
+        serializeLuaWireTable(out, table);
+        return out;
+    }
+
     std::string encodeClassData(const ESM::Class::CLDTstruct& d)
     {
         std::ostringstream ss;
@@ -84,6 +340,89 @@ namespace
                                  uint32_t refNum)
     {
         return cellId + "|" + refId + "|" + std::to_string(refNum);
+    }
+
+    void appendOrMergeContainerItem(std::vector<mwmp::ContainerItem>& items, const mwmp::ContainerItem& item)
+    {
+        if (item.refId.empty() || item.count <= 0)
+            return;
+
+        auto it = std::find_if(items.begin(), items.end(),
+            [&](const mwmp::ContainerItem& current)
+            {
+                return current.refId == item.refId && current.charge == item.charge;
+            });
+
+        if (it == items.end())
+            items.push_back(item);
+        else
+            it->count += item.count;
+    }
+
+    void normalizeContainerItems(std::vector<mwmp::ContainerItem>& items)
+    {
+        std::vector<mwmp::ContainerItem> normalized;
+        normalized.reserve(items.size());
+
+        for (const auto& item : items)
+            appendOrMergeContainerItem(normalized, item);
+
+        items = std::move(normalized);
+    }
+
+    void applyContainerDelta(std::vector<mwmp::ContainerItem>& items,
+                             const mwmp::ContainerItem& item,
+                             mwmp::ContainerAction action)
+    {
+        if (item.refId.empty() || item.count <= 0)
+            return;
+
+        auto it = std::find_if(items.begin(), items.end(),
+            [&](const mwmp::ContainerItem& current)
+            {
+                return current.refId == item.refId && current.charge == item.charge;
+            });
+
+        if (action == mwmp::ContainerAction::Add)
+        {
+            if (it == items.end())
+                items.push_back(item);
+            else
+                it->count += item.count;
+            return;
+        }
+
+        if (action != mwmp::ContainerAction::Remove)
+            return;
+
+        int remaining = item.count;
+
+        if (it != items.end())
+        {
+            const int removed = std::min(it->count, remaining);
+            it->count -= removed;
+            remaining -= removed;
+            if (it->count <= 0)
+                items.erase(it);
+        }
+
+        for (auto current = items.begin(); remaining > 0 && current != items.end();)
+        {
+            if (current->refId != item.refId)
+            {
+                ++current;
+                continue;
+            }
+
+            const int removed = std::min(current->count, remaining);
+            current->count -= removed;
+            remaining -= removed;
+
+            if (current->count <= 0)
+                current = items.erase(current);
+            else
+                ++current;
+        }
     }
 
     std::string makeCellKey(const mwmp::CellId& cell)
@@ -305,6 +644,7 @@ void MPServer::run()
     {
         mPlayerDb.emplace(mDbPath);
         loadPersistentWorldState();
+        syncLuaAuthorityState();
     }
     catch (const std::exception& e)
     {
@@ -627,7 +967,11 @@ void MPServer::loadPersistentWorldState()
     }
 
     for (const auto& record : mPlayerDb->loadContainerRecords())
-        mWorld.containers[makeContainerKey(record.cellId, record.refId, record.refNum)] = record;
+    {
+        ContainerRecord normalized = record;
+        normalizeContainerItems(normalized.items);
+        mWorld.containers[makeContainerKey(normalized.cellId, normalized.refId, normalized.refNum)] = std::move(normalized);
+    }
 
     for (const auto& entry : mPlayerDb->loadDoorStates())
         mWorld.doorStates[entry.cellId].push_back(entry);
@@ -1435,9 +1779,16 @@ void MPServer::handleObjectPlace(ConnectedClient& c, const uint8_t* data, size_t
 
     auto& objects = mWorld.placedObjects[pkt.object.cellId];
     objects.push_back(pkt.object);
+    mLua.upsertPlacedObject(pkt.object);
 
     if (mPlayerDb)
         mPlayerDb->upsertWorldObject(pkt.object);
+
+    Log(Debug::Info) << "[Server] ObjectPlace accepted: player=" << c.name
+                     << " refId=" << pkt.object.refId
+                     << " mpNum=" << pkt.object.mpNum
+                     << " cell=" << pkt.object.cellId
+                     << " count=" << pkt.object.count;
 
     sendTo(c.conn, pkt.encode());
     broadcastToCell(pkt.object.cellId, pkt.encode(), c.conn);
@@ -1448,6 +1799,8 @@ void MPServer::handleObjectDelete(ConnectedClient& c, const uint8_t* data, size_
 {
     PacketObjectDelete pkt;
     if (!pkt.decode(data, size)) return;
+
+    mLua.removePlacedObject(pkt.mpNum);
 
     auto objectsIt = mWorld.placedObjects.find(pkt.cellId);
     if (objectsIt != mWorld.placedObjects.end())
@@ -1479,6 +1832,7 @@ void MPServer::handleObjectMove(ConnectedClient& c, const uint8_t* data, size_t 
         {
             if (object.mpNum != pkt.mpNum) continue;
             object.position = pkt.position;
+            mLua.upsertPlacedObject(object);
             if (mPlayerDb)
                 mPlayerDb->upsertWorldObject(object);
             break;
@@ -1495,25 +1849,40 @@ void MPServer::handleContainer(ConnectedClient& c, const uint8_t* data, size_t s
     if (!pkt.decode(data, size)) return;
 
     const auto action = static_cast<ContainerAction>(pkt.mAction);
+    if (action != ContainerAction::Set
+        && action != ContainerAction::Add
+        && action != ContainerAction::Remove)
+        return;
+
+    if (pkt.container.cellId.empty() || pkt.container.refId.empty())
+        return;
+
+    if (!cellMatches(c.player.cell, pkt.container.cellId))
+    {
+        Log(Debug::Warning) << "[Server] Rejecting Container from " << c.name
+                            << " due to cell mismatch: player="
+                            << makeCellKey(c.player.cell)
+                            << " packet=" << pkt.container.cellId;
+        return;
+    }
+
     const std::string key = makeContainerKey(pkt.container.cellId, pkt.container.refId, pkt.container.refNum);
     auto& authoritative = mWorld.containers[key];
 
-    if (authoritative.cellId.empty())
-    {
-        authoritative.cellId = pkt.container.cellId;
-        authoritative.refId = pkt.container.refId;
-        authoritative.refNum = pkt.container.refNum;
-        authoritative.mpNum = pkt.container.mpNum;
-    }
-
     if (action == ContainerAction::Set)
     {
+        normalizeContainerItems(pkt.container.items);
+
         if (authoritative.hasAuthority)
         {
             PacketContainer current;
             current.container = authoritative;
             current.mAction = static_cast<uint8_t>(ContainerAction::Set);
             sendTo(c.conn, current.encode());
+            Log(Debug::Info) << "[Server] Container(Set replay): player=" << c.name
+                             << " refId=" << authoritative.refId
+                             << " refNum=" << authoritative.refNum
+                             << " items=" << authoritative.items.size();
             return;
         }
 
@@ -1527,6 +1896,18 @@ void MPServer::handleContainer(ConnectedClient& c, const uint8_t* data, size_t s
         accepted.mAction = static_cast<uint8_t>(ContainerAction::Set);
         sendTo(c.conn, accepted.encode());
         broadcastToCell(authoritative.cellId, accepted.encode(), c.conn);
+        Log(Debug::Info) << "[Server] Container(Set accepted): player=" << c.name
+                         << " refId=" << authoritative.refId
+                         << " refNum=" << authoritative.refNum
+                         << " items=" << authoritative.items.size();
+        return;
+    }
+
+    if (!authoritative.hasAuthority)
+    {
+        Log(Debug::Verbose) << "[Server] Ignoring Container delta before Set from " << c.name
+                            << " refId=" << pkt.container.refId
+                            << " refNum=" << pkt.container.refNum;
         return;
     }
 
@@ -1536,34 +1917,27 @@ void MPServer::handleContainer(ConnectedClient& c, const uint8_t* data, size_t s
         authoritative.cellId = pkt.container.cellId;
         authoritative.refId = pkt.container.refId;
         authoritative.refNum = pkt.container.refNum;
+        authoritative.mpNum = pkt.container.mpNum;
     }
 
+    normalizeContainerItems(pkt.container.items);
     for (const auto& item : pkt.container.items)
-    {
-        auto existing = std::find_if(authoritative.items.begin(), authoritative.items.end(),
-            [&](const ContainerItem& current) {
-                return current.refId == item.refId && current.charge == item.charge;
-            });
+        applyContainerDelta(authoritative.items, item, action);
 
-        if (action == ContainerAction::Add)
-        {
-            if (existing == authoritative.items.end())
-                authoritative.items.push_back(item);
-            else
-                existing->count += item.count;
-        }
-        else if (action == ContainerAction::Remove && existing != authoritative.items.end())
-        {
-            existing->count -= item.count;
-        }
-    }
-
-    authoritative.items.erase(std::remove_if(authoritative.items.begin(), authoritative.items.end(),
-        [](const ContainerItem& item) { return item.count <= 0; }),
-        authoritative.items.end());
+    normalizeContainerItems(authoritative.items);
 
     if (mPlayerDb)
         mPlayerDb->upsertContainerRecord(authoritative);
+
+    const ContainerItem* firstDelta = pkt.container.items.empty() ? nullptr : &pkt.container.items.front();
+    Log(Debug::Info) << "[Server] Container(" << static_cast<int>(action) << "): player=" << c.name
+                     << " refId=" << authoritative.refId
+                     << " refNum=" << authoritative.refNum
+                     << " deltaItems=" << pkt.container.items.size()
+                     << " totalItems=" << authoritative.items.size()
+                     << " firstDeltaRefId=" << (firstDelta ? firstDelta->refId : "")
+                     << " firstDeltaCount=" << (firstDelta ? firstDelta->count : 0)
+                     << " firstDeltaCharge=" << (firstDelta ? firstDelta->charge : -999);
     broadcastToCell(authoritative.cellId, std::vector<uint8_t>(data, data + size), c.conn);
 }
 
@@ -1647,6 +2021,45 @@ void MPServer::handleLuaEvent(ConnectedClient& c, const uint8_t* data, size_t si
                         << " name=" << pkt.eventName
                         << " bytes=" << pkt.eventData.size();
 
+    if (pkt.eventName == "Activate")
+    {
+        std::string error;
+        const std::optional<LuaUtil::BinaryData> resultData = mLua.evaluateImmediateIntent(c.guid, pkt.eventName, pkt.eventData, &error);
+        if (resultData)
+        {
+            mLua.drainOutbound();
+
+            const std::string playerCell = makeCellKey(c.player.cell);
+            if (!playerCell.empty())
+                broadcastLuaEventToCell(playerCell, 0, "ActivateResult", *resultData);
+            else
+                broadcastLuaEvent(0, "ActivateResult", *resultData);
+
+            try
+            {
+                const LuaWireTable result = parseLuaWireTable(*resultData);
+                Log(Debug::Info) << "[Server] Immediate Activate seq=" << getLuaNumberField(result, "seq", 0.0)
+                                 << " by " << c.name
+                                 << " action=" << getLuaStringField(result, "action")
+                                 << " object=" << getLuaStringField(result, "objectId")
+                                 << " recordId=" << getLuaStringField(result, "objectRecordId")
+                                 << " accepted=" << (getLuaBoolField(result, "accepted") ? "true" : "false")
+                                 << " verified=" << (getLuaBoolField(result, "serverVerified") ? "true" : "false")
+                                 << " reason=" << getLuaStringField(result, "reason")
+                                 << " mutation=" << getLuaStringField(result, "mutation");
+            }
+            catch (const std::exception& e)
+            {
+                Log(Debug::Warning) << "[Server] Immediate Activate log parse failed: " << e.what();
+            }
+            return;
+        }
+
+        Log(Debug::Warning) << "[Server] Immediate Activate failed for " << c.name
+                            << ": " << (error.empty() ? "unknown" : error)
+                            << "; falling back to queued Lua event";
+    }
+
     mLua.onLuaEvent(c.guid, pkt.eventName, pkt.eventData);
 }
 
@@ -1679,6 +2092,17 @@ ConnectedClient* MPServer::findClientByGuid(uint32_t guid)
         if (client.guid == guid)
             return &client;
     return nullptr;
+}
+
+bool MPServer::grantPlayerInventoryItem(uint32_t guid, const std::string& refId, int count)
+{
+    ConnectedClient* client = findClientByGuid(guid);
+    return client ? grantInventoryItem(*client, refId, count) : false;
+}
+
+bool MPServer::removePlacedObjectByMpNum(uint32_t mpNum, const std::string& cellId)
+{
+    return removePlacedObjectAuthoritative(mpNum, cellId);
 }
 
 // ---------------------------------------------------------------------------
@@ -1747,6 +2171,91 @@ void MPServer::syncLuaSnapshot()
     }
 
     mLua.syncSnapshot(getUptime(), mWorld.gameHour, players);
+}
+
+// ---------------------------------------------------------------------------
+void MPServer::sendAuthoritativeInventory(ConnectedClient& c)
+{
+    c.player.inventoryChanges.action = BasePlayer::InventoryChanges::Action::Set;
+    PacketPlayerInventory inventory;
+    inventory.setPlayer(&c.player);
+    sendTo(c.conn, inventory.encode());
+}
+
+// ---------------------------------------------------------------------------
+bool MPServer::grantInventoryItem(ConnectedClient& c, const std::string& refId, int count)
+{
+    if (refId.empty() || count <= 0)
+        return false;
+
+    auto& items = c.player.inventoryChanges.items;
+    auto it = std::find_if(items.begin(), items.end(), [&](const Item& item) {
+        return item.refId == refId && item.charge == -1 && item.soul.empty();
+    });
+
+    if (it != items.end())
+    {
+        it->count += count;
+    }
+    else
+    {
+        Item item;
+        item.refId = refId;
+        item.count = count;
+        item.charge = -1;
+        item.enchantmentCharge = -1.f;
+        items.push_back(std::move(item));
+    }
+
+    c.player.inventoryChanges.action = BasePlayer::InventoryChanges::Action::Set;
+
+    if (mPlayerDb && c.dbCharacterId != 0)
+        mPlayerDb->saveCharacterInventory(c.dbCharacterId, c.player.inventoryChanges.items);
+
+    sendAuthoritativeInventory(c);
+    syncLuaSnapshot();
+    return true;
+}
+
+// ---------------------------------------------------------------------------
+bool MPServer::removePlacedObjectAuthoritative(uint32_t mpNum, const std::string& cellId)
+{
+    if (mpNum == 0 || cellId.empty())
+        return false;
+
+    mLua.removePlacedObject(mpNum);
+
+    auto objectsIt = mWorld.placedObjects.find(cellId);
+    if (objectsIt != mWorld.placedObjects.end())
+    {
+        auto& objects = objectsIt->second;
+        objects.erase(std::remove_if(objects.begin(), objects.end(),
+            [&](const PlacedObject& object) { return object.mpNum == mpNum; }),
+            objects.end());
+        if (objects.empty())
+            mWorld.placedObjects.erase(objectsIt);
+    }
+
+    if (mPlayerDb)
+        mPlayerDb->deleteWorldObject(mpNum);
+
+    PacketObjectDelete pkt;
+    pkt.mpNum = mpNum;
+    pkt.cellId = cellId;
+    broadcastToCell(cellId, pkt.encode());
+    return true;
+}
+
+// ---------------------------------------------------------------------------
+void MPServer::syncLuaAuthorityState()
+{
+    std::vector<PlacedObject> placedObjects;
+    for (const auto& [cellId, objects] : mWorld.placedObjects)
+    {
+        placedObjects.insert(placedObjects.end(), objects.begin(), objects.end());
+    }
+
+    mLua.syncPlacedObjects(std::move(placedObjects));
 }
 
 // ---------------------------------------------------------------------------

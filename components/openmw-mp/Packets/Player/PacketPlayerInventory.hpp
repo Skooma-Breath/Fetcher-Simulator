@@ -6,18 +6,20 @@
 namespace mwmp
 {
     // -----------------------------------------------------------------------
-    // PacketPlayerInventory — cosmetic inventory delta.
+    // PacketPlayerInventory — player inventory sync payload.
     //
-    // Allows other clients to see what items a player picks up or drops so
-    // their equipment packet stays consistent with their visible inventory.
-    // The authoritative inventory is stored server-side in SQLite; this
-    // packet is a visual aid only — clients do NOT trust it for game logic.
+    // Clients use this to keep remote players' visible inventory in sync. The
+    // server also folds Set/Add/Remove updates into its authoritative per-
+    // player inventory mirror before persisting to SQLite and exposing the
+    // merged snapshot to server Lua. Clients still do NOT trust remote
+    // inventory packets for game logic.
     //
     // Action::Set   → replace remote NPC ContainerStore entirely
     // Action::Add   → add items to remote NPC ContainerStore
     // Action::Remove→ remove items from remote NPC ContainerStore
     //
-    // Server: pure relay to all clients in the same cell.
+    // Server: merge into authoritative inventory state, then relay to clients
+    // in the same cell.
     // -----------------------------------------------------------------------
     class PacketPlayerInventory : public PlayerPacket
     {

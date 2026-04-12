@@ -1,5 +1,7 @@
 #include "container.hpp"
 
+#include <cstdio>
+
 #include <MyGUI_Button.h>
 #include <MyGUI_InputManager.h>
 
@@ -17,6 +19,8 @@
 #include "../mwmechanics/aipackage.hpp"
 #include "../mwmechanics/creaturestats.hpp"
 #include "../mwmechanics/summoning.hpp"
+#include "../mwmp/Main.hpp"
+#include "../mwmp/sync/WorldObjectSync.hpp"
 
 #include "../mwscript/interpretercontext.hpp"
 
@@ -31,8 +35,29 @@
 #include "sortfilteritemmodel.hpp"
 #include "tooltips.hpp"
 
+#include "../mwworld/cellstore.hpp"
+
 namespace MWGui
 {
+    namespace
+    {
+        std::string makeCellId(const MWWorld::Ptr& ptr)
+        {
+            const MWWorld::CellStore* store = ptr.getCell();
+            if (!store || !store->getCell())
+                return {};
+
+            const MWWorld::Cell* cell = store->getCell();
+            if (cell->isExterior())
+            {
+                char buf[32];
+                std::snprintf(buf, sizeof(buf), "EXT:%d,%d", cell->getGridX(), cell->getGridY());
+                return buf;
+            }
+
+            return std::string(cell->getNameId());
+        }
+    }
 
     ContainerWindow::ContainerWindow(DragAndDrop& dragAndDrop, ItemTransfer& itemTransfer)
         : WindowBase("openmw_container_window.layout")
@@ -177,6 +202,12 @@ namespace MWGui
         else
         {
             model = std::make_unique<ContainerItemModel>(container);
+
+            mwmp::Main::get().getWorldObjectSync().onLocalContainerOpened(
+                makeCellId(container),
+                container.getCellRef().getRefId().serializeText(),
+                container.getCellRef().getRefNum().mIndex,
+                mwmp::Main::get().getWorldObjectSync().getMpNumForObject(container));
         }
 
         mDisposeCorpseButton->setVisible(loot);
@@ -256,6 +287,9 @@ namespace MWGui
 
         mModel->update();
 
+        if (auto* containerModel = dynamic_cast<ContainerItemModel*>(mModel))
+            containerModel->beginSyncBatch(mwmp::ContainerAction::Remove);
+
         for (size_t i = 0; i < mModel->getItemCount(); ++i)
         {
             if (i == 0)
@@ -273,6 +307,9 @@ namespace MWGui
 
             mModel->moveItem(item, item.mCount, playerModel);
         }
+
+        if (auto* containerModel = dynamic_cast<ContainerItemModel*>(mModel))
+            containerModel->endSyncBatch();
 
         MWBase::Environment::get().getWindowManager()->removeGuiMode(GM_Container);
     }

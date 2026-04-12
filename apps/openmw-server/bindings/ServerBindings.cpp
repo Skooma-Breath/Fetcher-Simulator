@@ -6,11 +6,39 @@
 #include <sol/sol.hpp>
 #include <components/debug/debuglog.hpp>
 
+#include <tuple>
+
 #include "PlayerBindings.hpp"
 #include "../LuaServerContext.hpp"
 
 namespace mwmp
 {
+namespace
+{
+    sol::table makePositionTable(sol::state_view lua, const Position& position)
+    {
+        sol::table table(lua, sol::create);
+        table["x"] = position.pos[0];
+        table["y"] = position.pos[1];
+        table["z"] = position.pos[2];
+        table["rx"] = position.rot[0];
+        table["ry"] = position.rot[1];
+        table["rz"] = position.rot[2];
+        return LuaUtil::makeReadOnly(table);
+    }
+
+    sol::object makePlacedObjectValue(sol::this_state thisState, const PlacedObject& object)
+    {
+        sol::state_view lua(thisState);
+        sol::table table(lua, sol::create);
+        table["mpNum"] = object.mpNum;
+        table["refId"] = object.refId;
+        table["count"] = object.count;
+        table["cell"] = object.cellId;
+        table["position"] = makePositionTable(lua, object.position);
+        return sol::make_object(thisState, LuaUtil::makeReadOnly(table));
+    }
+}
 
 sol::table initMpPackage(LuaUtil::LuaView& view, LuaServerContext* context, LuaUtil::LuaStorage* storage)
 {
@@ -68,6 +96,46 @@ sol::table initMpPackage(LuaUtil::LuaView& view, LuaServerContext* context, LuaU
     mp.set_function("getPlayerCount", [context]() -> int
     {
         return context ? context->getPlayerCount() : 0;
+    });
+
+    mp.set_function("getObjectByMpNum", [context](uint32_t mpNum, sol::this_state ts) -> sol::object
+    {
+        if (!context)
+            return sol::make_object(ts, sol::nil);
+
+        auto object = context->getPlacedObject(mpNum);
+        if (!object)
+            return sol::make_object(ts, sol::nil);
+
+        return makePlacedObjectValue(ts, *object);
+    });
+
+    mp.set_function("grantInventoryItem", [context](uint32_t guid, const std::string& refId, int count) -> bool
+    {
+        if (!context || guid == 0 || refId.empty() || count <= 0)
+            return false;
+
+        context->queueGrantInventoryItem(guid, refId, count);
+        return true;
+    });
+
+    mp.set_function("removePlacedObject", [context](uint32_t mpNum, const std::string& cellId) -> bool
+    {
+        if (!context || mpNum == 0 || cellId.empty())
+            return false;
+
+        context->queueRemovePlacedObject(mpNum, cellId);
+        return true;
+    });
+
+    mp.set_function("applyOps", [context](const sol::table& ops) -> std::tuple<bool, std::string>
+    {
+        if (!context)
+            return { false, "context_missing" };
+
+        std::string error;
+        const bool ok = context->queueIntentOps(ops, &error);
+        return { ok, error };
     });
 
     // mp.getPlayers() — returns a table of all ScriptPlayer usertypes.
