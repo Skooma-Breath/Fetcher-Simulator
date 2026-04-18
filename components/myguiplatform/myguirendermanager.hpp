@@ -72,7 +72,9 @@ namespace MyGUIPlatform
             return static_cast<RenderManager*>(MyGUI::RenderManager::getInstancePtr());
         }
 
+#if MYGUI_VERSION >= MYGUI_DEFINE_VERSION(3, 4, 3)
         bool checkTexture(MyGUI::ITexture* texture) override;
+#endif
 
         /** @see RenderManager::getViewSize */
         const MyGUI::IntSize& getViewSize() const override { return mViewSize; }

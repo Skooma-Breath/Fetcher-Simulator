@@ -47,9 +47,14 @@ namespace MyGUIPlatform
             @param name Resource name.
             @return Return full path to specified data.
         */
+#if MYGUI_VERSION >= MYGUI_DEFINE_VERSION(3, 4, 2)
         std::string getDataPath(const std::string& name) const override;
+#else
+        const std::string& getDataPath(const std::string& name) const override;
+#endif
 
     private:
+        mutable std::string mDataPathCache;
         VFS::Path::Normalized mResourcePath;
 
         const VFS::Manager* mVfs;

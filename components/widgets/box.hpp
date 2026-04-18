@@ -53,7 +53,11 @@ namespace Gui
         void setCaption(const MyGUI::UString& value) override;
 
     protected:
+#if MYGUI_VERSION >= MYGUI_DEFINE_VERSION(3, 4, 2)
         void setPropertyOverride(std::string_view key, std::string_view value) override;
+#else
+        void setPropertyOverride(const std::string& key, const std::string& value) override;
+#endif
         std::string mFontSize;
     };
 
@@ -68,7 +72,11 @@ namespace Gui
         void initialiseOverride() override;
 
     protected:
+#if MYGUI_VERSION >= MYGUI_DEFINE_VERSION(3, 4, 2)
         void setPropertyOverride(std::string_view key, std::string_view value) override;
+#else
+        void setPropertyOverride(const std::string& key, const std::string& value) override;
+#endif
         int getWidth();
         std::string mFontSize;
         bool mShrink = false;
@@ -85,7 +93,11 @@ namespace Gui
         void setCaption(const MyGUI::UString& value) override;
 
     protected:
+#if MYGUI_VERSION >= MYGUI_DEFINE_VERSION(3, 4, 2)
         void setPropertyOverride(std::string_view key, std::string_view value) override;
+#else
+        void setPropertyOverride(const std::string& key, const std::string& value) override;
+#endif
         std::string mFontSize;
     };
 
@@ -137,7 +149,11 @@ namespace Gui
         void align() override;
         MyGUI::IntSize getRequestedSize() override;
 
+#if MYGUI_VERSION >= MYGUI_DEFINE_VERSION(3, 4, 2)
         void setPropertyOverride(std::string_view key, std::string_view value) override;
+#else
+        void setPropertyOverride(const std::string& key, const std::string& value) override;
+#endif
 
         void onWidgetCreated(MyGUI::Widget* widget) override;
     };
@@ -156,7 +172,11 @@ namespace Gui
         void align() override;
         MyGUI::IntSize getRequestedSize() override;
 
+#if MYGUI_VERSION >= MYGUI_DEFINE_VERSION(3, 4, 2)
         void setPropertyOverride(std::string_view key, std::string_view value) override;
+#else
+        void setPropertyOverride(const std::string& key, const std::string& value) override;
+#endif
 
         void onWidgetCreated(MyGUI::Widget* widget) override;
     };

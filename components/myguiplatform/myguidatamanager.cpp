@@ -66,6 +66,7 @@ namespace MyGUIPlatform
         throw std::runtime_error("DataManager::getDataListNames is not implemented - VFS is used");
     }
 
+#if MYGUI_VERSION >= MYGUI_DEFINE_VERSION(3, 4, 2)
     std::string DataManager::getDataPath(const std::string& name) const
     {
         VFS::Path::Normalized path(mResourcePath);
@@ -75,5 +76,17 @@ namespace MyGUIPlatform
 
         return path;
     }
+#else
+    const std::string& DataManager::getDataPath(const std::string& name) const
+    {
+        VFS::Path::Normalized path(mResourcePath);
+        path /= name;
+        if (!mVfs->exists(path))
+            return mDataPathCache = "";
+
+        mDataPathCache = path.value();
+        return mDataPathCache;
+    }
+#endif
 
 }

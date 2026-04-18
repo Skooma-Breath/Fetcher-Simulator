@@ -1,0 +1,23 @@
+#!/bin/bash
+# build-server.sh - Automated headless server build for Linux ARM64
+mkdir -p build-linux
+cd build-linux
+cmake .. \
+    -GNinja \
+    -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+    -DOPENMW_USE_SYSTEM_SQLITE3=ON \
+    -DOPENMW_USE_SYSTEM_RECASTNAVIGATION=OFF \
+    -DBUILD_OPENMW=OFF \
+    -DBUILD_LAUNCHER=OFF \
+    -DBUILD_WIZARD=OFF \
+    -DBUILD_MWINIIMPORTER=OFF \
+    -DBUILD_ESSIMPORTER=OFF \
+    -DBUILD_BSATOOL=OFF \
+    -DBUILD_ESMTOOL=OFF \
+    -DBUILD_NIFTEST=OFF \
+    -DBUILD_OPENCS=OFF \
+    -DBUILD_NAVMESHTOOL=OFF \
+    -DBUILD_BULLETOBJECTTOOL=OFF \
+    -DBUILD_DEDICATED_SERVER=ON \
+    -DBUILD_MULTIPLAYER=ON
+ninja openmw-server

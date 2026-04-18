@@ -15,8 +15,10 @@ namespace LuaUi
     {
         for (auto& [w, _] : mActionWidgets)
         {
+#if MYGUI_VERSION >= MYGUI_DEFINE_VERSION(3, 4, 2)
             w->eventMouseButtonPressed.clear();
             w->eventMouseDrag.clear();
+#endif
         }
         mActionWidgets.clear();
 

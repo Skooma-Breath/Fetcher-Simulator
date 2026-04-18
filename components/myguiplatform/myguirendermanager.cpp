@@ -545,12 +545,12 @@ namespace MyGUIPlatform
         return &item->second;
     }
 
-    bool RenderManager::checkTexture(MyGUI::ITexture* /*texture*/)
+#if MYGUI_VERSION >= MYGUI_DEFINE_VERSION(3, 4, 3)
+    bool RenderManager::checkTexture(MyGUI::ITexture* _texture)
     {
-        // We support external textures that aren't registered via this manager, so can't implement this method
-        // sensibly.
-        return true;
+        return mTextures.find(_texture->getName()) != mTextures.end();
     }
+#endif
 
     void RenderManager::registerShader(const std::string& /*shaderName*/, const std::string& /*vertexProgramFile*/,
         const std::string& /*fragmentProgramFile*/)

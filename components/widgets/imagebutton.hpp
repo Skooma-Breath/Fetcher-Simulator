@@ -32,7 +32,11 @@ namespace Gui
         static bool sDefaultNeedKeyFocus;
 
     protected:
+#if MYGUI_VERSION >= MYGUI_DEFINE_VERSION(3, 4, 2)
         void setPropertyOverride(std::string_view key, std::string_view value) override;
+#else
+        void setPropertyOverride(const std::string& key, const std::string& value) override;
+#endif
         void onMouseLostFocus(MyGUI::Widget* newWidget) override;
         void onMouseSetFocus(MyGUI::Widget* oldWidget) override;
         void onMouseButtonPressed(int left, int top, MyGUI::MouseButton id) override;

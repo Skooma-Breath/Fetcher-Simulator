@@ -40,7 +40,11 @@ namespace Gui
         notifySizeChange(this);
     }
 
+#if MYGUI_VERSION >= MYGUI_DEFINE_VERSION(3, 4, 2)
     void AutoSizedTextBox::setPropertyOverride(std::string_view key, std::string_view value)
+#else
+    void AutoSizedTextBox::setPropertyOverride(const std::string& key, const std::string& value)
+#endif
     {
         if (key == "ExpandDirection")
         {
@@ -103,7 +107,11 @@ namespace Gui
         setEditStatic(true);
     }
 
+#if MYGUI_VERSION >= MYGUI_DEFINE_VERSION(3, 4, 2)
     void AutoSizedEditBox::setPropertyOverride(std::string_view key, std::string_view value)
+#else
+    void AutoSizedEditBox::setPropertyOverride(const std::string& key, const std::string& value)
+#endif
     {
         if (key == "ExpandDirection")
         {
@@ -111,7 +119,7 @@ namespace Gui
         }
         else if (key == "Shrink")
         {
-            mShrink = MyGUI::utility::parseValue<bool>(value);
+            mShrink = MyGUI::utility::parseValue<bool>(std::string(value));
         }
         else
         {
@@ -136,7 +144,11 @@ namespace Gui
         notifySizeChange(this);
     }
 
+#if MYGUI_VERSION >= MYGUI_DEFINE_VERSION(3, 4, 2)
     void AutoSizedButton::setPropertyOverride(std::string_view key, std::string_view value)
+#else
+    void AutoSizedButton::setPropertyOverride(const std::string& key, const std::string& value)
+#endif
     {
         if (key == "ExpandDirection")
         {
@@ -163,11 +175,11 @@ namespace Gui
     bool Box::_setPropertyImpl(std::string_view key, std::string_view value)
     {
         if (key == "Spacing")
-            mSpacing = MyGUI::utility::parseValue<int>(value);
+            mSpacing = MyGUI::utility::parseValue<int>(std::string(value));
         else if (key == "Padding")
-            mPadding = MyGUI::utility::parseValue<int>(value);
+            mPadding = MyGUI::utility::parseValue<int>(std::string(value));
         else if (key == "AutoResize")
-            mAutoResize = MyGUI::utility::parseValue<bool>(value);
+            mAutoResize = MyGUI::utility::parseValue<bool>(std::string(value));
         else
             return false;
 
@@ -260,7 +272,11 @@ namespace Gui
         }
     }
 
+#if MYGUI_VERSION >= MYGUI_DEFINE_VERSION(3, 4, 2)
     void HBox::setPropertyOverride(std::string_view key, std::string_view value)
+#else
+    void HBox::setPropertyOverride(const std::string& key, const std::string& value)
+#endif
     {
         if (!Box::_setPropertyImpl(key, value))
             MyGUI::Widget::setPropertyOverride(key, value);
@@ -415,7 +431,11 @@ namespace Gui
         }
     }
 
+#if MYGUI_VERSION >= MYGUI_DEFINE_VERSION(3, 4, 2)
     void VBox::setPropertyOverride(std::string_view key, std::string_view value)
+#else
+    void VBox::setPropertyOverride(const std::string& key, const std::string& value)
+#endif
     {
         if (!Box::_setPropertyImpl(key, value))
             MyGUI::Widget::setPropertyOverride(key, value);

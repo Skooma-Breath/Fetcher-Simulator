@@ -30,8 +30,13 @@ namespace MyGUIPlatform
         void close() override;
         void flush() override;
 
+#if MYGUI_VERSION >= MYGUI_DEFINE_VERSION(3, 4, 2)
         void log(std::string_view section, MyGUI::LogLevel level, const struct tm* time, std::string_view message,
             std::string_view file, int line) override;
+#else
+        void log(const std::string& section, MyGUI::LogLevel level, const struct tm* time, const std::string& message,
+            const char* file, int line) override;
+#endif
 
     private:
         std::ofstream mStream;

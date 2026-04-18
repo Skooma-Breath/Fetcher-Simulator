@@ -76,6 +76,7 @@ namespace LuaUi
     }
     void WidgetExtension::clearEvents(MyGUI::Widget* w)
     {
+#if MYGUI_VERSION >= MYGUI_DEFINE_VERSION(3, 4, 2)
         w->eventKeyButtonPressed.clear();
         w->eventKeyButtonReleased.clear();
         w->eventMouseButtonClick.clear();
@@ -89,6 +90,7 @@ namespace LuaUi
         w->eventMouseLostFocus.clear();
         w->eventKeySetFocus.clear();
         w->eventKeyLostFocus.clear();
+#endif
     }
 
     void WidgetExtension::reset()

@@ -89,3 +89,9 @@ venv/
 ## operating system files
 .DS_Store
 Thumbs.db
+
+## Local scratch and metadata
+/phase_8.md
+/DEPLOYMENT_README.md
+/.serena/
+

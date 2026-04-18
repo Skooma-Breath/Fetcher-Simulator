@@ -586,8 +586,6 @@ endif()
 
 include_directories(${BULLET_INCLUDE_DIRS} ${CMAKE_CURRENT_BINARY_DIR})
 
-find_package(SQLite3 REQUIRED)
-
 add_library(components STATIC ${COMPONENT_FILES})
 
 if (ANDROID)

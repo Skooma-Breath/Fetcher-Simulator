@@ -55,6 +55,10 @@ target_link_libraries(openmw-server
     ${LUA_LIBRARIES}
 )
 
+if (UNIX)
+    target_link_libraries(openmw-server crypt)
+endif()
+
 target_compile_features(openmw-server PRIVATE cxx_std_20)
 
 install(TARGETS openmw-server RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})

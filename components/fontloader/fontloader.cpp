@@ -259,11 +259,11 @@ namespace Gui
         loadFont(monoFontId, "DejaVuLGCSansMono");
 
         // Use our TrueType fonts as a fallback.
-        if (!MyGUI::ResourceManager::getInstance().isExist(defaultFontId.mValue)
+        if (!MyGUI::ResourceManager::getInstance().isExist(std::string(defaultFontId.mValue))
             && !Misc::StringUtils::ciEqual(defaultFont, "MysticCards"))
             loadFont(defaultFontId, "MysticCards");
 
-        if (!MyGUI::ResourceManager::getInstance().isExist(scrollFontId.mValue)
+        if (!MyGUI::ResourceManager::getInstance().isExist(std::string(scrollFontId.mValue))
             && !Misc::StringUtils::ciEqual(scrollFont, "DemonicLetters"))
             loadFont(scrollFontId, "DemonicLetters");
     }
@@ -366,7 +366,7 @@ namespace Gui
         MyGUI::ResourceTrueTypeFont* font = static_cast<MyGUI::ResourceTrueTypeFont*>(
             MyGUI::FactoryManager::getInstance().createObject("Resource", "ResourceTrueTypeFont"));
         font->deserialization(resourceNode.current(), MyGUI::Version(3, 2, 0));
-        font->setResourceName(fontId.mValue);
+        font->setResourceName(std::string(fontId.mValue));
         MyGUI::ResourceManager::getInstance().addResource(font);
 
         resolutionNode->setAttribute(
@@ -699,6 +699,7 @@ namespace Gui
         MyGUI::ResourceManager::getInstance().addResource(bookFont);
     }
 
+#if MYGUI_VERSION >= MYGUI_DEFINE_VERSION(3, 4, 2)
     void FontLoader::overrideLineHeight(MyGUI::xml::ElementPtr node, std::string_view file, MyGUI::Version version)
     {
         // We should adjust line height for MyGUI widgets depending on font size
@@ -726,6 +727,35 @@ namespace Gui
 
         MyGUI::ResourceManager::getInstance().loadFromXmlNode(node, file, version);
     }
+#else
+    void FontLoader::overrideLineHeight(MyGUI::xml::ElementPtr node, const std::string& file, MyGUI::Version version)
+    {
+        // We should adjust line height for MyGUI widgets depending on font size
+        MyGUI::xml::ElementEnumerator resourceNode = node->getElementEnumerator();
+        while (resourceNode.next("Resource"))
+        {
+            auto type = resourceNode->findAttribute("type");
+
+            if (Misc::StringUtils::ciEqual(type, "ResourceLayout"))
+            {
+                MyGUI::xml::ElementEnumerator resourceRootNode = resourceNode->getElementEnumerator();
+                while (resourceRootNode.next("Widget"))
+                {
+                    if (resourceRootNode->findAttribute("name") != "Root")
+                        continue;
+
+                    MyGUI::xml::ElementPtr heightNode = resourceRootNode->createChild("UserString");
+                    heightNode->addAttribute("key", "HeightLine");
+                    heightNode->addAttribute("value", std::to_string(Settings::gui().mFontSize + 2));
+
+                    break;
+                }
+            }
+        }
+
+        MyGUI::ResourceManager::getInstance().loadFromXmlNode(node, file, version);
+    }
+#endif
 
     std::string_view FontLoader::getFontForFace(std::string_view face)
     {
