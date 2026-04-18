@@ -750,12 +750,23 @@ namespace MWClass
         if (!attacker.isEmpty() && attacker.getClass().isActor() && !stats.getAiSequence().isInCombat(attacker))
         {
             stats.setAttacked(true);
-            bool complain = sourceType == MWMechanics::DamageSourceType::Melee;
-            bool supportFriendlyFire = sourceType != MWMechanics::DamageSourceType::Ranged;
-            if (supportFriendlyFire && MWMechanics::friendlyHit(attacker, ptr, complain))
-                setOnPcHitMe = false;
-            else
-                setOnPcHitMe = MWBase::Environment::get().getMechanicsManager()->actorAttacked(ptr, attacker);
+#ifdef BUILD_MULTIPLAYER
+            // Remote-player ghosts must not enter AI combat with the attacking NPC.
+            // actorAttacked() makes the ghost's CharacterController draw its weapon and
+            // fight back, causing weapon draw/sheath flicker on every NPC hit.
+            // The NPC's AI already targets the ghost; actorAttacked is not needed.
+            if (!targetIsGhost)
+            {
+#endif
+                bool complain = sourceType == MWMechanics::DamageSourceType::Melee;
+                bool supportFriendlyFire = sourceType != MWMechanics::DamageSourceType::Ranged;
+                if (supportFriendlyFire && MWMechanics::friendlyHit(attacker, ptr, complain))
+                    setOnPcHitMe = false;
+                else
+                    setOnPcHitMe = MWBase::Environment::get().getMechanicsManager()->actorAttacked(ptr, attacker);
+#ifdef BUILD_MULTIPLAYER
+            }
+#endif
         }
 
         // Attacker and target store each other as hitattemptactor if they have no one stored yet
@@ -799,6 +810,13 @@ namespace MWClass
         bool hasDamage = false;
         bool hasHealthDamage = false;
         float healthDamage = 0.f;
+        float fatigueDamage = 0.f;
+        bool targetIsPuppetNpc = false;
+#ifdef BUILD_MULTIPLAYER
+        if (auto* baseNode = ptr.getRefData().getBaseNode())
+            baseNode->getUserValue("mp_remote_actor", targetIsPuppetNpc);
+#endif
+
         for (auto& [stat, damage] : damages)
         {
             if (damage < 0.001f)
@@ -809,16 +827,29 @@ namespace MWClass
             {
                 hasHealthDamage = true;
                 healthDamage = damage;
-                MWMechanics::DynamicStat<float> health(getCreatureStats(ptr).getHealth());
-                health.setCurrent(health.getCurrent() - damage);
-                stats.setHealth(health);
+#ifdef BUILD_MULTIPLAYER
+                // Do NOT apply health damage to remote-player ghosts locally.
+                // Ghost health is driven solely by position/stats sync from the victim client.
+                // Health damage is forwarded to the victim via sendActorNpcPlayerHit below,
+                // where the victim's client applies it. Applying it here too causes the ghost
+                // to die, get resurrected to 1 HP, die again — an endless isDead=1 spam loop.
+                if (!targetIsGhost && !targetIsPuppetNpc)
+                {
+#endif
+                    MWMechanics::DynamicStat<float> health(getCreatureStats(ptr).getHealth());
+                    health.setCurrent(health.getCurrent() - damage);
+                    stats.setHealth(health);
+#ifdef BUILD_MULTIPLAYER
+                }
+#endif
             }
             else if (stat == "fatigue")
             {
+                fatigueDamage = damage;
                 // Remote-player ghosts should only enter knockout from synced owner
                 // AnimFlags, not from local fatigue damage resolution on the
                 // observing client.
-                if (!targetIsGhost)
+                if (!targetIsGhost && !targetIsPuppetNpc)
                 {
                     MWMechanics::DynamicStat<float> fatigue(getCreatureStats(ptr).getFatigue());
                     fatigue.setCurrent(fatigue.getCurrent() - damage, true);
@@ -834,13 +865,46 @@ namespace MWClass
         }
 
 #ifdef BUILD_MULTIPLAYER
+        const float forwardedDamage = hasHealthDamage ? healthDamage : fatigueDamage;
+        if (targetIsGhost && forwardedDamage > 0.f
+            && attacker != MWMechanics::getPlayer()
+            && mwmp::Main::isInitialised())
+        {
+            // NPC (not local player) attacked a remote player proxy.
+            // Forward the damage to the actual player's client.
+            int ghostGuid = 0;
+            if (auto* baseNode = ptr.getRefData().getBaseNode())
+                baseNode->getUserValue("mp_player_guid", ghostGuid);
+            if (ghostGuid > 0)
+            {
+                int attackType = 0;
+                switch (sourceType)
+                {
+                    case MWMechanics::DamageSourceType::Magical:
+                        attackType = 1;
+                        break;
+                    case MWMechanics::DamageSourceType::Ranged:
+                        attackType = 2;
+                        break;
+                    case MWMechanics::DamageSourceType::Melee:
+                    case MWMechanics::DamageSourceType::Unspecified:
+                    default:
+                        attackType = 0;
+                        break;
+                }
+
+                mwmp::Main::get().sendActorNpcPlayerHit(
+                    static_cast<uint32_t>(ghostGuid), attacker, forwardedDamage, hasHealthDamage, stats.isDead(),
+                    attackType);
+            }
+        }
         if (targetIsGhost && stats.isDead())
         {
             if (MWBase::MechanicsManager* mechanics = MWBase::Environment::get().getMechanicsManager())
                 mechanics->resurrect(ptr);
 
             MWMechanics::DynamicStat<float> health = stats.getHealth();
-            health.setCurrent(std::max(1.f, std::min(health.getBase(), 1.f)));
+            health.setCurrent(health.getBase());
             stats.setHealth(health);
         }
 #endif
@@ -880,7 +944,7 @@ namespace MWClass
             // AnimFlags. Letting local melee resolution also choose a recovery or
             // knockdown state makes the ghost replay one-shot hit anims until the
             // authoritative owner finally stands up.
-            if (!targetIsGhost)
+            if (!targetIsGhost && !targetIsPuppetNpc)
             {
                 if (useAuthoritativeKnock)
                 {

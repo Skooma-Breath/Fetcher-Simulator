@@ -425,6 +425,11 @@ namespace MWClass
             stats.setLastHitObject(object);
 
         const bool targetIsGhost = stats.getMovementFlag(MWMechanics::CreatureStats::Flag_NetworkPlayerNpc);
+        bool targetIsPuppetNpc = false;
+#ifdef BUILD_MULTIPLAYER
+        if (auto* baseNode = ptr.getRefData().getBaseNode())
+            baseNode->getUserValue("mp_remote_actor", targetIsPuppetNpc);
+#endif
         bool hasDamage = false;
         bool hasHealthDamage = false;
         float healthDamage = 0.f;
@@ -438,16 +443,19 @@ namespace MWClass
             {
                 hasHealthDamage = true;
                 healthDamage = damage;
-                MWMechanics::DynamicStat<float> health(getCreatureStats(ptr).getHealth());
-                health.setCurrent(health.getCurrent() - damage);
-                stats.setHealth(health);
+                if (!targetIsPuppetNpc)
+                {
+                    MWMechanics::DynamicStat<float> health(getCreatureStats(ptr).getHealth());
+                    health.setCurrent(health.getCurrent() - damage);
+                    stats.setHealth(health);
+                }
             }
             else if (stat == "fatigue")
             {
                 // Remote-player ghosts should only enter knockout from synced owner
                 // AnimFlags, not from local fatigue damage resolution on the
                 // observing client.
-                if (!targetIsGhost)
+                if (!targetIsGhost && !targetIsPuppetNpc)
                 {
                     MWMechanics::DynamicStat<float> fatigue(getCreatureStats(ptr).getFatigue());
                     fatigue.setCurrent(fatigue.getCurrent() - damage, true);
@@ -497,7 +505,7 @@ namespace MWClass
                         useAuthoritativeKnock = baseNode->getUserValue("mp_attack_knocked", authoritativeKnock);
                 }
 #endif
-                if (!targetIsGhost)
+                if (!targetIsGhost && !targetIsPuppetNpc)
                 {
                     if (useAuthoritativeKnock)
                     {

@@ -16,6 +16,7 @@
 #include <steam/isteamnetworkingutils.h>
 #include <steam/steamnetworkingsockets.h>
 
+#include <components/openmw-mp/Base/BaseActor.hpp>
 #include <components/openmw-mp/Base/BaseObject.hpp>
 #include <components/openmw-mp/Base/BasePlayer.hpp>
 #include <components/openmw-mp/NetworkMessages.hpp>
@@ -184,6 +185,18 @@ private:
     void handleContainer        (ConnectedClient& c, const uint8_t* data, size_t size);
     void handleDoorState        (ConnectedClient& c, const uint8_t* data, size_t size);
     void handleWeather          (ConnectedClient& c, const uint8_t* data, size_t size);
+    void handleActorList        (ConnectedClient& c, const uint8_t* data, size_t size);
+    void handleActorPosition    (ConnectedClient& c, const uint8_t* data, size_t size);
+    void handleActorAnimFlags   (ConnectedClient& c, const uint8_t* data, size_t size);
+    void handleActorAnimPlay    (ConnectedClient& c, const uint8_t* data, size_t size);
+    void handleActorAttack      (ConnectedClient& c, const uint8_t* data, size_t size);
+    void handleActorCast        (ConnectedClient& c, const uint8_t* data, size_t size);
+    void handleActorDeath       (ConnectedClient& c, const uint8_t* data, size_t size);
+    void handleActorEquipment   (ConnectedClient& c, const uint8_t* data, size_t size);
+    void handleActorStatsDynamic(ConnectedClient& c, const uint8_t* data, size_t size);
+    void handleActorAI          (ConnectedClient& c, const uint8_t* data, size_t size);
+    void handleActorCombatRequest(ConnectedClient& c, const uint8_t* data, size_t size);
+
 
     // ── Broadcast helpers ─────────────────────────────────────────────────
     void broadcastToAll(const std::vector<uint8_t>& data,
@@ -208,6 +221,24 @@ private:
     void sendAuthoritativeInventory(ConnectedClient& c);
     bool grantInventoryItem(ConnectedClient& c, const std::string& refId, int count);
     bool removePlacedObjectAuthoritative(uint32_t mpNum, const std::string& cellId);
+    void refreshActorAuthorityForCell(const std::string& cellId, uint32_t preferredGuid = 0);
+    void sendActorAuthorityToClient(HSteamNetConnection conn, const std::string& cellId);
+    void sendActorStateToClient(HSteamNetConnection conn, const std::string& cellId);
+    bool validateActorUpdate(const ConnectedClient& c, const ActorList& actorList, const char* packetName);
+
+    struct ActorRegistryRecord
+    {
+        BaseActor actor;
+        uint64_t lastSnapshotTime = 0;
+    };
+
+    struct CellActorState
+    {
+        uint32_t authorityGuid = 0;
+        uint32_t authorityGeneration = 0;
+        uint32_t nextSnapshotSequence = 1;
+        std::unordered_map<std::string, ActorRegistryRecord> actors;
+    };
 
     // ── State ─────────────────────────────────────────────────────────────
     ISteamNetworkingSockets* mInterface    = nullptr;
@@ -241,6 +272,7 @@ private:
         std::map<std::string, std::vector<mwmp::DoorEntry>> doorStates;
         std::map<std::string, std::vector<mwmp::PlacedObject>> placedObjects;
         std::unordered_map<std::string, mwmp::ContainerRecord> containers;
+        std::unordered_map<std::string, CellActorState> actorCells;
         uint32_t nextObjectMpNum = 1;
 
         // Weather — reported by the host (guid 1) and relayed to others.

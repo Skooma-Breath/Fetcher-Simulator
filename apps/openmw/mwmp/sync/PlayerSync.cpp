@@ -996,6 +996,10 @@ void PlayerSync::sendAttack()
     PacketPlayerAttack pkt;
     pkt.setPlayer(&mLocal);
     mClient.sendReliable(pkt.encode(mSeqCounter++));
+
+    mLocal.attack.hit = false;
+    mLocal.attack.block = false;
+    mLocal.attack.miss = false;
 }
 
 void PlayerSync::notifyLocalHit(const MWWorld::Ptr& victim, float damage, bool healthDamage, bool knocked,
@@ -1029,6 +1033,9 @@ void PlayerSync::notifyLocalHit(const MWWorld::Ptr& victim, float damage, bool h
     mLocal.attack.hitPos[0] = hitPos.x();
     mLocal.attack.hitPos[1] = hitPos.y();
     mLocal.attack.hitPos[2] = hitPos.z();
+
+    if (mLocal.attack.targetMpNum == 0 && Main::isInitialised())
+        Main::get().sendActorCombatRequest(victim, damage, healthDamage, knocked, hitPos, attackType, attackStrength);
 
     PacketPlayerAttack pkt;
     pkt.setPlayer(&mLocal);
@@ -1112,6 +1119,22 @@ void PlayerSync::respawnLocally(const MWWorld::Ptr& player)
     stats.setHitRecovery(false);
     stats.setAttackingOrSpell(false);
     stats.setDrawState(MWMechanics::DrawState::Nothing);
+
+    // Clear bounty so guards at the respawn location do not immediately
+    // spam "you violated the law" dialogue.  In single-player death simply
+    // reloads a save; in MP the player keeps playing, so we forgive crimes
+    // on death just like paying at a guard would.
+    if (player.getClass().isNpc())
+    {
+        player.getClass().getNpcStats(player).setBounty(0);
+        // Record the crime-id threshold so NPCs restore their disposition
+        // (same mechanism as OpPayFineThief / vanilla "pay bounty" path).
+        world->getPlayer().recordCrimeId();
+        // Stop any NPCs that are still in combat with the player from
+        // the pre-death fight — otherwise they resume attacking on sight.
+        if (MWBase::MechanicsManager* mm = MWBase::Environment::get().getMechanicsManager())
+            mm->stopCombat(player);
+    }
 
     if (player.getClass().isNpc())
         player.getClass().getNpcStats(player).setDrawState(MWMechanics::DrawState::Nothing);

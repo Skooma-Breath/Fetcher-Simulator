@@ -28,6 +28,18 @@
 #include <components/openmw-mp/Packets/Player/PacketPlayerInventory.hpp>
 #include <components/openmw-mp/Packets/Lua/PacketLuaEvent.hpp>
 #include <components/openmw-mp/Packets/Lua/PacketLuaStorage.hpp>
+#include <components/openmw-mp/Packets/Actor/PacketActorAI.hpp>
+#include <components/openmw-mp/Packets/Actor/PacketActorAnimFlags.hpp>
+#include <components/openmw-mp/Packets/Actor/PacketActorAnimPlay.hpp>
+#include <components/openmw-mp/Packets/Actor/PacketActorAttack.hpp>
+#include <components/openmw-mp/Packets/Actor/PacketActorAuthority.hpp>
+#include <components/openmw-mp/Packets/Actor/PacketActorCast.hpp>
+#include <components/openmw-mp/Packets/Actor/PacketActorCombatRequest.hpp>
+#include <components/openmw-mp/Packets/Actor/PacketActorDeath.hpp>
+#include <components/openmw-mp/Packets/Actor/PacketActorEquipment.hpp>
+#include <components/openmw-mp/Packets/Actor/PacketActorList.hpp>
+#include <components/openmw-mp/Packets/Actor/PacketActorPosition.hpp>
+#include <components/openmw-mp/Packets/Actor/PacketActorStatsDynamic.hpp>
 
 #include "network/Client.hpp"
 #include "network/Protocol.hpp"
@@ -63,6 +75,20 @@ Main& Main::get()
     if (!sInstance)
         throw std::runtime_error("mwmp::Main not initialised");
     return *sInstance;
+}
+
+void Main::sendActorCombatRequest(const MWWorld::Ptr& victim, float damage, bool healthDamage, bool knocked,
+    const osg::Vec3f& hitPos, int attackType, float attackStrength)
+{
+    if (mActorSync)
+        mActorSync->sendCombatRequest(victim, damage, healthDamage, knocked, hitPos, attackType, attackStrength);
+}
+
+void Main::sendActorNpcPlayerHit(uint32_t victimGuid, const MWWorld::Ptr& npcAttacker, float damage, bool healthDamage,
+    bool isDead, int attackType)
+{
+    if (mActorSync)
+        mActorSync->sendNpcPlayerDamage(victimGuid, damage, healthDamage, isDead, attackType, npcAttacker);
 }
 
 bool Main::isInitialised()
@@ -793,6 +819,126 @@ void Main::registerProtocolHandlers()
 
             auto* rp = mPlayerList->getPlayer(tmp.guid);
             if (rp) rp->onResurrect(tmp);
+        });
+
+    proto.registerHandler(PacketType::ActorAuthority,
+        [this](const uint8_t* data, size_t size)
+        {
+            ActorList tmp;
+            PacketActorAuthority pkt;
+            pkt.setActorList(&tmp);
+            if (!pkt.decode(data, size)) return;
+            mActorSync->onAuthorityUpdate(tmp);
+        });
+
+    proto.registerHandler(PacketType::ActorList,
+        [this](const uint8_t* data, size_t size)
+        {
+            ActorList tmp;
+            PacketActorList pkt;
+            pkt.setActorList(&tmp);
+            if (!pkt.decode(data, size)) return;
+            mActorSync->onActorListUpdate(tmp);
+        });
+
+    proto.registerHandler(PacketType::ActorPosition,
+        [this](const uint8_t* data, size_t size)
+        {
+            ActorList tmp;
+            PacketActorPosition pkt;
+            pkt.setActorList(&tmp);
+            if (!pkt.decode(data, size)) return;
+            mActorSync->onActorPositionUpdate(tmp);
+        });
+
+    proto.registerHandler(PacketType::ActorAnimFlags,
+        [this](const uint8_t* data, size_t size)
+        {
+            ActorList tmp;
+            PacketActorAnimFlags pkt;
+            pkt.setActorList(&tmp);
+            if (!pkt.decode(data, size)) return;
+            mActorSync->onActorAnimFlagsUpdate(tmp);
+        });
+
+    proto.registerHandler(PacketType::ActorAnimPlay,
+        [this](const uint8_t* data, size_t size)
+        {
+            ActorList tmp;
+            PacketActorAnimPlay pkt;
+            pkt.setActorList(&tmp);
+            if (!pkt.decode(data, size)) return;
+            mActorSync->onActorAnimPlay(tmp);
+        });
+
+    proto.registerHandler(PacketType::ActorAttack,
+        [this](const uint8_t* data, size_t size)
+        {
+            ActorList tmp;
+            PacketActorAttack pkt;
+            pkt.setActorList(&tmp);
+            if (!pkt.decode(data, size)) return;
+            mActorSync->onActorAttack(tmp);
+        });
+
+    proto.registerHandler(PacketType::ActorCast,
+        [this](const uint8_t* data, size_t size)
+        {
+            ActorList tmp;
+            PacketActorCast pkt;
+            pkt.setActorList(&tmp);
+            if (!pkt.decode(data, size)) return;
+            mActorSync->onActorCast(tmp);
+        });
+
+    proto.registerHandler(PacketType::ActorDeath,
+        [this](const uint8_t* data, size_t size)
+        {
+            ActorList tmp;
+            PacketActorDeath pkt;
+            pkt.setActorList(&tmp);
+            if (!pkt.decode(data, size)) return;
+            mActorSync->onActorDeath(tmp);
+        });
+
+    proto.registerHandler(PacketType::ActorEquipment,
+        [this](const uint8_t* data, size_t size)
+        {
+            ActorList tmp;
+            PacketActorEquipment pkt;
+            pkt.setActorList(&tmp);
+            if (!pkt.decode(data, size)) return;
+            mActorSync->onActorEquipment(tmp);
+        });
+
+    proto.registerHandler(PacketType::ActorStatsDynamic,
+        [this](const uint8_t* data, size_t size)
+        {
+            ActorList tmp;
+            PacketActorStatsDynamic pkt;
+            pkt.setActorList(&tmp);
+            if (!pkt.decode(data, size)) return;
+            mActorSync->onActorStatsDynamic(tmp);
+        });
+
+    proto.registerHandler(PacketType::ActorAI,
+        [this](const uint8_t* data, size_t size)
+        {
+            ActorList tmp;
+            PacketActorAI pkt;
+            pkt.setActorList(&tmp);
+            if (!pkt.decode(data, size)) return;
+            mActorSync->onActorAI(tmp);
+        });
+
+    proto.registerHandler(PacketType::ActorCombatRequest,
+        [this](const uint8_t* data, size_t size)
+        {
+            ActorList tmp;
+            PacketActorCombatRequest pkt;
+            pkt.setActorList(&tmp);
+            if (!pkt.decode(data, size)) return;
+            mActorSync->onActorCombatRequest(tmp);
         });
 
     proto.registerHandler(PacketType::PacketLuaEvent,

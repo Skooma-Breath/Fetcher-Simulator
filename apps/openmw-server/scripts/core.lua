@@ -345,7 +345,12 @@ local function buildActivateIntentContext(data)
     end
 
     local serverVerified = verifiedTarget ~= nil or ALLOW_UNVERIFIED_ACTIVATE
-    if accepted and not serverVerified then
+    -- Allow activation of base-game actors (NPCs/corpses) and doors even without
+    -- mpNum verification, since these are static ESM objects that can't have mpNums.
+    -- The distance check still applies for anti-cheat.
+    local preAction = classifyActivation(object)
+    local isBaseGameActivation = (preAction == "actor" or preAction == "door")
+    if accepted and not serverVerified and not isBaseGameActivation then
         accepted = false
         reason = "unverified_target"
     end

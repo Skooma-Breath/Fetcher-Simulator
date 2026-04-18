@@ -616,6 +616,8 @@ namespace mwmp
                     fat.setCurrent(-1.f, true);
                     stats.setFatigue(fat);
                 }
+                if (auto* bn = mNpcPtr.getRefData().getBaseNode())
+                    bn->setUserValue("mp_knockout_release_pending", false);
             }
             else if (hitFlagsChanged)
             {
@@ -639,17 +641,24 @@ namespace mwmp
                     stats.setHitRecovery(false);
 
                     if (auto* bn = mNpcPtr.getRefData().getBaseNode())
+                    {
                         bn->setUserValue("mp_recovery_anim_group", std::string());
+                        bn->setUserValue("mp_knockout_release_pending", true);
+                    }
                 }
                 else if (isRecovering)
                 {
                     stats.setKnockedDown(false);
                     stats.setHitRecovery(true);
+                    if (auto* bn = mNpcPtr.getRefData().getBaseNode())
+                        bn->setUserValue("mp_knockout_release_pending", false);
                 }
                 else if (isKnockedDown)
                 {
                     stats.setKnockedDown(true);
                     stats.setHitRecovery(false);
+                    if (auto* bn = mNpcPtr.getRefData().getBaseNode())
+                        bn->setUserValue("mp_knockout_release_pending", false);
                 }
             }
         }
@@ -670,7 +679,10 @@ namespace mwmp
             }
 
             if (auto* bn = mNpcPtr.getRefData().getBaseNode())
+            {
                 bn->setUserValue("mp_recovery_anim_group", std::string());
+                bn->setUserValue("mp_knockout_release_pending", false);
+            }
         }
         mAppliedHitFlags = currentHitFlags;
 

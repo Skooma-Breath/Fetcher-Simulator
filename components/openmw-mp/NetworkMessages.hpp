@@ -93,6 +93,7 @@ namespace mwmp
         ActorSpellsActive   = 62,
         ActorStatsDynamic   = 63,
         ActorTest           = 64,
+        ActorCombatRequest  = 65,  // Non-authority client → server → authority: NPC hit event
 
         // --- Object ---
         ObjectActivate      = 90,

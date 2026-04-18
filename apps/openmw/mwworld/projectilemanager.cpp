@@ -696,6 +696,22 @@ namespace MWWorld
                     MWBase::Environment::get().getWindowManager()->setEnemy(target);
                 }
                 playMagicBoltImpactEffects(*effects, hitPosition, target);
+
+                // Play per-target body-hit VFX (glow, particles, hit sound)
+                // for visual-only bolts so non-authority clients see spell
+                // impact effects on the victim.
+                if (!target.isEmpty() && target.getClass().isActor())
+                {
+                    const auto& effectStore = esmStore.get<ESM::MagicEffect>();
+                    for (const auto& effectInfo : effects->mList)
+                    {
+                        if (effectInfo.mData.mRange != ESM::RT_Target)
+                            continue;
+                        const ESM::MagicEffect* me = effectStore.search(effectInfo.mData.mEffectID);
+                        if (me)
+                            MWMechanics::playEffects(target, *me);
+                    }
+                }
             }
 
             magicBoltState.mToDelete = true;

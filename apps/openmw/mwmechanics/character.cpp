@@ -456,8 +456,63 @@ namespace MWMechanics
                 stats.setHitRecovery(false);
                 resetCurrentIdleState();
             }
-            else if (isKnockedOut())
+            else if (mHitState == CharState_KnockOut || mHitState == CharState_SwimKnockOut)
+            {
+                bool forceKnockoutRelease = false;
+                if (!knockout)
+                {
+                    if (auto* bn = mPtr.getRefData().getBaseNode())
+                    {
+                        bn->getUserValue("mp_knockout_release_pending", forceKnockoutRelease);
+                        if (forceKnockoutRelease)
+                            bn->setUserValue("mp_knockout_release_pending", false);
+                    }
+
+                    // Network puppets can occasionally stay pinned in the prone
+                    // loop even after the synced KO flag clears. When the sync
+                    // layer requests it, either restart from the stand-up tail
+                    // or, if authoritative locomotion has already resumed, snap
+                    // out of the stale KO state immediately so the actor does
+                    // not slide around while still rendered prone.
+                    const auto& movementSettings = charClass.getMovementSettings(mPtr);
+                    const bool locomotionResumed = std::abs(movementSettings.mPosition[0]) > 0.1f
+                        || std::abs(movementSettings.mPosition[1]) > 0.1f;
+
+                    if (forceKnockoutRelease && locomotionResumed)
+                    {
+                        mAnimation->disable(mCurrentHit);
+                        mHitState = CharState_None;
+                        mCurrentHit.clear();
+                        stats.setKnockedDown(false);
+                        stats.setHitRecovery(false);
+                        resetCurrentIdleState();
+                        return;
+                    }
+
+                    if (forceKnockoutRelease
+                        && mAnimation->getTextKeyTime(mCurrentHit + ": loop stop") >= 0.f)
+                    {
+                        mAnimation->disable(mCurrentHit);
+                        playBlendedAnimation(mCurrentHit, Priority_Knockdown, MWRender::BlendMask_All,
+                            true, 1.f, "loop stop", "stop", 0.f, 0);
+                    }
+                    else if (forceKnockoutRelease)
+                    {
+                        mAnimation->disable(mCurrentHit);
+                        mHitState = CharState_None;
+                        mCurrentHit.clear();
+                        stats.setKnockedDown(false);
+                        stats.setHitRecovery(false);
+                        resetCurrentIdleState();
+                        return;
+                    }
+                }
+
+                // Keep the prone loop in sync with the live KO flag so the stand-up
+                // tail can play as soon as fatigue recovers instead of hanging until
+                // another hit interrupts the animation.
                 mAnimation->setLoopingEnabled(mCurrentHit, knockout);
+            }
             return;
         }
 
@@ -956,12 +1011,19 @@ namespace MWMechanics
             MWBase::Environment::get().getWorld()->useDeathCamera();
         }
 
+        // If the death animation is already marked as finished (e.g., actor was
+        // already dead when we loaded the cell), jump to the final corpse pose
+        // instead of replaying the full death animation.
+        if (mPtr.getClass().getCreatureStats(mPtr).isDeathAnimationFinished())
+            startpoint = 1.f;
+
         const MWWorld::Class& cls = mPtr.getClass();
         mDeathState = CharState_None;
 
-        // Remote network-player NPCs can receive the sender's exact death animation
-        // group via PacketPlayerDeath, which avoids local random mismatch.
-        if (cls.isActor() && cls.getCreatureStats(mPtr).getMovementFlag(MWMechanics::CreatureStats::Flag_NetworkPlayerNpc))
+        // Non-authority actors (both network-player NPCs and actor-synced NPCs)
+        // can receive the authority's exact death animation group via sync,
+        // which avoids local random mismatch.
+        if (cls.isActor())
         {
             if (auto* bn = mPtr.getRefData().getBaseNode())
             {
@@ -984,11 +1046,13 @@ namespace MWMechanics
             || (mAnimation && !mAnimation->hasAnimation(deathStateToAnimGroup(mDeathState))))
             mDeathState = chooseRandomDeathState();
 
-        if (mPtr == getPlayer())
-        {
-            if (auto* bn = mPtr.getRefData().getBaseNode())
-                bn->setUserValue("mp_death_anim_group", std::string(deathStateToAnimGroup(mDeathState)));
-        }
+        // Store the chosen death animation group on the base node so that:
+        // - For the local player: PlayerSync can include it in the death packet
+        // - For NPCs (authority): ActorSync's sendAuthoritativeActorUpdates can
+        //   read it and include it in the ActorDeath packet, ensuring all clients
+        //   play the same death animation.
+        if (auto* bn = mPtr.getRefData().getBaseNode())
+            bn->setUserValue("mp_death_anim_group", std::string(deathStateToAnimGroup(mDeathState)));
 
         // Do not interrupt scripted animation by death
         if (!mAnimation || isScriptedAnimPlaying())
@@ -1757,18 +1821,15 @@ namespace MWMechanics
                             playBlendedAnimation(mCurrentWeapon, priorityWeapon, MWRender::BlendMask_All, false, 1,
                                 startKey, stopKey, 0.0f, 0);
                             mUpperBodyState = UpperBodyState::Casting;
-                            // [mp] Cast send hook: flag the pending cast for PlayerSync to pick up.
-                            // We write at animation-start (not the "release" key) so the send mirrors
-                            // the animation trigger — identical to TES3MP's localCast->shouldSend path.
-                            if (mPtr == getPlayer())
+                            // [mp] Cast send hook: flag the pending cast the frame the
+                            // animation begins. PlayerSync consumes this for the local
+                            // player, while ActorSync consumes it for authority NPCs.
+                            if (auto* bn = mPtr.getRefData().getBaseNode())
                             {
-                                if (auto* bn = mPtr.getRefData().getBaseNode())
-                                {
-                                    bn->setUserValue("mp_cast_pending", true);
-                                    bn->setUserValue("mp_cast_spell_id", spellid.serializeText());
-                                    // mAttackType at this point is "self", "touch", or "target"
-                                    bn->setUserValue("mp_cast_anim", std::string(mAttackType));
-                                }
+                                bn->setUserValue("mp_cast_pending", true);
+                                bn->setUserValue("mp_cast_spell_id", spellid.serializeText());
+                                // mAttackType at this point is "self", "touch", or "target"
+                                bn->setUserValue("mp_cast_anim", std::string(mAttackType));
                             }
                         }
                     }
@@ -1813,26 +1874,26 @@ namespace MWMechanics
                         }
 
                         // [mp] Attack animation sync hooks
-                        // Send side: local player records the chosen type so PlayerSync
-                        // can include it in the next PacketPlayerAttack.
-                        // Receive side: network NPC reads the type sent by the remote
-                        // client so it plays the same chop/slash/thrust sub-animation.
-                        if (mPtr == getPlayer())
+                        // For puppet (non-authority) NPCs, override with network-synced type.
+                        // Authority NPCs determine their attack type from setAIAttackType(),
+                        // so don't read the stale base-node value for them.
+                        if (mPtr != getPlayer() && cls.isActor())
                         {
-                            if (auto* bn = mPtr.getRefData().getBaseNode())
-                                bn->setUserValue("mp_attack_type", std::string(mAttackType));
+                            const auto& aiSeq = mPtr.getClass().getCreatureStats(mPtr).getAiSequence();
+                            if (aiSeq.isEmpty())
+                            {
+                                std::string mpType;
+                                auto* bn = mPtr.getRefData().getBaseNode();
+                                if (bn && bn->getUserValue("mp_attack_type", mpType) && !mpType.empty())
+                                    mAttackType = mpType;
+                            }
                         }
-                        else if (cls.isActor() && cls.getCreatureStats(mPtr).getMovementFlag(
-                            MWMechanics::CreatureStats::Flag_NetworkPlayerNpc))
-                        {
-                            std::string mpType;
-                            auto* bn = mPtr.getRefData().getBaseNode();
-                            if (bn && bn->getUserValue("mp_attack_type", mpType) && !mpType.empty())
-                                mAttackType = mpType;
-                            else
-                                mAttackType = getRandomAttackType();
-                        }
-                        // else: active AI NPC → mAttackType already set by AiCombat above
+                        // Write the final attack type to base node for all actors:
+                        // - Player: PlayerSync reads it for PacketPlayerAttack
+                        // - Authority NPCs: ActorSync reads it for ActorAttack packet
+                        // - Non-auth NPCs: value was just set from synced data above
+                        if (auto* bn = mPtr.getRefData().getBaseNode())
+                            bn->setUserValue("mp_attack_type", std::string(mAttackType));
                         startKey = mAttackType + ' ' + startKey;
                         stopKey = mAttackType + " max attack";
                     }
@@ -3073,6 +3134,18 @@ namespace MWMechanics
 
     void CharacterController::updateContinuousVfx() const
     {
+        // [mp] Skip VFX removal for network-driven puppet NPCs.  Their magic
+        // effects are not tracked through ActiveSpells / MagicEffects, so the
+        // magnitude check below would immediately remove persistent VFX such
+        // as Shield bubbles that were added by ActorSync cast playback.
+        // ActorSync manages cleanup on death / cell-unload instead.
+        if (auto* bn = mPtr.getRefData().getBaseNode())
+        {
+            bool isRemote = false;
+            bn->getUserValue("mp_remote_actor", isRemote);
+            if (isRemote)
+                return;
+        }
         // Keeping track of when to stop a continuous VFX seems to be very difficult to do inside the spells code,
         // as it's extremely spread out (ActiveSpells, Spells, InventoryStore effects, etc...) so we do it here.
 

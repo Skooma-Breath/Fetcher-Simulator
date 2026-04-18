@@ -49,6 +49,18 @@
 #include <components/openmw-mp/Packets/Object/PacketObjectMove.hpp>
 #include <components/openmw-mp/Packets/Object/PacketContainer.hpp>
 #include <components/openmw-mp/Packets/Object/PacketDoorState.hpp>
+#include <components/openmw-mp/Packets/Actor/PacketActorAI.hpp>
+#include <components/openmw-mp/Packets/Actor/PacketActorAnimFlags.hpp>
+#include <components/openmw-mp/Packets/Actor/PacketActorAnimPlay.hpp>
+#include <components/openmw-mp/Packets/Actor/PacketActorAttack.hpp>
+#include <components/openmw-mp/Packets/Actor/PacketActorAuthority.hpp>
+#include <components/openmw-mp/Packets/Actor/PacketActorCast.hpp>
+#include <components/openmw-mp/Packets/Actor/PacketActorDeath.hpp>
+#include <components/openmw-mp/Packets/Actor/PacketActorEquipment.hpp>
+#include <components/openmw-mp/Packets/Actor/PacketActorList.hpp>
+#include <components/openmw-mp/Packets/Actor/PacketActorPosition.hpp>
+#include <components/openmw-mp/Packets/Actor/PacketActorStatsDynamic.hpp>
+#include <components/openmw-mp/Packets/Actor/PacketActorCombatRequest.hpp>
 #include <components/openmw-mp/Packets/Worldstate/PacketWorldTime.hpp>
 // PacketWorldWeather is defined in PacketWorldTime.hpp
 
@@ -451,6 +463,17 @@ namespace
 
         return !playerCell.isExterior && playerCell.cellName == cellId;
     }
+
+    std::string makeActorKey(const mwmp::BaseActor& actor)
+    {
+        return actor.refId + "|" + std::to_string(actor.refNum) + "|" + std::to_string(actor.mpNum);
+    }
+
+    uint64_t currentServerTimeMs()
+    {
+        return static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now().time_since_epoch()).count());
+    }
 }
 
 namespace mwmp
@@ -827,6 +850,7 @@ void MPServer::onClientDisconnected(HSteamNetConnection conn, const std::string&
     if (it == mClients.end()) return;
 
     const auto& client = it->second;
+    const std::string actorCell = makeCellKey(client.player.cell);
     Log(Debug::Info) << "[Server] Client disconnected: "
                      << client.name << " (" << reason << ")";
 
@@ -864,7 +888,167 @@ void MPServer::onClientDisconnected(HSteamNetConnection conn, const std::string&
     mInterface->CloseConnection(conn, 0, nullptr, false);
     mLua.clearPlayerData(client.guid);
     mClients.erase(it);
+    if (!actorCell.empty())
+        refreshActorAuthorityForCell(actorCell);
     syncLuaSnapshot();
+}
+
+// ---------------------------------------------------------------------------
+void MPServer::refreshActorAuthorityForCell(const std::string& cellId, uint32_t preferredGuid)
+{
+    if (cellId.empty())
+        return;
+
+    auto& cellState = mWorld.actorCells[cellId];
+    uint32_t newAuthorityGuid = 0;
+
+    auto isEligible = [&](const ConnectedClient& client)
+    {
+        return client.charSelectComplete && cellMatches(client.player.cell, cellId);
+    };
+
+    // Stability: keep the current authority owner as long as they are still in the cell.
+    // A newly entering player must not steal authority from whoever already holds it.
+    // The preferredGuid hint only takes effect when the cell has no active owner.
+    if (cellState.authorityGuid != 0)
+    {
+        for (const auto& [conn, client] : mClients)
+        {
+            if (client.guid == cellState.authorityGuid && isEligible(client))
+            {
+                newAuthorityGuid = cellState.authorityGuid;
+                break;
+            }
+        }
+    }
+
+    // Current authority is gone — try the preferred GUID first.
+    if (newAuthorityGuid == 0 && preferredGuid != 0)
+    {
+        for (const auto& [conn, client] : mClients)
+        {
+            if (client.guid == preferredGuid && isEligible(client))
+            {
+                newAuthorityGuid = client.guid;
+                break;
+            }
+        }
+    }
+
+    // No preferred or preferred not eligible — lowest GUID wins.
+    if (newAuthorityGuid == 0)
+    {
+        for (const auto& [conn, client] : mClients)
+        {
+            if (!isEligible(client))
+                continue;
+
+            if (newAuthorityGuid == 0 || client.guid < newAuthorityGuid)
+                newAuthorityGuid = client.guid;
+        }
+    }
+
+    if (cellState.authorityGuid != newAuthorityGuid)
+    {
+        cellState.authorityGuid = newAuthorityGuid;
+        ++cellState.authorityGeneration;
+        Log(Debug::Info) << "[Server] Actor authority for " << cellId
+                         << " -> guid=" << newAuthorityGuid
+                         << " generation=" << cellState.authorityGeneration;
+    }
+
+    for (const auto& [conn, client] : mClients)
+    {
+        if (!isEligible(client))
+            continue;
+
+        sendActorAuthorityToClient(conn, cellId);
+        sendActorStateToClient(conn, cellId);
+    }
+}
+
+// ---------------------------------------------------------------------------
+void MPServer::sendActorAuthorityToClient(HSteamNetConnection conn, const std::string& cellId)
+{
+    auto it = mWorld.actorCells.find(cellId);
+    CellActorState emptyState;
+    const CellActorState& state = (it != mWorld.actorCells.end()) ? it->second : emptyState;
+
+    ActorList actorList;
+    actorList.cellId = cellId;
+    actorList.isAuthority = state.authorityGuid != 0;
+    actorList.authorityGuid = state.authorityGuid;
+    actorList.authorityGeneration = state.authorityGeneration;
+    actorList.snapshotSequence = state.nextSnapshotSequence;
+    actorList.serverTimestamp = currentServerTimeMs();
+
+    PacketActorAuthority pkt;
+    pkt.setActorList(&actorList);
+    sendTo(conn, pkt.encode());
+}
+
+// ---------------------------------------------------------------------------
+void MPServer::sendActorStateToClient(HSteamNetConnection conn, const std::string& cellId)
+{
+    auto it = mWorld.actorCells.find(cellId);
+    if (it == mWorld.actorCells.end() || it->second.actors.empty())
+        return;
+
+    const CellActorState& state = it->second;
+
+    ActorList actorList;
+    actorList.cellId = cellId;
+    actorList.isAuthority = false;
+    actorList.authorityGuid = state.authorityGuid;
+    actorList.authorityGeneration = state.authorityGeneration;
+    actorList.snapshotSequence = state.nextSnapshotSequence;
+    actorList.serverTimestamp = currentServerTimeMs();
+
+    actorList.actors.reserve(state.actors.size());
+    for (const auto& [key, record] : state.actors)
+        actorList.actors.push_back(record.actor);
+
+    PacketActorList pkt;
+    pkt.setActorList(&actorList);
+    sendTo(conn, pkt.encode());
+}
+
+// ---------------------------------------------------------------------------
+bool MPServer::validateActorUpdate(const ConnectedClient& c, const ActorList& actorList, const char* packetName)
+{
+    if (actorList.cellId.empty())
+    {
+        Log(Debug::Warning) << "[Server] Rejecting " << packetName << " from " << c.name
+                            << " because the actor cellId is empty";
+        return false;
+    }
+
+    if (!cellMatches(c.player.cell, actorList.cellId))
+    {
+        Log(Debug::Warning) << "[Server] Rejecting " << packetName << " from " << c.name
+                            << " due to cell mismatch: player=" << makeCellKey(c.player.cell)
+                            << " packet=" << actorList.cellId;
+        return false;
+    }
+
+    auto cellIt = mWorld.actorCells.find(actorList.cellId);
+    if (cellIt == mWorld.actorCells.end() || cellIt->second.authorityGuid == 0)
+    {
+        refreshActorAuthorityForCell(actorList.cellId, c.guid);
+        cellIt = mWorld.actorCells.find(actorList.cellId);
+    }
+
+    if (cellIt == mWorld.actorCells.end() || cellIt->second.authorityGuid != c.guid)
+    {
+        const uint32_t authorityGuid = (cellIt != mWorld.actorCells.end()) ? cellIt->second.authorityGuid : 0;
+        Log(Debug::Warning) << "[Server] Rejecting " << packetName << " from " << c.name
+                            << " because guid=" << c.guid
+                            << " is not actor authority for " << actorList.cellId
+                            << " (authority=" << authorityGuid << ")";
+        return false;
+    }
+
+    return true;
 }
 
 // ---------------------------------------------------------------------------
@@ -932,6 +1116,17 @@ void MPServer::onClientMessage(ConnectedClient& client,
         case PacketType::Container:        handleContainer(client, data, size);          break;
         case PacketType::DoorState:        handleDoorState(client, data, size);          break;
         case PacketType::WorldWeather:     handleWeather(client, data, size);            break;
+        case PacketType::ActorList:        handleActorList(client, data, size);          break;
+        case PacketType::ActorPosition:    handleActorPosition(client, data, size);      break;
+        case PacketType::ActorAnimFlags:   handleActorAnimFlags(client, data, size);     break;
+        case PacketType::ActorAnimPlay:    handleActorAnimPlay(client, data, size);      break;
+        case PacketType::ActorAttack:      handleActorAttack(client, data, size);        break;
+        case PacketType::ActorCast:        handleActorCast(client, data, size);          break;
+        case PacketType::ActorDeath:       handleActorDeath(client, data, size);         break;
+        case PacketType::ActorEquipment:   handleActorEquipment(client, data, size);     break;
+        case PacketType::ActorStatsDynamic: handleActorStatsDynamic(client, data, size); break;
+        case PacketType::ActorAI:          handleActorAI(client, data, size);            break;
+        case PacketType::ActorCombatRequest: handleActorCombatRequest(client, data, size); break;
         default:
             Log(Debug::Verbose) << "[Server] Unhandled packet type " << hdr.type;
             break;
@@ -987,6 +1182,9 @@ void MPServer::loadPersistentWorldState()
 // ---------------------------------------------------------------------------
 void MPServer::sendCellStateToClient(HSteamNetConnection conn, const std::string& cellId)
 {
+    sendActorAuthorityToClient(conn, cellId);
+    sendActorStateToClient(conn, cellId);
+
     auto objectsIt = mWorld.placedObjects.find(cellId);
     if (objectsIt != mWorld.placedObjects.end())
     {
@@ -1445,6 +1643,9 @@ void MPServer::handleCharacterSelect(ConnectedClient& c, const uint8_t* data, si
         }
     }
 
+    if (!cdPkt.spawnCell.empty())
+        refreshActorAuthorityForCell(cdPkt.spawnCell, c.guid);
+
     sendTo(c.conn, buildWorldTimePacket());
     if (!cdPkt.spawnCell.empty())
         sendCellStateToClient(c.conn, cdPkt.spawnCell);
@@ -1549,6 +1750,11 @@ void MPServer::handlePlayerCellChange(ConnectedClient& c, const uint8_t* data, s
 
     syncLuaSnapshot();
     mLua.onPlayerCellChange(c.guid, c.name, newCell, oldCell);
+
+    if (!oldCell.empty() && oldCell != newCell)
+        refreshActorAuthorityForCell(oldCell);
+    if (!newCell.empty())
+        refreshActorAuthorityForCell(newCell, c.guid);
 
     broadcastToAll(std::vector<uint8_t>(data, data + size), c.conn);
     const std::string cellKey = makeCellKey(c.player.cell);
@@ -1725,6 +1931,398 @@ void MPServer::handlePlayerResurrect(ConnectedClient& c, const uint8_t* data, si
     broadcastToAll(std::vector<uint8_t>(data, data + size), c.conn);
 
     Log(Debug::Info) << "[Server] Relayed PlayerResurrect for " << c.name;
+}
+
+// ---------------------------------------------------------------------------
+void MPServer::handleActorList(ConnectedClient& c, const uint8_t* data, size_t size)
+{
+    ActorList incoming;
+    PacketActorList pkt;
+    pkt.setActorList(&incoming);
+    if (!pkt.decode(data, size)) return;
+    if (!validateActorUpdate(c, incoming, "ActorList")) return;
+
+    auto& cellState = mWorld.actorCells[incoming.cellId];
+    incoming.isAuthority = true;
+    incoming.authorityGuid = cellState.authorityGuid;
+    incoming.authorityGeneration = cellState.authorityGeneration;
+    incoming.snapshotSequence = cellState.nextSnapshotSequence++;
+    incoming.serverTimestamp = currentServerTimeMs();
+
+    cellState.actors.clear();
+    for (auto& actor : incoming.actors)
+    {
+        actor.cellId = incoming.cellId;
+        cellState.actors[makeActorKey(actor)] = { actor, incoming.serverTimestamp };
+    }
+
+    PacketActorList out;
+    out.setActorList(&incoming);
+    broadcastToCell(incoming.cellId, out.encode(), c.conn);
+}
+
+// ---------------------------------------------------------------------------
+void MPServer::handleActorPosition(ConnectedClient& c, const uint8_t* data, size_t size)
+{
+    ActorList incoming;
+    PacketActorPosition pkt;
+    pkt.setActorList(&incoming);
+    if (!pkt.decode(data, size)) return;
+    if (!validateActorUpdate(c, incoming, "ActorPosition")) return;
+
+    auto& cellState = mWorld.actorCells[incoming.cellId];
+    incoming.isAuthority = true;
+    incoming.authorityGuid = cellState.authorityGuid;
+    incoming.authorityGeneration = cellState.authorityGeneration;
+    incoming.snapshotSequence = cellState.nextSnapshotSequence++;
+    incoming.serverTimestamp = currentServerTimeMs();
+
+    for (auto& actor : incoming.actors)
+    {
+        actor.cellId = incoming.cellId;
+        auto& stored = cellState.actors[makeActorKey(actor)];
+        stored.actor.refId = actor.refId;
+        stored.actor.refNum = actor.refNum;
+        stored.actor.mpNum = actor.mpNum;
+        stored.actor.cellId = incoming.cellId;
+        stored.actor.position = actor.position;
+        stored.actor.velocity = actor.velocity;
+        stored.lastSnapshotTime = incoming.serverTimestamp;
+    }
+
+    PacketActorPosition out;
+    out.setActorList(&incoming);
+    broadcastToCell(incoming.cellId, out.encode(), c.conn, /*reliable=*/false);
+}
+
+// ---------------------------------------------------------------------------
+void MPServer::handleActorAnimFlags(ConnectedClient& c, const uint8_t* data, size_t size)
+{
+    ActorList incoming;
+    PacketActorAnimFlags pkt;
+    pkt.setActorList(&incoming);
+    if (!pkt.decode(data, size)) return;
+    if (!validateActorUpdate(c, incoming, "ActorAnimFlags")) return;
+
+    auto& cellState = mWorld.actorCells[incoming.cellId];
+    incoming.isAuthority = true;
+    incoming.authorityGuid = cellState.authorityGuid;
+    incoming.authorityGeneration = cellState.authorityGeneration;
+    incoming.snapshotSequence = cellState.nextSnapshotSequence++;
+    incoming.serverTimestamp = currentServerTimeMs();
+
+    for (auto& actor : incoming.actors)
+    {
+        actor.cellId = incoming.cellId;
+        auto& stored = cellState.actors[makeActorKey(actor)];
+        stored.actor.refId = actor.refId;
+        stored.actor.refNum = actor.refNum;
+        stored.actor.mpNum = actor.mpNum;
+        stored.actor.cellId = incoming.cellId;
+        stored.actor.animFlags = actor.animFlags;
+        stored.lastSnapshotTime = incoming.serverTimestamp;
+    }
+
+    PacketActorAnimFlags out;
+    out.setActorList(&incoming);
+    broadcastToCell(incoming.cellId, out.encode(), c.conn, /*reliable=*/false);
+}
+
+// ---------------------------------------------------------------------------
+void MPServer::handleActorAnimPlay(ConnectedClient& c, const uint8_t* data, size_t size)
+{
+    ActorList incoming;
+    PacketActorAnimPlay pkt;
+    pkt.setActorList(&incoming);
+    if (!pkt.decode(data, size)) return;
+    if (!validateActorUpdate(c, incoming, "ActorAnimPlay")) return;
+
+    auto& cellState = mWorld.actorCells[incoming.cellId];
+    incoming.isAuthority = true;
+    incoming.authorityGuid = cellState.authorityGuid;
+    incoming.authorityGeneration = cellState.authorityGeneration;
+    incoming.snapshotSequence = cellState.nextSnapshotSequence++;
+    incoming.serverTimestamp = currentServerTimeMs();
+
+    for (auto& actor : incoming.actors)
+    {
+        actor.cellId = incoming.cellId;
+        auto& stored = cellState.actors[makeActorKey(actor)];
+        stored.actor.refId = actor.refId;
+        stored.actor.refNum = actor.refNum;
+        stored.actor.mpNum = actor.mpNum;
+        stored.actor.cellId = incoming.cellId;
+        stored.actor.animPlay = actor.animPlay;
+        stored.lastSnapshotTime = incoming.serverTimestamp;
+    }
+
+    PacketActorAnimPlay out;
+    out.setActorList(&incoming);
+    broadcastToCell(incoming.cellId, out.encode(), c.conn);
+}
+
+// ---------------------------------------------------------------------------
+void MPServer::handleActorAttack(ConnectedClient& c, const uint8_t* data, size_t size)
+{
+    ActorList incoming;
+    PacketActorAttack pkt;
+    pkt.setActorList(&incoming);
+    if (!pkt.decode(data, size)) return;
+    Log(Debug::Info) << "[Server] Received ActorAttack from " << c.name << " cellId=" << incoming.cellId;
+    if (!validateActorUpdate(c, incoming, "ActorAttack")) return;
+    Log(Debug::Info) << "[Server] ActorAttack from " << c.name << " cell=" << incoming.cellId << " actors=" << incoming.actors.size();
+
+    auto& cellState = mWorld.actorCells[incoming.cellId];
+    incoming.isAuthority = true;
+    incoming.authorityGuid = cellState.authorityGuid;
+    incoming.authorityGeneration = cellState.authorityGeneration;
+    incoming.snapshotSequence = cellState.nextSnapshotSequence++;
+    incoming.serverTimestamp = currentServerTimeMs();
+
+    for (auto& actor : incoming.actors)
+    {
+        actor.cellId = incoming.cellId;
+        auto& stored = cellState.actors[makeActorKey(actor)];
+        stored.actor.refId = actor.refId;
+        stored.actor.refNum = actor.refNum;
+        stored.actor.mpNum = actor.mpNum;
+        stored.actor.cellId = incoming.cellId;
+        stored.actor.attack = actor.attack;
+        stored.lastSnapshotTime = incoming.serverTimestamp;
+    }
+
+    PacketActorAttack out;
+    out.setActorList(&incoming);
+    broadcastToCell(incoming.cellId, out.encode(), c.conn);
+    Log(Debug::Info) << "[Server] Broadcast ActorAttack to cell=" << incoming.cellId;
+}
+
+// ---------------------------------------------------------------------------
+void MPServer::handleActorCast(ConnectedClient& c, const uint8_t* data, size_t size)
+{
+    ActorList incoming;
+    PacketActorCast pkt;
+    pkt.setActorList(&incoming);
+    if (!pkt.decode(data, size)) return;
+    Log(Debug::Info) << "[Server] Received ActorCast from " << c.name << " cellId=" << incoming.cellId;
+    if (!validateActorUpdate(c, incoming, "ActorCast")) return;
+    Log(Debug::Info) << "[Server] ActorCast from " << c.name << " cell=" << incoming.cellId << " actors=" << incoming.actors.size();
+
+    auto& cellState = mWorld.actorCells[incoming.cellId];
+    incoming.isAuthority = true;
+    incoming.authorityGuid = cellState.authorityGuid;
+    incoming.authorityGeneration = cellState.authorityGeneration;
+    incoming.snapshotSequence = cellState.nextSnapshotSequence++;
+    incoming.serverTimestamp = currentServerTimeMs();
+
+    for (auto& actor : incoming.actors)
+    {
+        actor.cellId = incoming.cellId;
+        auto& stored = cellState.actors[makeActorKey(actor)];
+        stored.actor.refId = actor.refId;
+        stored.actor.refNum = actor.refNum;
+        stored.actor.mpNum = actor.mpNum;
+        stored.actor.cellId = incoming.cellId;
+        stored.actor.cast = actor.cast;
+        stored.lastSnapshotTime = incoming.serverTimestamp;
+    }
+
+    PacketActorCast out;
+    out.setActorList(&incoming);
+    broadcastToCell(incoming.cellId, out.encode(), c.conn);
+    Log(Debug::Info) << "[Server] Broadcast ActorCast to cell=" << incoming.cellId;
+}
+
+// ---------------------------------------------------------------------------
+void MPServer::handleActorDeath(ConnectedClient& c, const uint8_t* data, size_t size)
+{
+    ActorList incoming;
+    PacketActorDeath pkt;
+    pkt.setActorList(&incoming);
+    if (!pkt.decode(data, size)) return;
+    Log(Debug::Info) << "[Server] Received ActorDeath from " << c.name << " cellId=" << incoming.cellId;
+    if (!validateActorUpdate(c, incoming, "ActorDeath")) return;
+    Log(Debug::Info) << "[Server] ActorDeath from " << c.name << " cell=" << incoming.cellId << " actors=" << incoming.actors.size();
+
+    auto& cellState = mWorld.actorCells[incoming.cellId];
+    incoming.isAuthority = true;
+    incoming.authorityGuid = cellState.authorityGuid;
+    incoming.authorityGeneration = cellState.authorityGeneration;
+    incoming.snapshotSequence = cellState.nextSnapshotSequence++;
+    incoming.serverTimestamp = currentServerTimeMs();
+
+    for (auto& actor : incoming.actors)
+    {
+        actor.cellId = incoming.cellId;
+        auto& stored = cellState.actors[makeActorKey(actor)];
+        stored.actor.refId = actor.refId;
+        stored.actor.refNum = actor.refNum;
+        stored.actor.mpNum = actor.mpNum;
+        stored.actor.cellId = incoming.cellId;
+        stored.actor.deathState = actor.deathState;
+        stored.actor.isDead = actor.isDead;
+        stored.actor.isInstantDeath = actor.isInstantDeath;
+        stored.actor.deathAnimGroup = actor.deathAnimGroup;
+        stored.actor.dynamicStats.health.current = actor.dynamicStats.health.current;
+        stored.lastSnapshotTime = incoming.serverTimestamp;
+    }
+
+    PacketActorDeath out;
+    out.setActorList(&incoming);
+    broadcastToCell(incoming.cellId, out.encode(), c.conn);
+    Log(Debug::Info) << "[Server] Broadcast ActorDeath to cell=" << incoming.cellId;
+}
+
+// ---------------------------------------------------------------------------
+void MPServer::handleActorEquipment(ConnectedClient& c, const uint8_t* data, size_t size)
+{
+    ActorList incoming;
+    PacketActorEquipment pkt;
+    pkt.setActorList(&incoming);
+    if (!pkt.decode(data, size)) return;
+    if (!validateActorUpdate(c, incoming, "ActorEquipment")) return;
+
+    auto& cellState = mWorld.actorCells[incoming.cellId];
+    incoming.isAuthority = true;
+    incoming.authorityGuid = cellState.authorityGuid;
+    incoming.authorityGeneration = cellState.authorityGeneration;
+    incoming.snapshotSequence = cellState.nextSnapshotSequence++;
+    incoming.serverTimestamp = currentServerTimeMs();
+
+    for (auto& actor : incoming.actors)
+    {
+        actor.cellId = incoming.cellId;
+        auto& stored = cellState.actors[makeActorKey(actor)];
+        stored.actor.refId = actor.refId;
+        stored.actor.refNum = actor.refNum;
+        stored.actor.mpNum = actor.mpNum;
+        stored.actor.cellId = incoming.cellId;
+        stored.actor.equipment = actor.equipment;
+        stored.lastSnapshotTime = incoming.serverTimestamp;
+    }
+
+    PacketActorEquipment out;
+    out.setActorList(&incoming);
+    broadcastToCell(incoming.cellId, out.encode(), c.conn);
+}
+
+// ---------------------------------------------------------------------------
+void MPServer::handleActorStatsDynamic(ConnectedClient& c, const uint8_t* data, size_t size)
+{
+    ActorList incoming;
+    PacketActorStatsDynamic pkt;
+    pkt.setActorList(&incoming);
+    if (!pkt.decode(data, size)) return;
+    if (!validateActorUpdate(c, incoming, "ActorStatsDynamic")) return;
+
+    auto& cellState = mWorld.actorCells[incoming.cellId];
+    incoming.isAuthority = true;
+    incoming.authorityGuid = cellState.authorityGuid;
+    incoming.authorityGeneration = cellState.authorityGeneration;
+    incoming.snapshotSequence = cellState.nextSnapshotSequence++;
+    incoming.serverTimestamp = currentServerTimeMs();
+
+    for (auto& actor : incoming.actors)
+    {
+        actor.cellId = incoming.cellId;
+        auto& stored = cellState.actors[makeActorKey(actor)];
+        stored.actor.refId = actor.refId;
+        stored.actor.refNum = actor.refNum;
+        stored.actor.mpNum = actor.mpNum;
+        stored.actor.cellId = incoming.cellId;
+        stored.actor.dynamicStats = actor.dynamicStats;
+        stored.actor.isDead = actor.isDead;
+        stored.lastSnapshotTime = incoming.serverTimestamp;
+    }
+
+    PacketActorStatsDynamic out;
+    out.setActorList(&incoming);
+    broadcastToCell(incoming.cellId, out.encode(), c.conn);
+}
+
+// ---------------------------------------------------------------------------
+void MPServer::handleActorAI(ConnectedClient& c, const uint8_t* data, size_t size)
+{
+    ActorList incoming;
+    PacketActorAI pkt;
+    pkt.setActorList(&incoming);
+    if (!pkt.decode(data, size)) return;
+    if (!validateActorUpdate(c, incoming, "ActorAI")) return;
+
+    auto& cellState = mWorld.actorCells[incoming.cellId];
+    incoming.isAuthority = true;
+    incoming.authorityGuid = cellState.authorityGuid;
+    incoming.authorityGeneration = cellState.authorityGeneration;
+    incoming.snapshotSequence = cellState.nextSnapshotSequence++;
+    incoming.serverTimestamp = currentServerTimeMs();
+
+    for (auto& actor : incoming.actors)
+    {
+        actor.cellId = incoming.cellId;
+        auto& stored = cellState.actors[makeActorKey(actor)];
+        stored.actor.refId = actor.refId;
+        stored.actor.refNum = actor.refNum;
+        stored.actor.mpNum = actor.mpNum;
+        stored.actor.cellId = incoming.cellId;
+        stored.actor.ai = actor.ai;
+        stored.lastSnapshotTime = incoming.serverTimestamp;
+    }
+
+    PacketActorAI out;
+    out.setActorList(&incoming);
+    broadcastToCell(incoming.cellId, out.encode(), c.conn);
+}
+
+// ---------------------------------------------------------------------------
+void MPServer::handleActorCombatRequest(ConnectedClient& c, const uint8_t* data, size_t size)
+{
+    // Decode the incoming request.
+    ActorList incoming;
+    PacketActorCombatRequest pkt;
+    pkt.setActorList(&incoming);
+    if (!pkt.decode(data, size)) return;
+
+    // Tag with the sending client's guid before any routing decisions.
+    incoming.authorityGuid = c.guid;
+
+    PacketActorCombatRequest out;
+    out.setActorList(&incoming);
+
+    // NPC->player damage: routed by the cell authority to the victim player.
+    // This must be checked BEFORE the authority guard because the sender IS
+    // the authority in this case (authority forwards NPC hits to the victim).
+    if (incoming.victimPlayerGuid != 0)
+    {
+        for (auto& [conn, client] : mClients)
+        {
+            if (client.guid == incoming.victimPlayerGuid)
+            {
+                sendTo(conn, out.encode(), true);
+                Log(Debug::Info) << "[Server] Routed NpcPlayerDamage from guid=" << c.guid
+                                 << " to victim guid=" << incoming.victimPlayerGuid;
+                break;
+            }
+        }
+        return;
+    }
+
+    // Normal non-authority->authority: find the cell and validate sender is not authority.
+    auto cellIt = mWorld.actorCells.find(incoming.cellId);
+    if (cellIt == mWorld.actorCells.end()) return;
+
+    const uint32_t authorityGuid = cellIt->second.authorityGuid;
+    if (authorityGuid == 0 || authorityGuid == c.guid)
+        return; // sender already has authority or no one does
+
+    // Route to cell authority.
+    for (auto& [conn, client] : mClients)
+    {
+        if (client.guid == authorityGuid)
+        {
+            sendTo(conn, out.encode(), true);
+            break;
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------

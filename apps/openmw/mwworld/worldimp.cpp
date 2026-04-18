@@ -71,6 +71,7 @@
 #include "../mwmp/Main.hpp"
 #include "../mwmp/sync/ObjectSync.hpp"
 #include "../mwmp/sync/PlayerSync.hpp"
+#include "../mwmp/sync/ActorSync.hpp"
 #include "../mwmp/sync/WorldObjectSync.hpp"
 #endif
 
@@ -3123,10 +3124,15 @@ namespace MWWorld
             const ESM::Spell* spell = mStore.get<ESM::Spell>().find(selectedSpell);
             const bool castSucceeded = cast.cast(spell);
 #ifdef BUILD_MULTIPLAYER
-            if (castSucceeded && casterIsPlayer && mwmp::Main::isInitialised())
+            if (castSucceeded && mwmp::Main::isInitialised())
             {
-                mwmp::Main::get().getPlayerSync().notifyLocalCastRelease(
-                    spell->mId.serializeText(), getSpellcastAnimationFromEffects(spell->mEffects), target);
+                if (casterIsPlayer)
+                    mwmp::Main::get().getPlayerSync().notifyLocalCastRelease(
+                        spell->mId.serializeText(), getSpellcastAnimationFromEffects(spell->mEffects), target);
+                else
+                    mwmp::Main::get().getActorSync().notifyNpcCast(
+                        actor, spell->mId.serializeText(),
+                        getSpellcastAnimationFromEffects(spell->mEffects), target, true);
             }
 #endif
         }
@@ -3138,13 +3144,18 @@ namespace MWWorld
                 const auto& itemPtr = *inv.getSelectedEnchantItem();
                 const bool castSucceeded = cast.cast(itemPtr);
 #ifdef BUILD_MULTIPLAYER
-                if (castSucceeded && casterIsPlayer && mwmp::Main::isInitialised())
+                if (castSucceeded && mwmp::Main::isInitialised())
                 {
                     const ESM::RefId& enchantmentId = itemPtr.getClass().getEnchantment(itemPtr);
                     const ESM::Enchantment* enchantment = mStore.get<ESM::Enchantment>().find(enchantmentId);
-                    mwmp::Main::get().getPlayerSync().notifyLocalCastRelease(
-                        itemPtr.getCellRef().getRefId().serializeText(),
-                        getSpellcastAnimationFromEffects(enchantment->mEffects), target);
+                    if (casterIsPlayer)
+                        mwmp::Main::get().getPlayerSync().notifyLocalCastRelease(
+                            itemPtr.getCellRef().getRefId().serializeText(),
+                            getSpellcastAnimationFromEffects(enchantment->mEffects), target);
+                    else
+                        mwmp::Main::get().getActorSync().notifyNpcCast(
+                            actor, itemPtr.getCellRef().getRefId().serializeText(),
+                            getSpellcastAnimationFromEffects(enchantment->mEffects), target, true);
                 }
 #endif
             }

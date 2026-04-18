@@ -3,9 +3,12 @@
 
 #include <filesystem>
 #include <memory>
+#include <osg/Vec3f>
 #include <string>
 #include <vector>
 #include <components/openmw-mp/Packets/System/PacketHandshake.hpp>
+
+namespace MWWorld { class Ptr; }
 
 namespace mwmp
 {
@@ -97,6 +100,10 @@ namespace mwmp
         static bool        isConnected();
         // Gracefully disconnect; safe to call from any thread context
         void               disconnect(const std::string& reason = "Client disconnect");
+        void               sendActorCombatRequest(const MWWorld::Ptr& victim, float damage, bool healthDamage,
+            bool knocked, const osg::Vec3f& hitPos, int attackType, float attackStrength);
+        void               sendActorNpcPlayerHit(uint32_t victimGuid, const MWWorld::Ptr& npcAttacker, float damage,
+            bool healthDamage, bool isDead, int attackType);
 
         // Restored chargen data — populated from PacketCharacterData after character selection
         const std::string& getRestoredRace()      const { return mRestoredRace; }

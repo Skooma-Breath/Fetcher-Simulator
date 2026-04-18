@@ -24,13 +24,23 @@ namespace mwmp
         // ------------------------------------------------------------------
         Position    position;
         Velocity    velocity;
+        bool        isMoving = false;
+        bool        hasWeaponDrawn = false;
+        bool        hasSpellReadied = false;
+        bool        isAttackingOrCasting = false;
 
         // ------------------------------------------------------------------
         // Combat
         // ------------------------------------------------------------------
         DynamicStats dynamicStats;
         AnimFlags    animFlags;
+        AnimPlay     animPlay;
         Attack       attack;
+        CastSpell    cast;
+        uint8_t      deathState = 0;
+        bool         isDead = false;
+        bool         isInstantDeath = false;
+        std::string  deathAnimGroup;         // e.g. "death1"/"death2"/"death_knock_down" synced from authority
 
         // ------------------------------------------------------------------
         // AI
@@ -61,6 +71,11 @@ namespace mwmp
         std::string         cellId;
         std::vector<BaseActor> actors;
         bool                isAuthority = false;  // true = sender is authority for this cell
+        uint32_t            authorityGuid = 0;
+        uint32_t            victimPlayerGuid = 0;   // non-zero = this request targets a player (NPC->player damage)
+        uint32_t            authorityGeneration = 0;
+        uint32_t            snapshotSequence = 0;
+        uint64_t            serverTimestamp = 0;
     };
 
 } // namespace mwmp

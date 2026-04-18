@@ -124,6 +124,13 @@ namespace mwmp
         float    blockedMoveSpeed = 0.f; // sender-side expected pace for wall-blocked movement
         float    jumpVz = 0.f;           // launch velocity for remote jump arcs
 
+        // The current animation group being played on the lower body of the authority NPC.
+        // Examples: "idle", "idle3", "walkforward", "runforward", "sneak", "swimwalkforward", etc.
+        // Synced from authority at 20 Hz along with position. Non-authority clients replay
+        // this group directly via Animation::play() / Animation::disable() so NPCs animate
+        // identically across all clients, including idle variants and locomotion.
+        std::string currentAnimGroup;
+
         // movementFlags bit constants — must match the encode side in PlayerSync
         static constexpr uint32_t MF_RUN   = (1u << 0);
         static constexpr uint32_t MF_SNEAK = (1u << 1);
