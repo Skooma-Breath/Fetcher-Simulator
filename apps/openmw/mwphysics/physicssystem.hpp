@@ -87,6 +87,7 @@ namespace MWPhysics
         bool mIsOnGround;
         bool mIsOnSlope;
         bool mWalkingOnWater;
+        bool mSuppressFallHeightAccumulation;
         const bool mInert;
         btCollisionObject* mCollisionObject;
         const float mSwimLevel;

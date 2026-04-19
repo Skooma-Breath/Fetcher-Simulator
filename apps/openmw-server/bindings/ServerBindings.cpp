@@ -6,6 +6,7 @@
 #include <sol/sol.hpp>
 #include <components/debug/debuglog.hpp>
 
+#include <optional>
 #include <tuple>
 
 #include "PlayerBindings.hpp"
@@ -37,6 +38,56 @@ namespace
         table["cell"] = object.cellId;
         table["position"] = makePositionTable(lua, object.position);
         return sol::make_object(thisState, LuaUtil::makeReadOnly(table));
+    }
+
+    sol::object makeSurfPhysicsValue(sol::this_state thisState, const SurfPhysicsSettings& settings)
+    {
+        sol::state_view lua(thisState);
+        sol::table table(lua, sol::create);
+        table["cellId"] = settings.cellId;
+        table["enabled"] = settings.enabled;
+        table["airAccel"] = settings.airAcceleration;
+        table["maxAirSpeed"] = settings.maxAirSpeed;
+        table["friction"] = settings.groundFriction;
+        table["groundAccel"] = settings.groundAcceleration;
+        table["jumpSpeed"] = settings.jumpSpeed;
+        table["gravityMult"] = settings.gravityMultiplier;
+        table["gravity"] = settings.gravityMultiplier;
+        table["overbounce"] = settings.overbounce;
+        table["rampAngle"] = settings.rampAngle;
+        table["impactOverbounce"] = settings.impactOverbounce;
+        table["impactVelocityThreshold"] = settings.impactVelocityThreshold;
+        table["surfPhysicsEnabled"] = settings.enabled;
+        return sol::make_object(thisState, LuaUtil::makeReadOnly(table));
+    }
+
+    sol::object makePlayerMarkValue(sol::this_state thisState, const PlayerMark& mark)
+    {
+        sol::state_view lua(thisState);
+        sol::table table(lua, sol::create);
+        table["name"] = mark.name;
+        table["cell"] = mark.cell;
+        table["position"] = makePositionTable(lua, mark.position);
+        return sol::make_object(thisState, LuaUtil::makeReadOnly(table));
+    }
+
+    std::optional<Position> parsePositionTable(const sol::table& table)
+    {
+        const auto x = table.get<sol::optional<double>>("x");
+        const auto y = table.get<sol::optional<double>>("y");
+        const auto z = table.get<sol::optional<double>>("z");
+        if (!x || !y || !z)
+            return std::nullopt;
+
+        Position position;
+        position.pos[0] = static_cast<float>(*x);
+        position.pos[1] = static_cast<float>(*y);
+        position.pos[2] = static_cast<float>(*z);
+        position.rot[0] = static_cast<float>(table.get_or("rx", 0.0));
+        position.rot[1] = static_cast<float>(table.get_or("ry", 0.0));
+        position.rot[2] = static_cast<float>(table.get_or("rz", 0.0));
+        position.isTeleporting = table.get_or("isTeleporting", false);
+        return position;
     }
 }
 
@@ -179,6 +230,423 @@ sol::table initMpPackage(LuaUtil::LuaView& view, LuaServerContext* context, LuaU
     {
         if (context) context->queueRelayPlayerChat(guid, text);
     });
+
+    mp.set_function("teleportPlayer", [context](uint32_t guid, const std::string& cellId, const sol::table& positionTable) -> bool
+    {
+        if (!context || guid == 0 || cellId.empty())
+            return false;
+
+        auto position = parsePositionTable(positionTable);
+        if (!position)
+            return false;
+
+        position->isTeleporting = true;
+        context->queueTeleportPlayer(guid, cellId, *position);
+        return true;
+    });
+    mp.set_function("TeleportPlayer", [context](uint32_t guid, const std::string& cellId, const sol::table& positionTable) -> bool
+    {
+        if (!context || guid == 0 || cellId.empty())
+            return false;
+
+        auto position = parsePositionTable(positionTable);
+        if (!position)
+            return false;
+
+        position->isTeleporting = true;
+        context->queueTeleportPlayer(guid, cellId, *position);
+        return true;
+    });
+
+    mp.set_function("getPlayerMarks", [context](uint32_t guid, sol::this_state ts) -> sol::table
+    {
+        sol::state_view lua(ts);
+        sol::table marks(lua, sol::create);
+        if (!context || guid == 0)
+            return marks;
+
+        int index = 1;
+        for (const auto& mark : context->getPlayerMarks(guid))
+            marks[index++] = makePlayerMarkValue(ts, mark);
+        return marks;
+    });
+    mp.set_function("GetPlayerMarks", [context](uint32_t guid, sol::this_state ts) -> sol::table
+    {
+        sol::state_view lua(ts);
+        sol::table marks(lua, sol::create);
+        if (!context || guid == 0)
+            return marks;
+
+        int index = 1;
+        for (const auto& mark : context->getPlayerMarks(guid))
+            marks[index++] = makePlayerMarkValue(ts, mark);
+        return marks;
+    });
+
+    mp.set_function("savePlayerMark",
+        [context](uint32_t guid, const std::string& name, const std::string& cellId, const sol::table& positionTable) -> bool
+    {
+        if (!context || guid == 0 || name.empty() || cellId.empty())
+            return false;
+
+        auto position = parsePositionTable(positionTable);
+        if (!position)
+            return false;
+
+        PlayerMark mark;
+        mark.name = name;
+        mark.cell = cellId;
+        mark.position = *position;
+        context->upsertPlayerMark(guid, mark);
+        context->queueUpsertPlayerMark(guid, mark);
+        return true;
+    });
+    mp.set_function("SavePlayerMark",
+        [context](uint32_t guid, const std::string& name, const std::string& cellId, const sol::table& positionTable) -> bool
+    {
+        if (!context || guid == 0 || name.empty() || cellId.empty())
+            return false;
+
+        auto position = parsePositionTable(positionTable);
+        if (!position)
+            return false;
+
+        PlayerMark mark;
+        mark.name = name;
+        mark.cell = cellId;
+        mark.position = *position;
+        context->upsertPlayerMark(guid, mark);
+        context->queueUpsertPlayerMark(guid, mark);
+        return true;
+    });
+
+    mp.set_function("deletePlayerMark", [context](uint32_t guid, const std::string& name) -> bool
+    {
+        if (!context || guid == 0 || name.empty())
+            return false;
+
+        context->deletePlayerMark(guid, name);
+        context->queueDeletePlayerMark(guid, name);
+        return true;
+    });
+    mp.set_function("DeletePlayerMark", [context](uint32_t guid, const std::string& name) -> bool
+    {
+        if (!context || guid == 0 || name.empty())
+            return false;
+
+        context->deletePlayerMark(guid, name);
+        context->queueDeletePlayerMark(guid, name);
+        return true;
+    });
+
+    auto applyCellSurfSettings = [context](const std::string& cellId, const auto& updater) -> bool
+    {
+        if (!context || cellId.empty())
+            return false;
+
+        auto settings = context->getCellSurfPhysicsSettings(cellId);
+        settings.cellId = cellId;
+        updater(settings);
+        context->setCellSurfPhysicsSettings(settings);
+        return true;
+    };
+
+    auto mergeSurfPhysicsValues = [](SurfPhysicsSettings& settings, const sol::table& values)
+    {
+        settings.enabled = values.get_or("enabled", settings.enabled);
+        settings.enabled = values.get_or("surfPhysicsEnabled", settings.enabled);
+        settings.airAcceleration = values.get_or("airAccel", settings.airAcceleration);
+        settings.maxAirSpeed = values.get_or("maxAirSpeed", settings.maxAirSpeed);
+        settings.groundFriction = values.get_or("friction", settings.groundFriction);
+        settings.groundAcceleration = values.get_or("groundAccel", settings.groundAcceleration);
+        settings.jumpSpeed = values.get_or("jumpSpeed", settings.jumpSpeed);
+        settings.gravityMultiplier = values.get_or("gravityMult", settings.gravityMultiplier);
+        settings.gravityMultiplier = values.get_or("gravity", settings.gravityMultiplier);
+        settings.overbounce = values.get_or("overbounce", settings.overbounce);
+        settings.rampAngle = values.get_or("rampAngle", settings.rampAngle);
+        settings.impactOverbounce = values.get_or("impactOverbounce", settings.impactOverbounce);
+        settings.impactVelocityThreshold
+            = values.get_or("impactVelocityThreshold", settings.impactVelocityThreshold);
+    };
+
+    mp.set_function("getCellPhysics", [context](const std::string& cellId, sol::this_state ts) -> sol::object
+    {
+        if (!context || cellId.empty())
+            return sol::make_object(ts, sol::nil);
+        return makeSurfPhysicsValue(ts, context->getCellSurfPhysicsSettings(cellId));
+    });
+    mp.set_function("GetCellPhysics", [context](const std::string& cellId, sol::this_state ts) -> sol::object
+    {
+        if (!context || cellId.empty())
+            return sol::make_object(ts, sol::nil);
+        return makeSurfPhysicsValue(ts, context->getCellSurfPhysicsSettings(cellId));
+    });
+
+    mp.set_function("setCellPhysics",
+        [applyCellSurfSettings, mergeSurfPhysicsValues](const std::string& cellId, const sol::table& values) -> bool
+    {
+        return applyCellSurfSettings(cellId, [&values, mergeSurfPhysicsValues](SurfPhysicsSettings& settings)
+        {
+            mergeSurfPhysicsValues(settings, values);
+        });
+    });
+    mp.set_function("SetCellPhysics",
+        [applyCellSurfSettings, mergeSurfPhysicsValues](const std::string& cellId, const sol::table& values) -> bool
+    {
+        return applyCellSurfSettings(cellId, [&values, mergeSurfPhysicsValues](SurfPhysicsSettings& settings)
+        {
+            mergeSurfPhysicsValues(settings, values);
+        });
+    });
+
+    mp.set_function("getPlayerPhysics", [context](uint32_t guid, sol::this_state ts) -> sol::object
+    {
+        if (!context || guid == 0)
+            return sol::make_object(ts, sol::nil);
+        return makeSurfPhysicsValue(ts, context->getPlayerSurfPhysicsSettings(guid));
+    });
+    mp.set_function("GetPlayerPhysics", [context](uint32_t guid, sol::this_state ts) -> sol::object
+    {
+        if (!context || guid == 0)
+            return sol::make_object(ts, sol::nil);
+        return makeSurfPhysicsValue(ts, context->getPlayerSurfPhysicsSettings(guid));
+    });
+    mp.set_function("setPlayerPhysics",
+        [context, mergeSurfPhysicsValues](uint32_t guid, const sol::table& values) -> bool
+    {
+        if (!context || guid == 0)
+            return false;
+
+        auto settings = context->getPlayerSurfPhysicsSettings(guid);
+        mergeSurfPhysicsValues(settings, values);
+        context->setPlayerSurfPhysicsSettings(guid, settings);
+        return true;
+    });
+    mp.set_function("SetPlayerPhysics",
+        [context, mergeSurfPhysicsValues](uint32_t guid, const sol::table& values) -> bool
+    {
+        if (!context || guid == 0)
+            return false;
+
+        auto settings = context->getPlayerSurfPhysicsSettings(guid);
+        mergeSurfPhysicsValues(settings, values);
+        context->setPlayerSurfPhysicsSettings(guid, settings);
+        return true;
+    });
+    mp.set_function("clearPlayerPhysics", [context](uint32_t guid) -> bool
+    {
+        if (!context || guid == 0)
+            return false;
+        context->clearPlayerSurfPhysicsSettings(guid);
+        return true;
+    });
+    mp.set_function("ClearPlayerPhysics", [context](uint32_t guid) -> bool
+    {
+        if (!context || guid == 0)
+            return false;
+        context->clearPlayerSurfPhysicsSettings(guid);
+        return true;
+    });
+
+    auto sendSettings = [context](const std::string& cellId)
+    {
+        if (context) context->queueRefreshCellGameSettings(cellId);
+    };
+    mp.set_function("sendCellPhysics", sendSettings);
+    mp.set_function("sendSettings", sendSettings);
+    mp.set_function("SendSettings", sendSettings);
+    mp.set_function("sendPlayerSettings", [context](uint32_t guid)
+    {
+        if (context) context->queueRefreshPlayerGameSettings(guid);
+    });
+    mp.set_function("SendPlayerSettings", [context](uint32_t guid)
+    {
+        if (context) context->queueRefreshPlayerGameSettings(guid);
+    });
+
+    auto getAirAccel = [context](const std::string& cellId) -> float
+    {
+        return context ? context->getCellSurfPhysicsSettings(cellId).airAcceleration : SurfPhysicsSettings{}.airAcceleration;
+    };
+    auto setAirAccel = [applyCellSurfSettings](const std::string& cellId, double value) -> bool
+    {
+        return applyCellSurfSettings(cellId, [value](SurfPhysicsSettings& settings)
+        {
+            settings.airAcceleration = static_cast<float>(value);
+        });
+    };
+    mp.set_function("getAirAccel", getAirAccel);
+    mp.set_function("GetAirAccel", getAirAccel);
+    mp.set_function("setAirAccel", setAirAccel);
+    mp.set_function("SetAirAccel", setAirAccel);
+
+    auto getMaxAirSpeed = [context](const std::string& cellId) -> float
+    {
+        return context ? context->getCellSurfPhysicsSettings(cellId).maxAirSpeed : SurfPhysicsSettings{}.maxAirSpeed;
+    };
+    auto setMaxAirSpeed = [applyCellSurfSettings](const std::string& cellId, double value) -> bool
+    {
+        return applyCellSurfSettings(cellId, [value](SurfPhysicsSettings& settings)
+        {
+            settings.maxAirSpeed = static_cast<float>(value);
+        });
+    };
+    mp.set_function("getMaxAirSpeed", getMaxAirSpeed);
+    mp.set_function("GetMaxAirSpeed", getMaxAirSpeed);
+    mp.set_function("setMaxAirSpeed", setMaxAirSpeed);
+    mp.set_function("SetMaxAirSpeed", setMaxAirSpeed);
+
+    auto getFriction = [context](const std::string& cellId) -> float
+    {
+        return context ? context->getCellSurfPhysicsSettings(cellId).groundFriction : SurfPhysicsSettings{}.groundFriction;
+    };
+    auto setFriction = [applyCellSurfSettings](const std::string& cellId, double value) -> bool
+    {
+        return applyCellSurfSettings(cellId, [value](SurfPhysicsSettings& settings)
+        {
+            settings.groundFriction = static_cast<float>(value);
+        });
+    };
+    mp.set_function("getFriction", getFriction);
+    mp.set_function("GetFriction", getFriction);
+    mp.set_function("setFriction", setFriction);
+    mp.set_function("SetFriction", setFriction);
+
+    auto getGroundAccel = [context](const std::string& cellId) -> float
+    {
+        return context ? context->getCellSurfPhysicsSettings(cellId).groundAcceleration
+                       : SurfPhysicsSettings{}.groundAcceleration;
+    };
+    auto setGroundAccel = [applyCellSurfSettings](const std::string& cellId, double value) -> bool
+    {
+        return applyCellSurfSettings(cellId, [value](SurfPhysicsSettings& settings)
+        {
+            settings.groundAcceleration = static_cast<float>(value);
+        });
+    };
+    mp.set_function("getGroundAccel", getGroundAccel);
+    mp.set_function("GetGroundAccel", getGroundAccel);
+    mp.set_function("setGroundAccel", setGroundAccel);
+    mp.set_function("SetGroundAccel", setGroundAccel);
+
+    auto getJumpSpeed = [context](const std::string& cellId) -> float
+    {
+        return context ? context->getCellSurfPhysicsSettings(cellId).jumpSpeed : SurfPhysicsSettings{}.jumpSpeed;
+    };
+    auto setJumpSpeed = [applyCellSurfSettings](const std::string& cellId, double value) -> bool
+    {
+        return applyCellSurfSettings(cellId, [value](SurfPhysicsSettings& settings)
+        {
+            settings.jumpSpeed = static_cast<float>(value);
+        });
+    };
+    mp.set_function("getJumpSpeed", getJumpSpeed);
+    mp.set_function("GetJumpSpeed", getJumpSpeed);
+    mp.set_function("setJumpSpeed", setJumpSpeed);
+    mp.set_function("SetJumpSpeed", setJumpSpeed);
+
+    auto getGravityMult = [context](const std::string& cellId) -> float
+    {
+        return context ? context->getCellSurfPhysicsSettings(cellId).gravityMultiplier
+                       : SurfPhysicsSettings{}.gravityMultiplier;
+    };
+    auto setGravityMult = [applyCellSurfSettings](const std::string& cellId, double value) -> bool
+    {
+        return applyCellSurfSettings(cellId, [value](SurfPhysicsSettings& settings)
+        {
+            settings.gravityMultiplier = static_cast<float>(value);
+        });
+    };
+    mp.set_function("getGravityMult", getGravityMult);
+    mp.set_function("GetGravityMult", getGravityMult);
+    mp.set_function("getGravity", getGravityMult);
+    mp.set_function("GetGravity", getGravityMult);
+    mp.set_function("setGravityMult", setGravityMult);
+    mp.set_function("SetGravityMult", setGravityMult);
+    mp.set_function("setGravity", setGravityMult);
+    mp.set_function("SetGravity", setGravityMult);
+
+    auto getOverbounce = [context](const std::string& cellId) -> float
+    {
+        return context ? context->getCellSurfPhysicsSettings(cellId).overbounce : SurfPhysicsSettings{}.overbounce;
+    };
+    auto setOverbounce = [applyCellSurfSettings](const std::string& cellId, double value) -> bool
+    {
+        return applyCellSurfSettings(cellId, [value](SurfPhysicsSettings& settings)
+        {
+            settings.overbounce = static_cast<float>(value);
+        });
+    };
+    mp.set_function("getOverbounce", getOverbounce);
+    mp.set_function("GetOverbounce", getOverbounce);
+    mp.set_function("setOverbounce", setOverbounce);
+    mp.set_function("SetOverbounce", setOverbounce);
+
+    auto getRampAngle = [context](const std::string& cellId) -> float
+    {
+        return context ? context->getCellSurfPhysicsSettings(cellId).rampAngle : SurfPhysicsSettings{}.rampAngle;
+    };
+    auto setRampAngle = [applyCellSurfSettings](const std::string& cellId, double value) -> bool
+    {
+        return applyCellSurfSettings(cellId, [value](SurfPhysicsSettings& settings)
+        {
+            settings.rampAngle = static_cast<float>(value);
+        });
+    };
+    mp.set_function("getRampAngle", getRampAngle);
+    mp.set_function("GetRampAngle", getRampAngle);
+    mp.set_function("setRampAngle", setRampAngle);
+    mp.set_function("SetRampAngle", setRampAngle);
+
+    auto getImpactOverbounce = [context](const std::string& cellId) -> float
+    {
+        return context ? context->getCellSurfPhysicsSettings(cellId).impactOverbounce
+                       : SurfPhysicsSettings{}.impactOverbounce;
+    };
+    auto setImpactOverbounce = [applyCellSurfSettings](const std::string& cellId, double value) -> bool
+    {
+        return applyCellSurfSettings(cellId, [value](SurfPhysicsSettings& settings)
+        {
+            settings.impactOverbounce = static_cast<float>(value);
+        });
+    };
+    mp.set_function("getImpactOverbounce", getImpactOverbounce);
+    mp.set_function("GetImpactOverbounce", getImpactOverbounce);
+    mp.set_function("setImpactOverbounce", setImpactOverbounce);
+    mp.set_function("SetImpactOverbounce", setImpactOverbounce);
+
+    auto getImpactVelocityThreshold = [context](const std::string& cellId) -> float
+    {
+        return context ? context->getCellSurfPhysicsSettings(cellId).impactVelocityThreshold
+                       : SurfPhysicsSettings{}.impactVelocityThreshold;
+    };
+    auto setImpactVelocityThreshold = [applyCellSurfSettings](const std::string& cellId, double value) -> bool
+    {
+        return applyCellSurfSettings(cellId, [value](SurfPhysicsSettings& settings)
+        {
+            settings.impactVelocityThreshold = static_cast<float>(value);
+        });
+    };
+    mp.set_function("getImpactVelocityThreshold", getImpactVelocityThreshold);
+    mp.set_function("GetImpactVelocityThreshold", getImpactVelocityThreshold);
+    mp.set_function("setImpactVelocityThreshold", setImpactVelocityThreshold);
+    mp.set_function("SetImpactVelocityThreshold", setImpactVelocityThreshold);
+
+    auto getSurfPhysicsEnabled = [context](const std::string& cellId) -> bool
+    {
+        return context ? context->getCellSurfPhysicsSettings(cellId).enabled : false;
+    };
+    auto setSurfPhysicsEnabled = [applyCellSurfSettings](const std::string& cellId, bool enabled) -> bool
+    {
+        return applyCellSurfSettings(cellId, [enabled](SurfPhysicsSettings& settings)
+        {
+            settings.enabled = enabled;
+        });
+    };
+    mp.set_function("getSurfPhysicsEnabled", getSurfPhysicsEnabled);
+    mp.set_function("GetSurfPhysicsEnabled", getSurfPhysicsEnabled);
+    mp.set_function("setSurfPhysicsEnabled", setSurfPhysicsEnabled);
+    mp.set_function("SetSurfPhysicsEnabled", setSurfPhysicsEnabled);
 
     if (storage)
         mp["storage"] = LuaUtil::LuaStorage::initGlobalPackage(view, storage);

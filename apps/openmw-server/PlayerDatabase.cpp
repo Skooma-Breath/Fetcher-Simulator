@@ -140,6 +140,22 @@ CREATE TABLE IF NOT EXISTS character_equipment (
     soul                  TEXT    NOT NULL DEFAULT '',
     PRIMARY KEY(character_id, slot)
 );
+
+CREATE TABLE IF NOT EXISTS character_marks (
+    character_id          INTEGER NOT NULL REFERENCES characters(id) ON DELETE CASCADE,
+    mark_name             TEXT    NOT NULL,
+    cell                  TEXT    NOT NULL DEFAULT '',
+    pos_x                 REAL    NOT NULL DEFAULT 0,
+    pos_y                 REAL    NOT NULL DEFAULT 0,
+    pos_z                 REAL    NOT NULL DEFAULT 0,
+    rot_x                 REAL    NOT NULL DEFAULT 0,
+    rot_y                 REAL    NOT NULL DEFAULT 0,
+    rot_z                 REAL    NOT NULL DEFAULT 0,
+    PRIMARY KEY(character_id, mark_name)
+);
+
+CREATE INDEX IF NOT EXISTS idx_character_marks_character
+    ON character_marks(character_id);
 )SQL";
 
 // Migration: add chargen columns to databases created before they existed.
@@ -185,6 +201,18 @@ static const char* kMigrations[] = {
     "  enchantment_charge REAL NOT NULL DEFAULT -1,"
     "  soul TEXT NOT NULL DEFAULT '',"
     "  PRIMARY KEY(character_id, slot))",
+    "CREATE TABLE IF NOT EXISTS character_marks ("
+    "  character_id INTEGER NOT NULL REFERENCES characters(id) ON DELETE CASCADE,"
+    "  mark_name TEXT NOT NULL,"
+    "  cell TEXT NOT NULL DEFAULT '',"
+    "  pos_x REAL NOT NULL DEFAULT 0,"
+    "  pos_y REAL NOT NULL DEFAULT 0,"
+    "  pos_z REAL NOT NULL DEFAULT 0,"
+    "  rot_x REAL NOT NULL DEFAULT 0,"
+    "  rot_y REAL NOT NULL DEFAULT 0,"
+    "  rot_z REAL NOT NULL DEFAULT 0,"
+    "  PRIMARY KEY(character_id, mark_name))",
+    "CREATE INDEX IF NOT EXISTS idx_character_marks_character ON character_marks(character_id)",
 };
 
 // ============================================================================
@@ -494,6 +522,73 @@ void PlayerDatabase::setNickname(int64_t characterId, std::string_view nickname)
     sqlite3_bind_text (s, 1, nickname.data(), static_cast<int>(nickname.size()), SQLITE_TRANSIENT);
     sqlite3_bind_int64(s, 2, characterId);
     checkSqlite(sqlite3_step(s), mDb, "setNickname");
+    sqlite3_finalize(s);
+}
+
+std::vector<PlayerMark> PlayerDatabase::loadCharacterMarks(int64_t characterId)
+{
+    sqlite3_stmt* s = prepare(
+        "SELECT mark_name, cell, pos_x, pos_y, pos_z, rot_x, rot_y, rot_z"
+        " FROM character_marks WHERE character_id=?1 ORDER BY mark_name");
+    sqlite3_bind_int64(s, 1, characterId);
+
+    std::vector<PlayerMark> marks;
+    while (sqlite3_step(s) == SQLITE_ROW)
+    {
+        PlayerMark mark;
+        auto col = [&](int i) -> std::string {
+            const char* t = reinterpret_cast<const char*>(sqlite3_column_text(s, i));
+            return t ? t : "";
+        };
+
+        mark.name = col(0);
+        mark.cell = col(1);
+        mark.position.pos[0] = static_cast<float>(sqlite3_column_double(s, 2));
+        mark.position.pos[1] = static_cast<float>(sqlite3_column_double(s, 3));
+        mark.position.pos[2] = static_cast<float>(sqlite3_column_double(s, 4));
+        mark.position.rot[0] = static_cast<float>(sqlite3_column_double(s, 5));
+        mark.position.rot[1] = static_cast<float>(sqlite3_column_double(s, 6));
+        mark.position.rot[2] = static_cast<float>(sqlite3_column_double(s, 7));
+        marks.push_back(std::move(mark));
+    }
+
+    sqlite3_finalize(s);
+    return marks;
+}
+
+void PlayerDatabase::upsertCharacterMark(int64_t characterId, const PlayerMark& mark)
+{
+    sqlite3_stmt* s = prepare(
+        "INSERT INTO character_marks(character_id, mark_name, cell, pos_x, pos_y, pos_z, rot_x, rot_y, rot_z)"
+        " VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)"
+        " ON CONFLICT(character_id, mark_name) DO UPDATE SET"
+        " cell=excluded.cell,"
+        " pos_x=excluded.pos_x,"
+        " pos_y=excluded.pos_y,"
+        " pos_z=excluded.pos_z,"
+        " rot_x=excluded.rot_x,"
+        " rot_y=excluded.rot_y,"
+        " rot_z=excluded.rot_z");
+    sqlite3_bind_int64(s, 1, characterId);
+    sqlite3_bind_text(s, 2, mark.name.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(s, 3, mark.cell.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_double(s, 4, mark.position.pos[0]);
+    sqlite3_bind_double(s, 5, mark.position.pos[1]);
+    sqlite3_bind_double(s, 6, mark.position.pos[2]);
+    sqlite3_bind_double(s, 7, mark.position.rot[0]);
+    sqlite3_bind_double(s, 8, mark.position.rot[1]);
+    sqlite3_bind_double(s, 9, mark.position.rot[2]);
+    checkSqlite(sqlite3_step(s), mDb, "upsertCharacterMark");
+    sqlite3_finalize(s);
+}
+
+void PlayerDatabase::deleteCharacterMark(int64_t characterId, std::string_view name)
+{
+    sqlite3_stmt* s = prepare(
+        "DELETE FROM character_marks WHERE character_id=?1 AND mark_name=?2");
+    sqlite3_bind_int64(s, 1, characterId);
+    sqlite3_bind_text(s, 2, name.data(), static_cast<int>(name.size()), SQLITE_TRANSIENT);
+    checkSqlite(sqlite3_step(s), mDb, "deleteCharacterMark");
     sqlite3_finalize(s);
 }
 

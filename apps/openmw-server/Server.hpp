@@ -96,6 +96,11 @@ public:
         LuaStorageAction action, const std::string& section, const std::vector<LuaStorageEntry>& entries);
     void sendLuaStorage(uint32_t guid, LuaStorageAction action,
         const std::string& section, const std::vector<LuaStorageEntry>& entries);
+    void broadcastGameSettingsToCell(const std::string& cellId);
+    void sendGameSettingsToPlayer(uint32_t guid);
+    bool teleportPlayer(uint32_t guid, const std::string& cellId, const Position& position);
+    bool upsertPlayerMark(uint32_t guid, const PlayerMark& mark);
+    bool deletePlayerMark(uint32_t guid, std::string_view name);
 
     // Disconnect a player by guid with a reason string.
     void kickClient(uint32_t guid, const std::string& reason);
@@ -224,6 +229,7 @@ private:
     void refreshActorAuthorityForCell(const std::string& cellId, uint32_t preferredGuid = 0);
     void sendActorAuthorityToClient(HSteamNetConnection conn, const std::string& cellId);
     void sendActorStateToClient(HSteamNetConnection conn, const std::string& cellId);
+    void sendGameSettingsToClient(HSteamNetConnection conn, const std::string& cellId);
     bool validateActorUpdate(const ConnectedClient& c, const ActorList& actorList, const char* packetName);
 
     struct ActorRegistryRecord

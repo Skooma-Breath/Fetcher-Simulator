@@ -1,9 +1,15 @@
 #include "movementsolver.hpp"
 
+#include <algorithm>
+#include <atomic>
+#include <chrono>
+#include <unordered_map>
+
 #include <BulletCollision/CollisionDispatch/btCollisionObject.h>
 #include <BulletCollision/CollisionDispatch/btCollisionWorld.h>
 #include <BulletCollision/CollisionShapes/btConvexShape.h>
 
+#include <components/debug/debuglog.hpp>
 #include <components/esm3/loadgmst.hpp>
 #include <components/misc/convert.hpp>
 
@@ -20,6 +26,7 @@
 #include "projectile.hpp"
 #include "projectileconvexcallback.hpp"
 #include "stepper.hpp"
+#include "surfphysics.hpp"
 #include "trace.h"
 
 #include <cmath>
@@ -34,6 +41,433 @@ namespace MWPhysics
 
     namespace
     {
+        float horizontalLength(const osg::Vec3f& value)
+        {
+            return std::sqrt(value.x() * value.x() + value.y() * value.y());
+        }
+
+        constexpr float sSurfDetachDotTolerance = 0.f;
+        constexpr float sSurfSeamPlaneDistance = 16.f;
+        constexpr float sSurfSeamNormalDotTolerance = 0.9f;
+        constexpr float sSurfReacquireNormalDotTolerance = 0.995f;
+        constexpr float sSurfGlancingCollisionFraction = 0.05f;
+        constexpr float sSurfGlancingImpactThreshold = 48.f;
+
+        bool isWalkableSurfSlope(const osg::Vec3f& normal, const SurfPhysicsSettings& settings)
+        {
+            return normal.z() >= settings.rampAngle;
+        }
+
+        bool isSurfableSlope(const osg::Vec3f& normal, const SurfPhysicsSettings& settings)
+        {
+            return normal.z() > 0.01f && normal.z() < settings.rampAngle;
+        }
+
+        bool shouldStickToSurfPlane(const osg::Vec3f& velocity, const osg::Vec3f& normal)
+        {
+            return velocity * normal <= sSurfDetachDotTolerance;
+        }
+
+        bool isSameSurfPlane(const osg::Vec3f& left, const osg::Vec3f& right)
+        {
+            return left * right >= sSurfSeamNormalDotTolerance;
+        }
+
+        bool isContinuousSurfReacquire(const osg::Vec3f& candidateNormal, const osg::Vec3f& lastNormal)
+        {
+            return candidateNormal * lastNormal >= sSurfReacquireNormalDotTolerance;
+        }
+
+        float surfPlaneDistance(
+            const osg::Vec3f& point, const osg::Vec3f& planeNormal, const osg::Vec3f& planePoint)
+        {
+            return std::abs((point - planePoint) * planeNormal);
+        }
+
+        bool shouldPreserveSurfAcrossSeam(
+            const osg::Vec3f& point, const osg::Vec3f& planeNormal, const osg::Vec3f& planePoint)
+        {
+            return surfPlaneDistance(point, planeNormal, planePoint) <= sSurfSeamPlaneDistance;
+        }
+
+        bool shouldLogSurfDebug()
+        {
+            using Clock = std::chrono::steady_clock;
+            using Ms = std::chrono::milliseconds;
+
+            static std::atomic<long long> sLastLogMs{ 0 };
+            const auto nowMs = std::chrono::duration_cast<Ms>(Clock::now().time_since_epoch()).count();
+            long long lastMs = sLastLogMs.load(std::memory_order_relaxed);
+            while (nowMs - lastMs >= 150)
+            {
+                if (sLastLogMs.compare_exchange_weak(lastMs, nowMs, std::memory_order_relaxed))
+                    return true;
+            }
+            return false;
+        }
+
+        struct SurfContactMemory
+        {
+            osg::Vec3f mNormal;
+            osg::Vec3f mContactPosition;
+        };
+
+        std::unordered_map<const btCollisionObject*, SurfContactMemory>& surfContactMemory()
+        {
+            static std::unordered_map<const btCollisionObject*, SurfContactMemory> sLastSurfContacts;
+            return sLastSurfContacts;
+        }
+
+        bool tryGetStoredSurfContact(
+            const btCollisionObject* obj, osg::Vec3f& normal, osg::Vec3f& contactPosition)
+        {
+            const auto it = surfContactMemory().find(obj);
+            if (it == surfContactMemory().end())
+                return false;
+
+            normal = it->second.mNormal;
+            contactPosition = it->second.mContactPosition;
+            return true;
+        }
+
+        void storeSurfContact(
+            const btCollisionObject* obj, const osg::Vec3f& normal, const osg::Vec3f& contactPosition)
+        {
+            surfContactMemory()[obj] = { normal, contactPosition };
+        }
+
+        void clearStoredSurfContact(const btCollisionObject* obj)
+        {
+            surfContactMemory().erase(obj);
+        }
+
+        void logSurfDebug(const char* phase, const ActorFrameData& actor, const SurfPhysicsSettings& settings,
+            const osg::Vec3f& position, const osg::Vec3f& velocity, const osg::Vec3f& normal, float fraction,
+            bool walkable, bool seenGround, bool onGround, bool onSlope, float velocityIntoSurface,
+            float effectiveOverbounce, bool usedSeamLogic, bool usedNormalPush, bool clipped,
+            float inputPlaneDot, float outputPlaneDot)
+        {
+            if (!shouldLogSurfDebug())
+                return;
+
+            Log(Debug::Info) << "[surf-debug] " << phase << " pos=(" << position.x() << "," << position.y() << ","
+                             << position.z() << ") vel=(" << velocity.x() << "," << velocity.y() << ","
+                             << velocity.z() << ") normal=(" << normal.x() << "," << normal.y() << ","
+                             << normal.z() << ") rampAngle=" << settings.rampAngle << " walkable=" << walkable
+                             << " seenGround=" << seenGround << " onGround=" << onGround
+                             << " onSlope=" << onSlope << " frac=" << fraction
+                             << " into=" << velocityIntoSurface << " overbounce=" << effectiveOverbounce
+                             << " seam=" << usedSeamLogic << " push=" << usedNormalPush
+                             << " clipped=" << clipped << " inDot=" << inputPlaneDot
+                             << " outDot=" << outputPlaneDot;
+        }
+
+        osg::Vec3f clipVelocity(const osg::Vec3f& input, const osg::Vec3f& normal, float overbounce)
+        {
+            float backoff = input * normal;
+            if (backoff < 0.f)
+                backoff *= overbounce;
+
+            osg::Vec3f output = input - normal * backoff;
+            for (int i = 0; i < 3; ++i)
+            {
+                if (output[i] > -0.1f && output[i] < 0.1f)
+                    output[i] = 0.f;
+            }
+            return output;
+        }
+
+        osg::Vec3f calculateWishVelocity(const ActorFrameData& actor, bool underwater)
+        {
+            if (actor.mFlying || underwater)
+            {
+                return (osg::Quat(actor.mRotation.x(), osg::Vec3f(-1, 0, 0))
+                        * osg::Quat(actor.mRotation.y(), osg::Vec3f(0, 0, -1)))
+                    * actor.mMovement;
+            }
+
+            return (osg::Quat(actor.mRotation.y(), osg::Vec3f(0, 0, -1))) * actor.mMovement;
+        }
+
+        void applyStormVelocity(const WorldFrameData& worldData, osg::Vec3f& velocity)
+        {
+            if (!worldData.mIsInStorm || velocity.length2() <= 0.f)
+                return;
+
+            const MWWorld::ESMStore& store = *MWBase::Environment::get().getESMStore();
+            const float fStromWalkMult = store.get<ESM::GameSetting>().find("fStromWalkMult")->mValue.getFloat();
+            const float angleCos = worldData.mStormDirection * velocity / velocity.length();
+            velocity *= 1.f + fStromWalkMult * angleCos;
+        }
+
+        void moveWithSurfPhysics(ActorFrameData& actor, float time, const btCollisionWorld* collisionWorld,
+            const WorldFrameData& worldData, const SurfPhysicsSettings& settings)
+        {
+            actor.mWalkingOnWater = false;
+
+            if (actor.mSkipCollisionDetection)
+            {
+                actor.mPosition += (osg::Quat(actor.mRotation.x(), osg::Vec3f(-1, 0, 0))
+                                       * osg::Quat(actor.mRotation.y(), osg::Vec3f(0, 0, -1)))
+                    * actor.mMovement * time;
+                return;
+            }
+
+            actor.mPosition.z() += actor.mHalfExtentsZ;
+            const float swimlevel = actor.mSwimLevel + actor.mHalfExtentsZ;
+            const bool underwater = actor.mPosition.z() < swimlevel;
+
+            osg::Vec3f velocity = actor.mInertia;
+            const osg::Vec3f wishVelocity = calculateWishVelocity(actor, underwater);
+
+            if (actor.mInert && actor.mMovement.z() > 0.f && underwater)
+            {
+                velocity = osg::Vec3f(0.f, 0.f, 25.f);
+            }
+            else if (underwater || actor.mFlying)
+            {
+                velocity = wishVelocity;
+            }
+            else
+            {
+                osg::Vec3f horizontalWish(wishVelocity.x(), wishVelocity.y(), 0.f);
+                float wishSpeed = horizontalWish.length();
+                osg::Vec3f wishDir(0.f, 0.f, 0.f);
+                if (wishSpeed > 0.f)
+                    wishDir = horizontalWish / wishSpeed;
+
+                const bool canJump = actor.mIsOnGround && !actor.mIsOnSlope;
+                const bool jumpRequested = actor.mMovement.z() > 0.f;
+                if (canJump && jumpRequested)
+                    velocity.z() = settings.jumpSpeed;
+
+                if (canJump)
+                {
+                    const float speed = horizontalLength(velocity);
+                    if (speed > 0.f)
+                    {
+                        const float drop = speed * settings.groundFriction * time;
+                        const float newSpeed = std::max(speed - drop, 0.f);
+                        const float scale = newSpeed / speed;
+                        velocity.x() *= scale;
+                        velocity.y() *= scale;
+                    }
+
+                    if (wishSpeed > 0.f)
+                    {
+                        const float currentSpeed = velocity.x() * wishDir.x() + velocity.y() * wishDir.y();
+                        const float addSpeed = wishSpeed - currentSpeed;
+                        if (addSpeed > 0.f)
+                        {
+                            const float accelSpeed = std::min(settings.groundAcceleration * wishSpeed * time, addSpeed);
+                            velocity.x() += accelSpeed * wishDir.x();
+                            velocity.y() += accelSpeed * wishDir.y();
+                        }
+                    }
+
+                    if (!jumpRequested)
+                        velocity.z() = 0.f;
+                }
+                else
+                {
+                    const float cappedWishSpeed = std::min(wishSpeed, settings.maxAirSpeed);
+                    if (cappedWishSpeed > 0.f)
+                    {
+                        const float currentSpeed = velocity.x() * wishDir.x() + velocity.y() * wishDir.y();
+                        const float addSpeed = cappedWishSpeed - currentSpeed;
+                        if (addSpeed > 0.f)
+                        {
+                            const float accelSpeed = std::min(settings.airAcceleration * cappedWishSpeed * time, addSpeed);
+                            velocity.x() += accelSpeed * wishDir.x();
+                            velocity.y() += accelSpeed * wishDir.y();
+                        }
+                    }
+
+                    velocity.z() -= time * Constants::GravityConst * Constants::UnitsPerMeter
+                        * settings.gravityMultiplier;
+                    if (velocity.z() < 0.f)
+                        velocity.z() *= actor.mSlowFall;
+                    if (actor.mSlowFall < 1.f)
+                    {
+                        velocity.x() *= actor.mSlowFall;
+                        velocity.y() *= actor.mSlowFall;
+                    }
+                }
+            }
+
+            applyStormVelocity(worldData, velocity);
+
+            Stepper stepper(collisionWorld, actor.mCollisionObject);
+            ActorTracer tracer;
+            osg::Vec3f newPosition = actor.mPosition;
+            float remainingTime = time;
+            bool seenGround = actor.mIsOnGround && !actor.mIsOnSlope && !actor.mFlying;
+            bool forceGroundTest = false;
+
+            for (int iterations = 0; iterations < sMaxIterations && remainingTime > 0.0001f; ++iterations)
+            {
+                osg::Vec3f nextpos = newPosition + velocity * remainingTime;
+
+                if (!actor.mFlying && nextpos.z() > swimlevel && newPosition.z() < swimlevel)
+                {
+                    velocity = reject(velocity, osg::Vec3f(0.f, 0.f, -1.f));
+                    continue;
+                }
+
+                if ((newPosition - nextpos).length2() <= 0.0001f)
+                    break;
+
+                tracer.doTrace(actor.mCollisionObject, newPosition, nextpos, collisionWorld);
+                if (tracer.mFraction >= 1.f)
+                {
+                    if (actor.mIsOnSlope)
+                    {
+                        logSurfDebug("free-move", actor, settings, newPosition, velocity, osg::Vec3f(0.f, 0.f, 0.f),
+                            tracer.mFraction, false, seenGround, actor.mIsOnGround, actor.mIsOnSlope, 0.f, 0.f, false,
+                            false, false, 0.f, 0.f);
+                    }
+                    newPosition = tracer.mEndPos;
+                    break;
+                }
+
+                if (isWalkableSurfSlope(tracer.mPlaneNormal, settings) && !actor.mFlying && newPosition.z() >= swimlevel)
+                    seenGround = true;
+
+                const float hitHeight = tracer.mHitPoint.z() - tracer.mEndPos.z() + actor.mHalfExtentsZ;
+                const osg::Vec3f oldPosition = newPosition;
+                bool usedStepLogic = false;
+                if (!isActor(tracer.mHitObject))
+                {
+                    if (hitHeight < Constants::sStepSizeUp)
+                        usedStepLogic = stepper.step(newPosition, velocity, remainingTime, seenGround, iterations == 0);
+
+                    auto* ptrHolder = static_cast<PtrHolder*>(tracer.mHitObject->getUserPointer());
+                    if (Object* hitObject = dynamic_cast<Object*>(ptrHolder))
+                    {
+                        hitObject->addCollision(
+                            actor.mIsPlayer ? ScriptedCollisionType_Player : ScriptedCollisionType_Actor);
+                    }
+                }
+
+                if (usedStepLogic)
+                {
+                    if (actor.mIsAquatic && newPosition.z() + actor.mHalfExtentsZ > actor.mWaterlevel)
+                        newPosition = oldPosition;
+                    else if (!actor.mFlying && actor.mPosition.z() >= swimlevel)
+                        forceGroundTest = true;
+                    continue;
+                }
+
+                const float collisionFraction = tracer.mFraction;
+                remainingTime *= (1.f - collisionFraction);
+
+                const osg::Vec3f planeNormal = tracer.mPlaneNormal;
+                const bool walkableSlope = isWalkableSurfSlope(planeNormal, settings);
+                const float velocityIntoSurface = -(velocity * planeNormal);
+                const float impactFactor = settings.impactVelocityThreshold > 0.f
+                    ? std::clamp(velocityIntoSurface / settings.impactVelocityThreshold, 0.f, 1.f)
+                    : 1.f;
+                const float effectiveOverbounce
+                    = settings.overbounce * (1.f - impactFactor) + settings.impactOverbounce * impactFactor;
+                const float inputPlaneDot = velocity * planeNormal;
+                const bool clipped = inputPlaneDot <= 0.f;
+                velocity = clipped ? clipVelocity(velocity, planeNormal, effectiveOverbounce) : velocity;
+                const float outputPlaneDot = velocity * planeNormal;
+
+                if (!walkableSlope || actor.mIsOnSlope)
+                {
+                    logSurfDebug("collision", actor, settings, tracer.mEndPos, velocity, planeNormal,
+                        collisionFraction, walkableSlope, seenGround, actor.mIsOnGround, actor.mIsOnSlope,
+                        velocityIntoSurface, effectiveOverbounce, false, false, clipped,
+                        inputPlaneDot, outputPlaneDot);
+                }
+
+                osg::Vec3f direction = velocity;
+                if (direction.length2() > 0.f)
+                {
+                    direction.normalize();
+                    newPosition = tracer.mEndPos - direction * sCollisionMargin;
+                }
+                else
+                    newPosition = tracer.mEndPos;
+            }
+
+            bool isOnGround = false;
+            bool isOnSlope = false;
+            actor.mStandingOn = nullptr;
+            if (forceGroundTest || (!actor.mFlying && !underwater && velocity.z() <= 0.f && newPosition.z() >= swimlevel))
+            {
+                const osg::Vec3f from = newPosition;
+                const auto dropDistance = 2 * sGroundOffset + (actor.mIsOnGround ? sStepSizeDown : 0);
+                const osg::Vec3f to = newPosition - osg::Vec3f(0.f, 0.f, dropDistance);
+                tracer.doTrace(actor.mCollisionObject, from, to, collisionWorld);
+                if (tracer.mFraction < 1.f)
+                {
+                    if (!isActor(tracer.mHitObject))
+                    {
+                        const bool walkableSlope = isWalkableSurfSlope(tracer.mPlaneNormal, settings);
+                        isOnGround = true;
+                        isOnSlope = !walkableSlope;
+                        actor.mStandingOn = tracer.mHitObject;
+
+                        logSurfDebug("ground-check", actor, settings, newPosition, velocity, tracer.mPlaneNormal,
+                            tracer.mFraction, walkableSlope, seenGround, isOnGround && !isOnSlope, isOnSlope, 0.f, 0.f,
+                            false, false, false, 0.f, 0.f);
+
+                        if (!isOnSlope && actor.mStandingOn->getBroadphaseHandle()->m_collisionFilterGroup == CollisionType_Water)
+                            actor.mWalkingOnWater = true;
+
+                        if (!actor.mFlying && !isOnSlope)
+                        {
+                            if (tracer.mFraction * dropDistance > sGroundOffset)
+                                newPosition.z() = tracer.mEndPos.z() + sGroundOffset;
+                            else
+                            {
+                                newPosition.z() = tracer.mEndPos.z();
+                                tracer.doTrace(actor.mCollisionObject, newPosition,
+                                    newPosition + osg::Vec3f(0.f, 0.f, 2 * sGroundOffset), collisionWorld);
+                                newPosition = (newPosition + tracer.mEndPos) / 2.f;
+                            }
+                        }
+                    }
+                    else
+                    {
+                        if (!actor.mFlying && isWalkableSurfSlope(tracer.mPlaneNormal, settings)
+                            && tracer.mEndPos.z() + sGroundOffset <= newPosition.z())
+                            newPosition.z() = tracer.mEndPos.z() + sGroundOffset;
+
+                        isOnGround = false;
+                    }
+                }
+
+                if (actor.mStuckFrames > 0)
+                {
+                    isOnGround = true;
+                    isOnSlope = false;
+                }
+            }
+
+            if (isOnSlope)
+                isOnGround = false;
+            if (isOnGround && !isOnSlope)
+                velocity.z() = 0.f;
+
+            actor.mSuppressFallHeightAccumulation = false;
+            if (isOnSlope)
+            {
+                const float surfVerticalDelta = actor.mPosition.z() - newPosition.z();
+                actor.mSuppressFallHeightAccumulation = surfVerticalDelta > 0.f;
+            }
+
+            clearStoredSurfContact(actor.mCollisionObject);
+
+            actor.mInertia = velocity;
+            actor.mIsOnGround = isOnGround;
+            actor.mIsOnSlope = isOnSlope;
+            actor.mPosition = newPosition;
+            actor.mPosition.z() -= actor.mHalfExtentsZ;
+        }
+
         class ContactCollectionCallback : public btCollisionWorld::ContactResultCallback
         {
         public:
@@ -128,6 +562,13 @@ namespace MWPhysics
     void MovementSolver::move(
         ActorFrameData& actor, float time, const btCollisionWorld* collisionWorld, const WorldFrameData& worldData)
     {
+        const auto surfSettings = getSurfPhysicsSettings();
+        if (actor.mIsPlayer && surfSettings.enabled)
+        {
+            moveWithSurfPhysics(actor, time, collisionWorld, worldData, surfSettings);
+            return;
+        }
+
         // Reset per-frame data
         actor.mWalkingOnWater = false;
         // Anything to collide with?

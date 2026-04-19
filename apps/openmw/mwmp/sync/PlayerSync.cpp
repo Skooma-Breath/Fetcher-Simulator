@@ -6,6 +6,8 @@
 
 #include <components/debug/debuglog.hpp>
 #include <components/esm/refid.hpp>
+#include <components/esm/util.hpp>
+#include <components/esm3/loadcell.hpp>
 #include <components/misc/rng.hpp>
 #include <components/openmw-mp/Packets/Player/PacketPlayerPosition.hpp>
 #include <components/openmw-mp/Packets/Player/PacketPlayerCellChange.hpp>
@@ -26,9 +28,11 @@
 #include "../../mwbase/environment.hpp"
 #include "../../mwbase/world.hpp"
 #include "../../mwbase/inputmanager.hpp"
+#include "../../mwbase/luamanager.hpp"
 #include "../../mwbase/mechanicsmanager.hpp"
 #include "../../mwbase/statemanager.hpp"
 #include "../../mwbase/windowmanager.hpp"
+#include "../../mwworld/worldmodel.hpp"
 #include "../../mwrender/camera.hpp"
 #include "../../mwinput/actions.hpp"
 #include "../../mwgui/mode.hpp"
@@ -109,6 +113,37 @@ namespace
             return {};
 
         return *weapon;
+    }
+
+    ESM::Position toEsmPosition(const Position& position)
+    {
+        ESM::Position esmPos;
+        std::memcpy(esmPos.pos, position.pos, sizeof(position.pos));
+        std::memcpy(esmPos.rot, position.rot, sizeof(position.rot));
+        return esmPos;
+    }
+
+    MWWorld::CellStore* resolveTeleportCell(const BasePlayer& authoritative)
+    {
+        MWWorld::WorldModel* worldModel = MWBase::Environment::get().getWorldModel();
+        if (!worldModel)
+            return nullptr;
+
+        if (authoritative.cell.isExterior)
+        {
+            const ESM::RefId worldspace = authoritative.cell.worldspace.empty()
+                ? ESM::Cell::sDefaultWorldspaceId
+                : ESM::RefId::deserializeText(authoritative.cell.worldspace);
+            const auto cellIndex
+                = ESM::positionToExteriorCellLocation(
+                    authoritative.position.pos[0], authoritative.position.pos[1], worldspace);
+            return &worldModel->getExterior(cellIndex);
+        }
+
+        if (authoritative.cell.cellName.empty())
+            return nullptr;
+
+        return worldModel->findCell(authoritative.cell.cellName);
     }
 }
 
@@ -214,12 +249,98 @@ void PlayerSync::forceFullSync()
 // ---------------------------------------------------------------------------
 void PlayerSync::applyServerPositionCorrection(const BasePlayer& auth)
 {
-    // The server has told us we're in the wrong place.
-    // In Phase 1 we just log it; Phase 2 will warp the player.
-    Log(Debug::Warning) << "[MP] Server position correction received ("
-                        << auth.position.pos[0] << ", "
-                        << auth.position.pos[1] << ", "
-                        << auth.position.pos[2] << ")";
+    const MWBase::Environment& env = MWBase::Environment::get();
+    MWBase::World* world = env.getWorld();
+    MWWorld::Ptr player = world ? world->getPlayerPtr() : MWWorld::Ptr{};
+    if (!world || player.isEmpty())
+        return;
+
+    auto& stats = player.getClass().getCreatureStats(player);
+    stats.land(true);
+    stats.setTeleported(true);
+    world->getPlayer().setTeleported(true);
+
+    const osg::Vec3f pos(auth.position.pos[0], auth.position.pos[1], auth.position.pos[2]);
+    const osg::Vec3f rot(auth.position.rot[0], auth.position.rot[1], auth.position.rot[2]);
+    player = world->moveObject(player, pos);
+    world->rotateObject(player, rot);
+
+    if (MWBase::LuaManager* luaManager = env.getLuaManager())
+        luaManager->objectTeleported(player);
+
+    MWMechanics::Movement& movement = player.getClass().getMovementSettings(player);
+    movement.mPosition[0] = 0.f;
+    movement.mPosition[1] = 0.f;
+    movement.mPosition[2] = 0.f;
+    movement.mRotation[0] = 0.f;
+    movement.mRotation[1] = 0.f;
+    movement.mRotation[2] = 0.f;
+    movement.mIsStrafing = false;
+
+    mLocal.position = auth.position;
+    mLocal.position.isTeleporting = false;
+    mLocal.velocity = auth.velocity;
+    mSmoothedVz = 0.f;
+    snapshotPosition();
+
+    Log(Debug::Info) << "[MP] Applied server position correction -> ("
+                     << auth.position.pos[0] << ", "
+                     << auth.position.pos[1] << ", "
+                     << auth.position.pos[2] << ")";
+}
+
+void PlayerSync::applyServerCellChange(const BasePlayer& auth)
+{
+    const MWBase::Environment& env = MWBase::Environment::get();
+    MWBase::World* world = env.getWorld();
+    MWWorld::Ptr player = world ? world->getPlayerPtr() : MWWorld::Ptr{};
+    if (!world || player.isEmpty())
+        return;
+
+    MWWorld::CellStore* destCell = resolveTeleportCell(auth);
+    if (!destCell)
+    {
+        Log(Debug::Warning) << "[MP] Ignoring server cell correction: destination cell not found";
+        return;
+    }
+
+    auto& stats = player.getClass().getCreatureStats(player);
+    stats.land(true);
+    stats.setTeleported(true);
+    world->getPlayer().setTeleported(true);
+
+    const osg::Vec3f pos(auth.position.pos[0], auth.position.pos[1], auth.position.pos[2]);
+    const osg::Vec3f rot(auth.position.rot[0], auth.position.rot[1], auth.position.rot[2]);
+    const bool differentCell = player.getCell() != destCell;
+
+    if (differentCell)
+        world->changeToCell(destCell->getCell()->getId(), toEsmPosition(auth.position), false, true);
+
+    player = world->getPlayerPtr();
+    player = world->moveObject(player, pos);
+    world->rotateObject(player, rot);
+
+    if (MWBase::LuaManager* luaManager = env.getLuaManager())
+        luaManager->objectTeleported(player);
+
+    MWMechanics::Movement& movement = player.getClass().getMovementSettings(player);
+    movement.mPosition[0] = 0.f;
+    movement.mPosition[1] = 0.f;
+    movement.mPosition[2] = 0.f;
+    movement.mRotation[0] = 0.f;
+    movement.mRotation[1] = 0.f;
+    movement.mRotation[2] = 0.f;
+    movement.mIsStrafing = false;
+
+    mLocal.cell = auth.cell;
+    mLocal.position = auth.position;
+    mLocal.position.isTeleporting = false;
+    mLocal.velocity = auth.velocity;
+    mSmoothedVz = 0.f;
+    snapshotCell();
+    snapshotPosition();
+
+    Log(Debug::Info) << "[MP] Applied server cell correction";
 }
 
 void PlayerSync::queueAuthoritativeEquipment(const BasePlayer& authoritative)

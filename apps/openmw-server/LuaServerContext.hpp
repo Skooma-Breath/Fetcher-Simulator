@@ -14,6 +14,7 @@
 #include <vector>
 
 #include <components/openmw-mp/Base/BaseObject.hpp>
+#include <components/openmw-mp/Base/SurfPhysicsSettings.hpp>
 #include <components/lua/configuration.hpp>
 #include <components/lua/luastate.hpp>
 #include <components/lua/scriptscontainer.hpp>
@@ -24,6 +25,7 @@
 
 #include "MpEventQueue.hpp"
 #include "OutboundQueue.hpp"
+#include "PlayerMark.hpp"
 
 namespace mwmp
 {
@@ -39,6 +41,9 @@ struct LuaPlayerSnapshot
     float x = 0.f;
     float y = 0.f;
     float z = 0.f;
+    float rx = 0.f;
+    float ry = 0.f;
+    float rz = 0.f;
     DynamicStats dynamicStats;
     std::array<Skill, BasePlayer::NUM_SKILLS> skills;
     std::vector<Item> inventory;
@@ -84,11 +89,25 @@ public:
     double getUptime() const;
     float getWorldHour() const;
     std::optional<PlacedObject> getPlacedObject(uint32_t mpNum) const;
+    SurfPhysicsSettings getCellSurfPhysicsSettings(const std::string& cellId) const;
+    SurfPhysicsSettings getPlayerSurfPhysicsSettings(uint32_t guid, const std::string& cellId = "") const;
+    SurfPhysicsSettings getEffectiveSurfPhysicsSettings(uint32_t guid, const std::string& cellId) const;
+    std::vector<PlayerMark> getPlayerMarks(uint32_t guid) const;
+    void setPlayerMarks(uint32_t guid, std::vector<PlayerMark> marks);
+    void upsertPlayerMark(uint32_t guid, PlayerMark mark);
+    void deletePlayerMark(uint32_t guid, const std::string& name);
+    void clearPlayerMarks(uint32_t guid);
+    void setCellSurfPhysicsSettings(const SurfPhysicsSettings& settings);
+    void setPlayerSurfPhysicsSettings(uint32_t guid, const SurfPhysicsSettings& settings);
+    void clearPlayerSurfPhysicsSettings(uint32_t guid);
 
     void queueBroadcastServerMessage(const std::string& text);
     void queueBroadcastServerMessageToCell(const std::string& cellId, const std::string& text);
     void queueSendServerMessage(uint32_t guid, const std::string& text);
     void queueRelayPlayerChat(uint32_t guid, const std::string& text);
+    void queueTeleportPlayer(uint32_t guid, const std::string& cellId, const Position& position);
+    void queueUpsertPlayerMark(uint32_t guid, const PlayerMark& mark);
+    void queueDeletePlayerMark(uint32_t guid, const std::string& name);
     void queueKickClient(uint32_t guid, const std::string& reason);
     void queueSetPlayerNickname(uint32_t guid, const std::string& nickname);
     void queueSetWorldHour(float hour);
@@ -102,6 +121,8 @@ public:
     bool queueIntentOps(const sol::table& ops, std::string* error = nullptr);
     void queueGrantInventoryItem(uint32_t guid, const std::string& refId, int count);
     void queueRemovePlacedObject(uint32_t mpNum, const std::string& cellId);
+    void queueRefreshCellGameSettings(const std::string& cellId);
+    void queueRefreshPlayerGameSettings(uint32_t guid);
 
     void setPlayerData(uint32_t guid, const std::string& key, const std::string& value);
     std::optional<std::string> getPlayerData(uint32_t guid, const std::string& key) const;
@@ -189,8 +210,13 @@ private:
     SnapshotState                              mSnapshot;
     mutable std::mutex                         mPlayerDataMutex;
     std::unordered_map<uint32_t, std::unordered_map<std::string, std::string>> mPlayerScriptData;
+    mutable std::mutex                         mPlayerMarksMutex;
+    std::unordered_map<uint32_t, std::unordered_map<std::string, PlayerMark>> mPlayerMarks;
     mutable std::mutex                         mPlacedObjectsMutex;
     std::unordered_map<uint32_t, PlacedObject> mPlacedObjectsByMpNum;
+    mutable std::mutex                         mSurfPhysicsMutex;
+    std::unordered_map<std::string, SurfPhysicsSettings> mCellSurfPhysicsSettings;
+    std::unordered_map<uint32_t, SurfPhysicsSettings> mPlayerSurfPhysicsSettings;
     std::thread                                mLuaThread;
     mutable std::mutex                         mWakeMutex;
     std::condition_variable                    mWakeCondition;

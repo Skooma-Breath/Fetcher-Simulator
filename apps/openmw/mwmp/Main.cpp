@@ -14,6 +14,7 @@
 #include <components/openmw-mp/Packets/Player/PacketChatMessage.hpp>
 #include <components/openmw-mp/Packets/Player/PacketPlayerDeath.hpp>
 #include <components/openmw-mp/Packets/Player/PacketPlayerResurrect.hpp>
+#include <components/openmw-mp/Packets/System/PacketGameSettings.hpp>
 #include <components/openmw-mp/Packets/System/PacketHandshake.hpp>
 #include <components/openmw-mp/Packets/Worldstate/PacketWorldTime.hpp>
 #include <components/openmw-mp/Packets/Object/PacketDoorState.hpp>
@@ -56,6 +57,7 @@
 #include "../mwbase/environment.hpp"
 #include "../mwbase/statemanager.hpp"
 #include "../mwbase/mechanicsmanager.hpp"
+#include "../mwphysics/surfphysics.hpp"
 #include "../mwbase/world.hpp"
 #include "../mwworld/player.hpp"
 #include "../mwworld/esmstore.hpp"
@@ -346,6 +348,7 @@ void Main::onDisconnected()
     mCharacterList.clear();
     mIsLinked       = false;
     mLocalPublicKey.clear();
+    MWPhysics::resetSurfPhysicsSettings();
 }
 
 // ---------------------------------------------------------------------------
@@ -536,7 +539,11 @@ void Main::registerProtocolHandlers()
             PacketPlayerPosition pkt;
             pkt.setPlayer(&tmp);
             if (!pkt.decode(data, size)) return;
-            if (tmp.guid == mPlayerSync->localPlayer().guid) return; // own echo
+            if (tmp.guid == mPlayerSync->localPlayer().guid)
+            {
+                mPlayerSync->applyServerPositionCorrection(tmp);
+                return;
+            }
             if (tmp.guid == 0) return;
 
             auto* rp = mPlayerList->getPlayer(tmp.guid);
@@ -551,7 +558,11 @@ void Main::registerProtocolHandlers()
             PacketPlayerCellChange pkt;
             pkt.setPlayer(&tmp);
             if (!pkt.decode(data, size)) return;
-            if (tmp.guid == mPlayerSync->localPlayer().guid) return;
+            if (tmp.guid == mPlayerSync->localPlayer().guid)
+            {
+                mPlayerSync->applyServerCellChange(tmp);
+                return;
+            }
 
             auto* rp = mPlayerList->getPlayer(tmp.guid);
             if (rp) rp->onCellChange(tmp);
@@ -659,6 +670,17 @@ void Main::registerProtocolHandlers()
             PacketWorldTime pkt;
             if (!pkt.decode(data, size)) return;
             mWorldStateSync->onServerTimeUpdate(pkt.time, pkt.timeScale);
+        });
+
+    proto.registerHandler(PacketType::GameSettings,
+        [](const uint8_t* data, size_t size)
+        {
+            PacketGameSettings pkt;
+            if (!pkt.decode(data, size)) return;
+
+            MWPhysics::setSurfPhysicsSettings(pkt.settings);
+            Log(Debug::Info) << "[MP] Applied surf settings for cell=" << pkt.settings.cellId
+                             << " enabled=" << (pkt.settings.enabled ? "true" : "false");
         });
 
     // --- World weather ---

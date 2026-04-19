@@ -210,6 +210,15 @@ void LuaServerContext::drainOutbound()
             case OutboundLuaActionType::RelayPlayerChat:
                 mServer->relayPlayerChat(action.guid, action.text);
                 break;
+            case OutboundLuaActionType::TeleportPlayer:
+                mServer->teleportPlayer(action.guid, action.cellId, action.position);
+                break;
+            case OutboundLuaActionType::UpsertPlayerMark:
+                mServer->upsertPlayerMark(action.guid, action.playerMark);
+                break;
+            case OutboundLuaActionType::DeletePlayerMark:
+                mServer->deletePlayerMark(action.guid, action.text);
+                break;
             case OutboundLuaActionType::KickClient:
                 mServer->kickClient(action.guid, action.text);
                 break;
@@ -239,6 +248,12 @@ void LuaServerContext::drainOutbound()
                 break;
             case OutboundLuaActionType::RemovePlacedObject:
                 mServer->removePlacedObjectByMpNum(action.mpNum, action.cellId);
+                break;
+            case OutboundLuaActionType::RefreshCellGameSettings:
+                mServer->broadcastGameSettingsToCell(action.cellId);
+                break;
+            case OutboundLuaActionType::RefreshPlayerGameSettings:
+                mServer->sendGameSettingsToPlayer(action.guid);
                 break;
         }
     }
@@ -457,6 +472,140 @@ std::optional<PlacedObject> LuaServerContext::getPlacedObject(uint32_t mpNum) co
     return it->second;
 }
 
+SurfPhysicsSettings LuaServerContext::getCellSurfPhysicsSettings(const std::string& cellId) const
+{
+    SurfPhysicsSettings settings;
+    settings.cellId = cellId;
+
+    if (cellId.empty())
+        return settings;
+
+    std::lock_guard<std::mutex> lock(mSurfPhysicsMutex);
+    auto it = mCellSurfPhysicsSettings.find(cellId);
+    if (it != mCellSurfPhysicsSettings.end())
+        settings = it->second;
+    settings.cellId = cellId;
+    return settings;
+}
+
+SurfPhysicsSettings LuaServerContext::getPlayerSurfPhysicsSettings(uint32_t guid, const std::string& cellId) const
+{
+    std::string resolvedCell = cellId;
+    if (resolvedCell.empty())
+    {
+        const auto player = getPlayer(guid);
+        if (player)
+            resolvedCell = player->cell;
+    }
+
+    return getEffectiveSurfPhysicsSettings(guid, resolvedCell);
+}
+
+SurfPhysicsSettings LuaServerContext::getEffectiveSurfPhysicsSettings(uint32_t guid, const std::string& cellId) const
+{
+    SurfPhysicsSettings settings;
+    settings.cellId = cellId;
+
+    std::lock_guard<std::mutex> lock(mSurfPhysicsMutex);
+    auto playerIt = mPlayerSurfPhysicsSettings.find(guid);
+    if (playerIt != mPlayerSurfPhysicsSettings.end())
+    {
+        settings = playerIt->second;
+        settings.cellId = cellId;
+        return settings;
+    }
+
+    auto cellIt = mCellSurfPhysicsSettings.find(cellId);
+    if (cellIt != mCellSurfPhysicsSettings.end())
+        settings = cellIt->second;
+    settings.cellId = cellId;
+    return settings;
+}
+
+std::vector<PlayerMark> LuaServerContext::getPlayerMarks(uint32_t guid) const
+{
+    std::lock_guard<std::mutex> lock(mPlayerMarksMutex);
+    std::vector<PlayerMark> marks;
+    auto it = mPlayerMarks.find(guid);
+    if (it == mPlayerMarks.end())
+        return marks;
+
+    marks.reserve(it->second.size());
+    for (const auto& [name, mark] : it->second)
+        marks.push_back(mark);
+    return marks;
+}
+
+void LuaServerContext::setPlayerMarks(uint32_t guid, std::vector<PlayerMark> marks)
+{
+    std::unordered_map<std::string, PlayerMark> byName;
+    for (auto& mark : marks)
+        byName[mark.name] = std::move(mark);
+
+    std::lock_guard<std::mutex> lock(mPlayerMarksMutex);
+    mPlayerMarks[guid] = std::move(byName);
+}
+
+void LuaServerContext::upsertPlayerMark(uint32_t guid, PlayerMark mark)
+{
+    std::lock_guard<std::mutex> lock(mPlayerMarksMutex);
+    mPlayerMarks[guid][mark.name] = std::move(mark);
+}
+
+void LuaServerContext::deletePlayerMark(uint32_t guid, const std::string& name)
+{
+    std::lock_guard<std::mutex> lock(mPlayerMarksMutex);
+    auto it = mPlayerMarks.find(guid);
+    if (it == mPlayerMarks.end())
+        return;
+    it->second.erase(name);
+}
+
+void LuaServerContext::clearPlayerMarks(uint32_t guid)
+{
+    std::lock_guard<std::mutex> lock(mPlayerMarksMutex);
+    mPlayerMarks.erase(guid);
+}
+
+void LuaServerContext::setCellSurfPhysicsSettings(const SurfPhysicsSettings& settings)
+{
+    if (settings.cellId.empty())
+        return;
+
+    {
+        std::lock_guard<std::mutex> lock(mSurfPhysicsMutex);
+        mCellSurfPhysicsSettings[settings.cellId] = settings;
+    }
+
+    queueRefreshCellGameSettings(settings.cellId);
+}
+
+void LuaServerContext::setPlayerSurfPhysicsSettings(uint32_t guid, const SurfPhysicsSettings& settings)
+{
+    if (guid == 0)
+        return;
+
+    {
+        std::lock_guard<std::mutex> lock(mSurfPhysicsMutex);
+        mPlayerSurfPhysicsSettings[guid] = settings;
+    }
+
+    queueRefreshPlayerGameSettings(guid);
+}
+
+void LuaServerContext::clearPlayerSurfPhysicsSettings(uint32_t guid)
+{
+    if (guid == 0)
+        return;
+
+    {
+        std::lock_guard<std::mutex> lock(mSurfPhysicsMutex);
+        mPlayerSurfPhysicsSettings.erase(guid);
+    }
+
+    queueRefreshPlayerGameSettings(guid);
+}
+
 bool LuaServerContext::queueIntentOps(const sol::table& ops, std::string* error)
 {
     const std::size_t opCount = ops.size();
@@ -539,6 +688,34 @@ void LuaServerContext::queueRelayPlayerChat(uint32_t guid, const std::string& te
     action.type = OutboundLuaActionType::RelayPlayerChat;
     action.guid = guid;
     action.text = text;
+    mOutboundQueue.push(std::move(action));
+}
+
+void LuaServerContext::queueTeleportPlayer(uint32_t guid, const std::string& cellId, const Position& position)
+{
+    OutboundLuaAction action;
+    action.type = OutboundLuaActionType::TeleportPlayer;
+    action.guid = guid;
+    action.cellId = cellId;
+    action.position = position;
+    mOutboundQueue.push(std::move(action));
+}
+
+void LuaServerContext::queueUpsertPlayerMark(uint32_t guid, const PlayerMark& mark)
+{
+    OutboundLuaAction action;
+    action.type = OutboundLuaActionType::UpsertPlayerMark;
+    action.guid = guid;
+    action.playerMark = mark;
+    mOutboundQueue.push(std::move(action));
+}
+
+void LuaServerContext::queueDeletePlayerMark(uint32_t guid, const std::string& name)
+{
+    OutboundLuaAction action;
+    action.type = OutboundLuaActionType::DeletePlayerMark;
+    action.guid = guid;
+    action.text = name;
     mOutboundQueue.push(std::move(action));
 }
 
@@ -634,6 +811,28 @@ void LuaServerContext::queueRemovePlacedObject(uint32_t mpNum, const std::string
     action.type = OutboundLuaActionType::RemovePlacedObject;
     action.mpNum = mpNum;
     action.cellId = cellId;
+    mOutboundQueue.push(std::move(action));
+}
+
+void LuaServerContext::queueRefreshCellGameSettings(const std::string& cellId)
+{
+    if (cellId.empty())
+        return;
+
+    OutboundLuaAction action;
+    action.type = OutboundLuaActionType::RefreshCellGameSettings;
+    action.cellId = cellId;
+    mOutboundQueue.push(std::move(action));
+}
+
+void LuaServerContext::queueRefreshPlayerGameSettings(uint32_t guid)
+{
+    if (guid == 0)
+        return;
+
+    OutboundLuaAction action;
+    action.type = OutboundLuaActionType::RefreshPlayerGameSettings;
+    action.guid = guid;
     mOutboundQueue.push(std::move(action));
 }
 

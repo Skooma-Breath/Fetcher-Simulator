@@ -2,6 +2,8 @@ local mp = require("mp")
 local Config = require("config")
 local types = require("openmw.types")
 local intentPolicy = require("intent_policy")
+local markRecallCommands = require("mark_recall")
+local surfCommands = require("surf_commands")
 
 ------------------------------------------------------------------------
 -- Config
@@ -481,6 +483,8 @@ local function handleChat(player, data)
     if msg == COMMAND_PREFIX .. "help" then
         player:sendMessage(
             "Commands:  !who  !time  !uptime  !nick <n>  !nick off"
+                .. "  !surf"
+                .. "  /mark <name>  /recall <name>  /marks  /unmark <name>"
                 .. (isAdmin(player)
                     and "  !kick <name>  !settime <hour>  !luabroadcast [note]"
                         .. "  !luasend <name> [note]  !luacell [cell]"
@@ -737,6 +741,14 @@ local function handleChat(player, data)
         return false
     end
 
+    local markRecallHandled = markRecallCommands.handleChat(player, data, {
+        commandPrefix = COMMAND_PREFIX,
+        normalizeCellId = normalizeCellId,
+    })
+    if markRecallHandled ~= nil then
+        return markRecallHandled
+    end
+
     if msg:sub(1, #COMMAND_PREFIX + 4) == COMMAND_PREFIX .. "nick" then
         local arg = msg:sub(#COMMAND_PREFIX + 6)
         if msg == COMMAND_PREFIX .. "nick off" then
@@ -761,6 +773,17 @@ local function handleChat(player, data)
     end
 
     if msg:sub(1, #COMMAND_PREFIX) == COMMAND_PREFIX then
+        local surfHandled = surfCommands.handleChat(player, data, {
+            commandPrefix = COMMAND_PREFIX,
+            findPlayerByName = findPlayerByName,
+            isAdmin = isAdmin,
+            requireAdmin = requireAdmin,
+            normalizeCellId = normalizeCellId,
+        })
+        if surfHandled ~= nil then
+            return surfHandled
+        end
+
         player:sendMessage("Unknown command.  Type !help for a list.")
         return false
     end
@@ -778,6 +801,7 @@ return {
     },
     eventHandlers = {
         OnServerInit = function(_)
+            markRecallCommands.onServerInit()
             mp.log("[core] Server ready — " .. mp.getPlayerCount() .. " player(s) connected.")
         end,
 
@@ -797,6 +821,8 @@ return {
 
         OnPlayerDisconnect = function(data)
             admins[data.guid] = nil
+            markRecallCommands.onPlayerDisconnect(data)
+            surfCommands.onPlayerDisconnect(data)
             if ANNOUNCE_JOIN_LEAVE then
                 mp.broadcast("<< " .. data.name .. " has left.  (" .. (data.reason or "Disconnected") .. ")")
             end

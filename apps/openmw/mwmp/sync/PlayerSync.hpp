@@ -43,6 +43,7 @@ namespace mwmp
 
         // Server told us our position was wrong - snap to authoritative value
         void applyServerPositionCorrection(const BasePlayer& authoritative);
+        void applyServerCellChange(const BasePlayer& authoritative);
         void queueAuthoritativeEquipment(const BasePlayer& authoritative);
         void queueAuthoritativeInventory(const BasePlayer& authoritative);
 

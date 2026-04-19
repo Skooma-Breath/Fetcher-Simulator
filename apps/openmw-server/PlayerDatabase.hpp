@@ -30,6 +30,8 @@
 #include <components/openmw-mp/Base/BaseObject.hpp>
 #include <components/openmw-mp/Packets/Object/PacketDoorState.hpp>
 
+#include "PlayerMark.hpp"
+
 struct sqlite3;
 struct sqlite3_stmt;
 
@@ -132,6 +134,15 @@ namespace mwmp
         /// Set (or clear) the nickname for a character slot.
         /// Pass an empty string to revert to the slot name.
         void setNickname(int64_t characterId, std::string_view nickname);
+
+        /// Load the saved named mark/recall locations for a character.
+        std::vector<PlayerMark> loadCharacterMarks(int64_t characterId);
+
+        /// Insert or update one named mark/recall location for a character.
+        void upsertCharacterMark(int64_t characterId, const PlayerMark& mark);
+
+        /// Delete one named mark/recall location for a character.
+        void deleteCharacterMark(int64_t characterId, std::string_view name);
 
         /// Load the last persisted inventory snapshot for a character.
         std::vector<Item> loadCharacterInventory(int64_t characterId);

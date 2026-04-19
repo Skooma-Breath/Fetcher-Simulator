@@ -27,6 +27,7 @@
 
 #include <components/debug/debuglog.hpp>
 #include <components/openmw-mp/Packets/BasePacket.hpp>
+#include <components/openmw-mp/Packets/System/PacketGameSettings.hpp>
 #include <components/openmw-mp/Packets/System/PacketHandshake.hpp>
 #include <components/openmw-mp/Packets/Player/PacketPlayerBaseInfo.hpp>
 #include <components/openmw-mp/Packets/Player/PacketPlayerCharGen.hpp>
@@ -447,6 +448,29 @@ namespace
         return buf;
     }
 
+    std::optional<mwmp::CellId> parseCellKey(std::string_view cellId)
+    {
+        if (cellId.empty())
+            return std::nullopt;
+
+        mwmp::CellId parsed;
+        if (cellId.rfind("EXT:", 0) == 0)
+        {
+            int gridX = 0;
+            int gridY = 0;
+            if (std::sscanf(cellId.data(), "EXT:%d,%d", &gridX, &gridY) != 2)
+                return std::nullopt;
+
+            parsed.isExterior = true;
+            parsed.gridX = gridX;
+            parsed.gridY = gridY;
+            return parsed;
+        }
+
+        parsed.cellName = std::string(cellId);
+        return parsed;
+    }
+
     bool cellMatches(const mwmp::CellId& playerCell, const std::string& cellId)
     {
         if (cellId.rfind("EXT:", 0) == 0)
@@ -512,6 +536,103 @@ void MPServer::broadcastServerMessageToCell(const std::string& cellId, const std
     pkt.message = text;
     pkt.channel = "";
     broadcastToCell(cellId, pkt.encode());
+}
+
+// ---------------------------------------------------------------------------
+void MPServer::broadcastGameSettingsToCell(const std::string& cellId)
+{
+    if (cellId.empty())
+        return;
+
+    for (auto& [conn, client] : mClients)
+    {
+        if (!client.handshakeComplete || !cellMatches(client.player.cell, cellId))
+            continue;
+        sendGameSettingsToClient(conn, cellId);
+    }
+}
+
+void MPServer::sendGameSettingsToPlayer(uint32_t guid)
+{
+    for (auto& [conn, client] : mClients)
+    {
+        if (!client.handshakeComplete || client.guid != guid)
+            continue;
+
+        sendGameSettingsToClient(conn, makeCellKey(client.player.cell));
+        return;
+    }
+}
+
+bool MPServer::teleportPlayer(uint32_t guid, const std::string& cellId, const Position& position)
+{
+    ConnectedClient* client = findClientByGuid(guid);
+    if (!client || !client->handshakeComplete || !client->charSelectComplete)
+        return false;
+
+    auto parsedCell = parseCellKey(cellId);
+    if (!parsedCell)
+        return false;
+
+    const std::string oldCell = makeCellKey(client->player.cell);
+    client->player.cell = *parsedCell;
+    client->player.position = position;
+    client->player.position.isTeleporting = true;
+    client->player.velocity = {};
+
+    const std::string newCell = makeCellKey(client->player.cell);
+    syncLuaSnapshot();
+
+    if (!oldCell.empty() && oldCell != newCell)
+        refreshActorAuthorityForCell(oldCell);
+    if (!newCell.empty())
+        refreshActorAuthorityForCell(newCell, client->guid);
+
+    if (oldCell != newCell)
+    {
+        Log(Debug::Info) << "[Server] Teleport " << client->name << " -> cell: " << newCell;
+        mLua.onPlayerCellChange(client->guid, client->name, newCell, oldCell);
+
+        PacketPlayerCellChange cellChange;
+        cellChange.setPlayer(&client->player);
+        const auto encoded = cellChange.encode();
+        sendTo(client->conn, encoded);
+        broadcastToAll(encoded, client->conn);
+
+        if (!newCell.empty())
+            sendCellStateToClient(client->conn, newCell);
+    }
+    else
+    {
+        PacketPlayerPosition pkt;
+        pkt.setPlayer(&client->player);
+        const auto encoded = pkt.encode();
+        sendTo(client->conn, encoded);
+        broadcastToAll(encoded, client->conn);
+    }
+
+    client->player.position.isTeleporting = false;
+    return true;
+}
+
+bool MPServer::upsertPlayerMark(uint32_t guid, const PlayerMark& mark)
+{
+    ConnectedClient* client = findClientByGuid(guid);
+    if (!client || !mPlayerDb || client->dbCharacterId == 0 || mark.name.empty() || mark.cell.empty())
+        return false;
+
+    mPlayerDb->upsertCharacterMark(client->dbCharacterId, mark);
+    return true;
+}
+
+bool MPServer::deletePlayerMark(uint32_t guid, std::string_view name)
+{
+    ConnectedClient* client = findClientByGuid(guid);
+    if (!client || !mPlayerDb || client->dbCharacterId == 0 || name.empty())
+        return false;
+
+    mPlayerDb->deleteCharacterMark(client->dbCharacterId, name);
+    return true;
 }
 
 // ---------------------------------------------------------------------------
@@ -886,6 +1007,7 @@ void MPServer::onClientDisconnected(HSteamNetConnection conn, const std::string&
     }
 
     mInterface->CloseConnection(conn, 0, nullptr, false);
+    mLua.clearPlayerMarks(client.guid);
     mLua.clearPlayerData(client.guid);
     mClients.erase(it);
     if (!actorCell.empty())
@@ -1182,6 +1304,7 @@ void MPServer::loadPersistentWorldState()
 // ---------------------------------------------------------------------------
 void MPServer::sendCellStateToClient(HSteamNetConnection conn, const std::string& cellId)
 {
+    sendGameSettingsToClient(conn, cellId);
     sendActorAuthorityToClient(conn, cellId);
     sendActorStateToClient(conn, cellId);
 
@@ -1214,6 +1337,21 @@ void MPServer::sendCellStateToClient(HSteamNetConnection conn, const std::string
         pkt.doors = doorsIt->second;
         sendTo(conn, pkt.encode());
     }
+}
+
+// ---------------------------------------------------------------------------
+void MPServer::sendGameSettingsToClient(HSteamNetConnection conn, const std::string& cellId)
+{
+    if (cellId.empty())
+        return;
+
+    PacketGameSettings pkt;
+    auto clientIt = mClients.find(conn);
+    if (clientIt != mClients.end())
+        pkt.settings = mLua.getEffectiveSurfPhysicsSettings(clientIt->second.guid, cellId);
+    else
+        pkt.settings = mLua.getCellSurfPhysicsSettings(cellId);
+    sendTo(conn, pkt.encode());
 }
 
 // ---------------------------------------------------------------------------
@@ -1565,6 +1703,7 @@ void MPServer::handleCharacterSelect(ConnectedClient& c, const uint8_t* data, si
                                  << " (new=" << rec->isNew << ")";
             }
             mPlayerDb->touch(c.dbCharacterId);
+            mLua.setPlayerMarks(c.guid, mPlayerDb->loadCharacterMarks(c.dbCharacterId));
         }
         catch (const std::exception& e)
         {
@@ -1580,6 +1719,7 @@ void MPServer::handleCharacterSelect(ConnectedClient& c, const uint8_t* data, si
         // No DB — run as new character (dev/offline mode).
         cdPkt.isNewCharacter  = true;
         cdPkt.characterName   = sel.charName;
+        mLua.clearPlayerMarks(c.guid);
     }
 
     sendTo(c.conn, cdPkt.encode());
@@ -2762,6 +2902,9 @@ void MPServer::syncLuaSnapshot()
         snapshot.x = client.player.position.pos[0];
         snapshot.y = client.player.position.pos[1];
         snapshot.z = client.player.position.pos[2];
+        snapshot.rx = client.player.position.rot[0];
+        snapshot.ry = client.player.position.rot[1];
+        snapshot.rz = client.player.position.rot[2];
         snapshot.dynamicStats = client.player.dynamicStats;
         snapshot.skills = client.player.skills;
         snapshot.inventory = client.player.inventoryChanges.items;

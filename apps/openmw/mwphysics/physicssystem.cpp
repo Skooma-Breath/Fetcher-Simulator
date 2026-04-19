@@ -884,6 +884,7 @@ namespace MWPhysics
         , mIsOnGround(actor.getOnGround())
         , mIsOnSlope(actor.getOnSlope())
         , mWalkingOnWater(false)
+        , mSuppressFallHeightAccumulation(false)
         , mInert(inert)
         , mCollisionObject(actor.getCollisionObject())
         , mSwimLevel(waterlevel

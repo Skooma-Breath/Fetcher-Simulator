@@ -35,6 +35,9 @@ static sol::table scriptPlayer_getPosition(const ScriptPlayer& p, sol::this_stat
     t["x"] = p.data.x;
     t["y"] = p.data.y;
     t["z"] = p.data.z;
+    t["rx"] = p.data.rx;
+    t["ry"] = p.data.ry;
+    t["rz"] = p.data.rz;
     return t;
 }
 

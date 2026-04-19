@@ -264,7 +264,8 @@ namespace
                 const float heightDiff = frameData.mPosition.z() - frameData.mOldHeight;
                 const bool isStillOnGround = (mAdvanceSimulation && frameData.mWasOnGround && frameData.mIsOnGround);
 
-                if (isStillOnGround || frameData.mFlying || isUnderWater(frameData) || frameData.mSlowFall < 1)
+                if (isStillOnGround || frameData.mFlying || isUnderWater(frameData) || frameData.mSlowFall < 1
+                    || frameData.mSuppressFallHeightAccumulation)
                     stats.land(ptr == MWMechanics::getPlayer() && (frameData.mFlying || isUnderWater(frameData)));
                 else if (heightDiff < 0)
                     stats.addToFallHeight(-heightDiff);

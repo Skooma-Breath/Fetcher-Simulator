@@ -7,7 +7,10 @@
 #include <vector>
 
 #include <components/lua/serialization.hpp>
+#include <components/openmw-mp/Base/BaseStructs.hpp>
 #include <components/openmw-mp/Packets/Lua/PacketLuaStorage.hpp>
+
+#include "PlayerMark.hpp"
 
 namespace mwmp
 {
@@ -18,6 +21,9 @@ enum class OutboundLuaActionType
     BroadcastServerMessageToCell,
     SendServerMessage,
     RelayPlayerChat,
+    TeleportPlayer,
+    UpsertPlayerMark,
+    DeletePlayerMark,
     KickClient,
     SetPlayerNickname,
     SetWorldHour,
@@ -28,6 +34,8 @@ enum class OutboundLuaActionType
     SendLuaStorage,
     GrantInventoryItem,
     RemovePlacedObject,
+    RefreshCellGameSettings,
+    RefreshPlayerGameSettings,
 };
 
 struct OutboundLuaAction
@@ -37,6 +45,8 @@ struct OutboundLuaAction
     uint32_t mpNum = 0;
     float worldHour = 0.f;
     int itemCount = 0;
+    Position position;
+    PlayerMark playerMark;
     std::string text;
     std::string eventName;
     std::string cellId;
