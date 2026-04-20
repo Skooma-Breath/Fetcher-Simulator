@@ -21,6 +21,7 @@ enum class OutboundLuaActionType
     BroadcastServerMessageToCell,
     SendServerMessage,
     RelayPlayerChat,
+    PlaceObject,
     TeleportPlayer,
     UpsertPlayerMark,
     DeletePlayerMark,
@@ -36,6 +37,7 @@ enum class OutboundLuaActionType
     RemovePlacedObject,
     RefreshCellGameSettings,
     RefreshPlayerGameSettings,
+    RefreshAllGameSettings,
 };
 
 struct OutboundLuaAction

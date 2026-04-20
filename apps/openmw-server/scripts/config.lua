@@ -10,7 +10,7 @@ local Config = {}
 -- General
 ------------------------------------------------------------------------
 
-Config.MOTD = "Welcome!  Type !help for a list of commands."
+Config.MOTD = "Welcome!  Type /help for a list of commands."
 Config.ADMIN_PASSWORD = "changeme"
 
 ------------------------------------------------------------------------
@@ -47,7 +47,7 @@ Config.SPAWN_CELL = "mournhold"
 -- Chat & commands
 ------------------------------------------------------------------------
 
-Config.COMMAND_PREFIX = "!"
+Config.COMMAND_PREFIX = "/"
 Config.ANNOUNCE_JOIN_LEAVE = true
 Config.LOG_CHAT = false
 

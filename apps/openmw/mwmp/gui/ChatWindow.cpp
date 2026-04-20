@@ -214,16 +214,19 @@ void ChatWindow::onInputAccept(MyGUI::EditBox* /*sender*/)
         return;
     }
 
-    // Handle slash-commands locally — don't send to server.
+    // Let local-only commands short-circuit; otherwise send slash commands to the server.
     if (!text.empty() && text[0] == '/')
     {
         if (mInputHistory.empty() || mInputHistory.back() != text)
             mInputHistory.push_back(text);
         mHistoryCurrent = mInputHistory.end();
         mEditString.clear();
-        handleCommand(text);
-        closeInput();
-        return;
+
+        if (handleCommand(text))
+        {
+            closeInput();
+            return;
+        }
     }
 
     BasePlayer& local = Main::get().getPlayerSync().localPlayer();
@@ -285,8 +288,8 @@ bool ChatWindow::handleCommand(const std::string& text)
         return (sp == std::string::npos) ? text : text.substr(0, sp);
     }();
 
-    // ---- /time ----
-    if (cmd == "/time")
+    // ---- /localtime ----
+    if (cmd == "/localtime")
     {
         MWBase::World* world = MWBase::Environment::get().getWorld();
         if (!world)
@@ -343,18 +346,16 @@ bool ChatWindow::handleCommand(const std::string& text)
         return true;
     }
 
-    // ---- /help ----
-    if (cmd == "/help")
+    // ---- /localhelp ----
+    if (cmd == "/localhelp")
     {
-        addMessage("", "Available commands:");
-        addMessage("", "  /time  — show the current in-game date and time");
-        addMessage("", "  /help  — show this message");
+        addMessage("", "Local chat commands:");
+        addMessage("", "  /localtime  - show the current local and last received server time");
+        addMessage("", "  /localhelp  - show this message");
         return true;
     }
 
-    // Unknown command
-    addMessage("", "Unknown command: " + cmd + "  (try /help)");
-    return true;
+    return false;
 }
 
 // ---------------------------------------------------------------------------

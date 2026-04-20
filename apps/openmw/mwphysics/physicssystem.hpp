@@ -92,6 +92,7 @@ namespace MWPhysics
         btCollisionObject* mCollisionObject;
         const float mSwimLevel;
         const float mSlowFall;
+        const float mJumpVelocity;
         osg::Vec2f mRotation;
         osg::Vec3f mMovement;
         osg::Vec3f mLastStuckPosition;

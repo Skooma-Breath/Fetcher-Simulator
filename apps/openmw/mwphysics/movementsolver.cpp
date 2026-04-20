@@ -239,7 +239,7 @@ namespace MWPhysics
                 const bool canJump = actor.mIsOnGround && !actor.mIsOnSlope;
                 const bool jumpRequested = actor.mMovement.z() > 0.f;
                 if (canJump && jumpRequested)
-                    velocity.z() = settings.jumpSpeed;
+                    velocity.z() = actor.mJumpVelocity;
 
                 if (canJump)
                 {

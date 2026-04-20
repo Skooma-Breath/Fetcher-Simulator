@@ -179,6 +179,33 @@ sol::table initMpPackage(LuaUtil::LuaView& view, LuaServerContext* context, LuaU
         return true;
     });
 
+    mp.set_function("placeObject",
+        [context](const std::string& refId, int count, const std::string& cellId, const sol::table& positionTable) -> bool
+    {
+        if (!context || refId.empty() || count <= 0 || cellId.empty())
+            return false;
+
+        auto position = parsePositionTable(positionTable);
+        if (!position)
+            return false;
+
+        context->queuePlaceObject(refId, count, cellId, *position);
+        return true;
+    });
+    mp.set_function("PlaceObject",
+        [context](const std::string& refId, int count, const std::string& cellId, const sol::table& positionTable) -> bool
+    {
+        if (!context || refId.empty() || count <= 0 || cellId.empty())
+            return false;
+
+        auto position = parsePositionTable(positionTable);
+        if (!position)
+            return false;
+
+        context->queuePlaceObject(refId, count, cellId, *position);
+        return true;
+    });
+
     mp.set_function("applyOps", [context](const sol::table& ops) -> std::tuple<bool, std::string>
     {
         if (!context)
@@ -351,6 +378,17 @@ sol::table initMpPackage(LuaUtil::LuaView& view, LuaServerContext* context, LuaU
         return true;
     };
 
+    auto applyGlobalSurfSettings = [context](const auto& updater) -> bool
+    {
+        if (!context)
+            return false;
+
+        auto settings = context->getGlobalSurfPhysicsSettings();
+        updater(settings);
+        context->setGlobalSurfPhysicsSettings(settings);
+        return true;
+    };
+
     auto mergeSurfPhysicsValues = [](SurfPhysicsSettings& settings, const sol::table& values)
     {
         settings.enabled = values.get_or("enabled", settings.enabled);
@@ -368,6 +406,34 @@ sol::table initMpPackage(LuaUtil::LuaView& view, LuaServerContext* context, LuaU
         settings.impactVelocityThreshold
             = values.get_or("impactVelocityThreshold", settings.impactVelocityThreshold);
     };
+
+    mp.set_function("getGlobalPhysics", [context](sol::this_state ts) -> sol::object
+    {
+        if (!context)
+            return sol::make_object(ts, sol::nil);
+        return makeSurfPhysicsValue(ts, context->getGlobalSurfPhysicsSettings());
+    });
+    mp.set_function("GetGlobalPhysics", [context](sol::this_state ts) -> sol::object
+    {
+        if (!context)
+            return sol::make_object(ts, sol::nil);
+        return makeSurfPhysicsValue(ts, context->getGlobalSurfPhysicsSettings());
+    });
+
+    mp.set_function("setGlobalPhysics", [applyGlobalSurfSettings, mergeSurfPhysicsValues](const sol::table& values) -> bool
+    {
+        return applyGlobalSurfSettings([&values, mergeSurfPhysicsValues](SurfPhysicsSettings& settings)
+        {
+            mergeSurfPhysicsValues(settings, values);
+        });
+    });
+    mp.set_function("SetGlobalPhysics", [applyGlobalSurfSettings, mergeSurfPhysicsValues](const sol::table& values) -> bool
+    {
+        return applyGlobalSurfSettings([&values, mergeSurfPhysicsValues](SurfPhysicsSettings& settings)
+        {
+            mergeSurfPhysicsValues(settings, values);
+        });
+    });
 
     mp.set_function("getCellPhysics", [context](const std::string& cellId, sol::this_state ts) -> sol::object
     {
@@ -397,6 +463,20 @@ sol::table initMpPackage(LuaUtil::LuaView& view, LuaServerContext* context, LuaU
         {
             mergeSurfPhysicsValues(settings, values);
         });
+    });
+    mp.set_function("clearCellPhysics", [context](const std::string& cellId) -> bool
+    {
+        if (!context || cellId.empty())
+            return false;
+        context->clearCellSurfPhysicsSettings(cellId);
+        return true;
+    });
+    mp.set_function("ClearCellPhysics", [context](const std::string& cellId) -> bool
+    {
+        if (!context || cellId.empty())
+            return false;
+        context->clearCellSurfPhysicsSettings(cellId);
+        return true;
     });
 
     mp.set_function("getPlayerPhysics", [context](uint32_t guid, sol::this_state ts) -> sol::object

@@ -210,6 +210,9 @@ void LuaServerContext::drainOutbound()
             case OutboundLuaActionType::RelayPlayerChat:
                 mServer->relayPlayerChat(action.guid, action.text);
                 break;
+            case OutboundLuaActionType::PlaceObject:
+                mServer->placeObject(action.text, action.itemCount, action.cellId, action.position);
+                break;
             case OutboundLuaActionType::TeleportPlayer:
                 mServer->teleportPlayer(action.guid, action.cellId, action.position);
                 break;
@@ -254,6 +257,9 @@ void LuaServerContext::drainOutbound()
                 break;
             case OutboundLuaActionType::RefreshPlayerGameSettings:
                 mServer->sendGameSettingsToPlayer(action.guid);
+                break;
+            case OutboundLuaActionType::RefreshAllGameSettings:
+                mServer->broadcastGameSettingsToAllPlayers();
                 break;
         }
     }
@@ -472,15 +478,22 @@ std::optional<PlacedObject> LuaServerContext::getPlacedObject(uint32_t mpNum) co
     return it->second;
 }
 
+SurfPhysicsSettings LuaServerContext::getGlobalSurfPhysicsSettings() const
+{
+    std::lock_guard<std::mutex> lock(mSurfPhysicsMutex);
+    SurfPhysicsSettings settings = mGlobalSurfPhysicsSettings;
+    settings.cellId.clear();
+    return settings;
+}
+
 SurfPhysicsSettings LuaServerContext::getCellSurfPhysicsSettings(const std::string& cellId) const
 {
-    SurfPhysicsSettings settings;
-    settings.cellId = cellId;
-
     if (cellId.empty())
-        return settings;
+        return getGlobalSurfPhysicsSettings();
 
     std::lock_guard<std::mutex> lock(mSurfPhysicsMutex);
+    SurfPhysicsSettings settings = mGlobalSurfPhysicsSettings;
+    settings.cellId = cellId;
     auto it = mCellSurfPhysicsSettings.find(cellId);
     if (it != mCellSurfPhysicsSettings.end())
         settings = it->second;
@@ -503,21 +516,18 @@ SurfPhysicsSettings LuaServerContext::getPlayerSurfPhysicsSettings(uint32_t guid
 
 SurfPhysicsSettings LuaServerContext::getEffectiveSurfPhysicsSettings(uint32_t guid, const std::string& cellId) const
 {
-    SurfPhysicsSettings settings;
-    settings.cellId = cellId;
-
     std::lock_guard<std::mutex> lock(mSurfPhysicsMutex);
-    auto playerIt = mPlayerSurfPhysicsSettings.find(guid);
-    if (playerIt != mPlayerSurfPhysicsSettings.end())
-    {
-        settings = playerIt->second;
-        settings.cellId = cellId;
-        return settings;
-    }
+    SurfPhysicsSettings settings = mGlobalSurfPhysicsSettings;
+    settings.cellId = cellId;
 
     auto cellIt = mCellSurfPhysicsSettings.find(cellId);
     if (cellIt != mCellSurfPhysicsSettings.end())
         settings = cellIt->second;
+
+    auto playerIt = mPlayerSurfPhysicsSettings.find(guid);
+    if (playerIt != mPlayerSurfPhysicsSettings.end())
+        settings = playerIt->second;
+
     settings.cellId = cellId;
     return settings;
 }
@@ -567,6 +577,19 @@ void LuaServerContext::clearPlayerMarks(uint32_t guid)
     mPlayerMarks.erase(guid);
 }
 
+void LuaServerContext::setGlobalSurfPhysicsSettings(const SurfPhysicsSettings& settings)
+{
+    SurfPhysicsSettings resolved = settings;
+    resolved.cellId.clear();
+
+    {
+        std::lock_guard<std::mutex> lock(mSurfPhysicsMutex);
+        mGlobalSurfPhysicsSettings = resolved;
+    }
+
+    queueRefreshAllGameSettings();
+}
+
 void LuaServerContext::setCellSurfPhysicsSettings(const SurfPhysicsSettings& settings)
 {
     if (settings.cellId.empty())
@@ -578,6 +601,19 @@ void LuaServerContext::setCellSurfPhysicsSettings(const SurfPhysicsSettings& set
     }
 
     queueRefreshCellGameSettings(settings.cellId);
+}
+
+void LuaServerContext::clearCellSurfPhysicsSettings(const std::string& cellId)
+{
+    if (cellId.empty())
+        return;
+
+    {
+        std::lock_guard<std::mutex> lock(mSurfPhysicsMutex);
+        mCellSurfPhysicsSettings.erase(cellId);
+    }
+
+    queueRefreshCellGameSettings(cellId);
 }
 
 void LuaServerContext::setPlayerSurfPhysicsSettings(uint32_t guid, const SurfPhysicsSettings& settings)
@@ -688,6 +724,18 @@ void LuaServerContext::queueRelayPlayerChat(uint32_t guid, const std::string& te
     action.type = OutboundLuaActionType::RelayPlayerChat;
     action.guid = guid;
     action.text = text;
+    mOutboundQueue.push(std::move(action));
+}
+
+void LuaServerContext::queuePlaceObject(
+    const std::string& refId, int count, const std::string& cellId, const Position& position)
+{
+    OutboundLuaAction action;
+    action.type = OutboundLuaActionType::PlaceObject;
+    action.text = refId;
+    action.itemCount = count;
+    action.cellId = cellId;
+    action.position = position;
     mOutboundQueue.push(std::move(action));
 }
 
@@ -811,6 +859,13 @@ void LuaServerContext::queueRemovePlacedObject(uint32_t mpNum, const std::string
     action.type = OutboundLuaActionType::RemovePlacedObject;
     action.mpNum = mpNum;
     action.cellId = cellId;
+    mOutboundQueue.push(std::move(action));
+}
+
+void LuaServerContext::queueRefreshAllGameSettings()
+{
+    OutboundLuaAction action;
+    action.type = OutboundLuaActionType::RefreshAllGameSettings;
     mOutboundQueue.push(std::move(action));
 }
 

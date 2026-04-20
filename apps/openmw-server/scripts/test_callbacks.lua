@@ -174,8 +174,8 @@ end
 -- TEST 4: OnPlayerSendMessage
 -- Expected: fires for every chat message. Return false = suppressed.
 -- Trigger: type messages in chat. Test commands:
---   "!test_suppress"  → should NOT appear in other clients' chat
---   "!test_relay"     → should appear in chat normally
+--   "/test_suppress"  -> should NOT appear in other clients' chat
+--   "/test_relay"     -> should appear in chat normally
 --   anything else     → relayed normally
 -- ─────────────────────────────────────────────────────────────────────────────
 function OnPlayerSendMessage(player, msg)
@@ -189,19 +189,19 @@ function OnPlayerSendMessage(player, msg)
     pass("OnPlayerSendMessage / argument types OK")
 
     -- Test suppression
-    if msg == "!test_suppress" then
+    if msg == "/test_suppress" then
         player:sendMessage("[TEST] Suppress working - this message was NOT relayed.")
         pass("OnPlayerSendMessage / suppress test triggered — check other clients did NOT see the message")
         return false  -- suppress relay
 
     -- Test relay
-    elseif msg == "!test_relay" then
+    elseif msg == "/test_relay" then
         player:sendMessage("[TEST] Relay working - this message WAS relayed to all clients.")
         pass("OnPlayerSendMessage / relay test triggered — check all clients saw the message")
         -- do NOT return false — let it relay
 
     -- Test mp.setWorldTime via chat command
-    elseif msg == "!test_settime" then
+    elseif msg == "/test_settime" then
         local original = mp.getWorldTime()
         mp.setWorldTime(12.0)
         local after = mp.getWorldTime()

@@ -96,6 +96,7 @@ public:
         LuaStorageAction action, const std::string& section, const std::vector<LuaStorageEntry>& entries);
     void sendLuaStorage(uint32_t guid, LuaStorageAction action,
         const std::string& section, const std::vector<LuaStorageEntry>& entries);
+    void broadcastGameSettingsToAllPlayers();
     void broadcastGameSettingsToCell(const std::string& cellId);
     void sendGameSettingsToPlayer(uint32_t guid);
     bool teleportPlayer(uint32_t guid, const std::string& cellId, const Position& position);
@@ -120,6 +121,7 @@ public:
     // Look up a live client by guid. Returns nullptr if not found / disconnected.
     ConnectedClient* findClientByGuid(uint32_t guid);
     bool grantPlayerInventoryItem(uint32_t guid, const std::string& refId, int count);
+    bool placeObject(const std::string& refId, int count, const std::string& cellId, const Position& position);
     bool removePlacedObjectByMpNum(uint32_t mpNum, const std::string& cellId);
 
     // Iterate all fully-connected (post-handshake) players.
@@ -224,6 +226,7 @@ private:
     void syncLuaSnapshot();
     void syncLuaAuthorityState();
     void sendAuthoritativeInventory(ConnectedClient& c);
+    bool acceptPlacedObject(PlacedObject& object);
     bool grantInventoryItem(ConnectedClient& c, const std::string& refId, int count);
     bool removePlacedObjectAuthoritative(uint32_t mpNum, const std::string& cellId);
     void refreshActorAuthorityForCell(const std::string& cellId, uint32_t preferredGuid = 0);

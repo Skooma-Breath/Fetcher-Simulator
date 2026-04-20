@@ -89,6 +89,7 @@ public:
     double getUptime() const;
     float getWorldHour() const;
     std::optional<PlacedObject> getPlacedObject(uint32_t mpNum) const;
+    SurfPhysicsSettings getGlobalSurfPhysicsSettings() const;
     SurfPhysicsSettings getCellSurfPhysicsSettings(const std::string& cellId) const;
     SurfPhysicsSettings getPlayerSurfPhysicsSettings(uint32_t guid, const std::string& cellId = "") const;
     SurfPhysicsSettings getEffectiveSurfPhysicsSettings(uint32_t guid, const std::string& cellId) const;
@@ -97,7 +98,9 @@ public:
     void upsertPlayerMark(uint32_t guid, PlayerMark mark);
     void deletePlayerMark(uint32_t guid, const std::string& name);
     void clearPlayerMarks(uint32_t guid);
+    void setGlobalSurfPhysicsSettings(const SurfPhysicsSettings& settings);
     void setCellSurfPhysicsSettings(const SurfPhysicsSettings& settings);
+    void clearCellSurfPhysicsSettings(const std::string& cellId);
     void setPlayerSurfPhysicsSettings(uint32_t guid, const SurfPhysicsSettings& settings);
     void clearPlayerSurfPhysicsSettings(uint32_t guid);
 
@@ -105,6 +108,7 @@ public:
     void queueBroadcastServerMessageToCell(const std::string& cellId, const std::string& text);
     void queueSendServerMessage(uint32_t guid, const std::string& text);
     void queueRelayPlayerChat(uint32_t guid, const std::string& text);
+    void queuePlaceObject(const std::string& refId, int count, const std::string& cellId, const Position& position);
     void queueTeleportPlayer(uint32_t guid, const std::string& cellId, const Position& position);
     void queueUpsertPlayerMark(uint32_t guid, const PlayerMark& mark);
     void queueDeletePlayerMark(uint32_t guid, const std::string& name);
@@ -121,6 +125,7 @@ public:
     bool queueIntentOps(const sol::table& ops, std::string* error = nullptr);
     void queueGrantInventoryItem(uint32_t guid, const std::string& refId, int count);
     void queueRemovePlacedObject(uint32_t mpNum, const std::string& cellId);
+    void queueRefreshAllGameSettings();
     void queueRefreshCellGameSettings(const std::string& cellId);
     void queueRefreshPlayerGameSettings(uint32_t guid);
 
@@ -215,6 +220,7 @@ private:
     mutable std::mutex                         mPlacedObjectsMutex;
     std::unordered_map<uint32_t, PlacedObject> mPlacedObjectsByMpNum;
     mutable std::mutex                         mSurfPhysicsMutex;
+    SurfPhysicsSettings                        mGlobalSurfPhysicsSettings;
     std::unordered_map<std::string, SurfPhysicsSettings> mCellSurfPhysicsSettings;
     std::unordered_map<uint32_t, SurfPhysicsSettings> mPlayerSurfPhysicsSettings;
     std::thread                                mLuaThread;

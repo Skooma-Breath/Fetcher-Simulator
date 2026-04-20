@@ -4,13 +4,12 @@ local M = {}
 
 local DEFAULTS = {
     enabled = false,
-    gravity = 1.0,
-    airAccel = 70.0,
+    gravity = 1.3,
+    airAccel = 300.0,
     maxAirSpeed = 2000.0,
     friction = 5.0,
     groundAccel = 10.0,
-    jumpSpeed = 268.0,
-    overbounce = 1.1,
+    overbounce = 3.5,
     rampAngle = 0.8,
     impactOverbounce = 1.1,
     impactVelocityThreshold = 200.0,
@@ -27,11 +26,23 @@ local SETTING_FIELDS = {
     maxairspeed = "maxAirSpeed",
     friction = "friction",
     groundaccel = "groundAccel",
-    jumpspeed = "jumpSpeed",
     overbounce = "overbounce",
     rampangle = "rampAngle",
     impactoverbounce = "impactOverbounce",
     impactvelocitythreshold = "impactVelocityThreshold",
+}
+
+local DISPLAY_FIELDS = {
+    { key = "enabled", label = "enabled", kind = "bool" },
+    { key = "gravity", label = "gravity" },
+    { key = "airAccel", label = "airAccel" },
+    { key = "maxAirSpeed", label = "maxAirSpeed" },
+    { key = "friction", label = "friction" },
+    { key = "groundAccel", label = "groundAccel" },
+    { key = "overbounce", label = "overbounce" },
+    { key = "rampAngle", label = "rampAngle" },
+    { key = "impactOverbounce", label = "impactOverbounce" },
+    { key = "impactVelocityThreshold", label = "impactVelocityThreshold" },
 }
 
 local function trim(text)
@@ -68,7 +79,6 @@ local function copyDefaults()
         maxAirSpeed = DEFAULTS.maxAirSpeed,
         friction = DEFAULTS.friction,
         groundAccel = DEFAULTS.groundAccel,
-        jumpSpeed = DEFAULTS.jumpSpeed,
         overbounce = DEFAULTS.overbounce,
         rampAngle = DEFAULTS.rampAngle,
         impactOverbounce = DEFAULTS.impactOverbounce,
@@ -76,33 +86,34 @@ local function copyDefaults()
     }
 end
 
+local function syncDefaultsToServer()
+    assert(type(mp.setGlobalPhysics) == "function", "surf_commands.lua requires mp.setGlobalPhysics")
+    mp.setGlobalPhysics(copyDefaults())
+end
+
 local function formatBool(value)
     return value and "on" or "off"
 end
 
+local function getDisplayValue(settings, key)
+    local value = settings[key]
+    if value == nil then
+        return DEFAULTS[key]
+    end
+    return value
+end
+
 local function dumpSettings(player, label, settings)
     settings = settings or copyDefaults()
-    player:sendMessage(string.format(
-        "%s enabled=%s gravity=%.3f airAccel=%.3f maxAirSpeed=%.3f",
-        label,
-        formatBool(settings.enabled),
-        settings.gravity or DEFAULTS.gravity,
-        settings.airAccel or DEFAULTS.airAccel,
-        settings.maxAirSpeed or DEFAULTS.maxAirSpeed
-    ))
-    player:sendMessage(string.format(
-        "friction=%.3f groundAccel=%.3f jumpSpeed=%.3f overbounce=%.3f",
-        settings.friction or DEFAULTS.friction,
-        settings.groundAccel or DEFAULTS.groundAccel,
-        settings.jumpSpeed or DEFAULTS.jumpSpeed,
-        settings.overbounce or DEFAULTS.overbounce
-    ))
-    player:sendMessage(string.format(
-        "rampAngle=%.3f impactOverbounce=%.3f impactVelocityThreshold=%.3f",
-        settings.rampAngle or DEFAULTS.rampAngle,
-        settings.impactOverbounce or DEFAULTS.impactOverbounce,
-        settings.impactVelocityThreshold or DEFAULTS.impactVelocityThreshold
-    ))
+    player:sendMessage(label)
+    for _, field in ipairs(DISPLAY_FIELDS) do
+        local value = getDisplayValue(settings, field.key)
+        if field.kind == "bool" then
+            player:sendMessage(string.format("  %s: %s", field.label, formatBool(value)))
+        else
+            player:sendMessage(string.format("  %s: %.3f", field.label, value))
+        end
+    end
 end
 
 local function parseValue(field, rawValue)
@@ -131,10 +142,10 @@ local function canMutatePlayer(requestingPlayer, targetPlayer, env)
 end
 
 local function sendHelp(player, prefix, isAdmin)
-    player:sendMessage("!surf -> show your effective surf values")
-    player:sendMessage("!surf self [on|off|clear|<setting> <value>]")
-    player:sendMessage("!surf cell [cellId] [on|off|clear|<setting> <value>]")
-    player:sendMessage("!surf player <name> [on|off|clear|<setting> <value>]")
+    player:sendMessage(prefix .. "surf -> show your effective surf values")
+    player:sendMessage(prefix .. "surf [on|off|clear|<setting> <value>]")
+    player:sendMessage(prefix .. "surf cell [cellId] [on|off|clear|<setting> <value>]")
+    player:sendMessage(prefix .. "surf player <name> [on|off|clear|<setting> <value>]")
     if not isAdmin then
         player:sendMessage("Only admins can modify cells or other players.")
     end
@@ -177,7 +188,7 @@ local function handleCellCommand(player, args, env)
     end
 
     if lower(action) == "clear" then
-        mp.setCellPhysics(cellId, copyDefaults())
+        mp.clearCellPhysics(cellId)
         dumpSettings(player, "Cell " .. cellId .. ":", mp.getCellPhysics(cellId))
         return false
     end
@@ -199,24 +210,7 @@ local function handleCellCommand(player, args, env)
     return false
 end
 
-local function handlePlayerCommand(player, args, env, defaultToSelf)
-    local target = player
-    local actionIndex = 2
-
-    if not defaultToSelf then
-        local targetName = trim(args[2])
-        if not targetName or targetName == "" then
-            player:sendMessage("Usage: !surf player <name> [on|off|clear|<setting> <value>]")
-            return false
-        end
-        target = env.findPlayerByName(targetName)
-        if not target then
-            player:sendMessage("Player not found: " .. tostring(targetName))
-            return false
-        end
-        actionIndex = 3
-    end
-
+local function handlePlayerAction(player, target, args, actionIndex, env)
     local action = trim(args[actionIndex])
     if not action or action == "" then
         dumpSettings(player, "Player " .. target.name .. ":", mp.getPlayerPhysics(target.guid))
@@ -262,8 +256,24 @@ local function handlePlayerCommand(player, args, env, defaultToSelf)
     return false
 end
 
+local function handlePlayerCommand(player, args, env)
+    local targetName = trim(args[2])
+    if not targetName or targetName == "" then
+        player:sendMessage("Usage: " .. (env.commandPrefix or "/") .. "surf player <name> [on|off|clear|<setting> <value>]")
+        return false
+    end
+
+    local target = env.findPlayerByName(targetName)
+    if not target then
+        player:sendMessage("Player not found: " .. tostring(targetName))
+        return false
+    end
+
+    return handlePlayerAction(player, target, args, 3, env)
+end
+
 function M.handleChat(player, data, env)
-    local commandPrefix = env.commandPrefix or "!"
+    local commandPrefix = env.commandPrefix or "/"
     local base = commandPrefix .. "surf"
     local msg = trim(data.message or "")
     if msg ~= base and msg:sub(1, #base + 1) ~= base .. " " then
@@ -290,14 +300,13 @@ function M.handleChat(player, data, env)
         return handleCellCommand(player, args, env)
     end
     if scope == "player" then
-        return handlePlayerCommand(player, args, env, false)
+        return handlePlayerCommand(player, args, env)
     end
     if scope == "self" then
-        return handlePlayerCommand(player, args, env, true)
+        return handlePlayerAction(player, player, args, 2, env)
     end
 
-    player:sendMessage("Usage: !surf | !surf help | !surf self ... | !surf player <name> ... | !surf cell ...")
-    return false
+    return handlePlayerAction(player, player, args, 1, env)
 end
 
 function M.onPlayerDisconnect(data)
@@ -305,5 +314,7 @@ function M.onPlayerDisconnect(data)
         mp.clearPlayerPhysics(data.guid)
     end
 end
+
+syncDefaultsToServer()
 
 return M

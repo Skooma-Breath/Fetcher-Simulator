@@ -10,13 +10,14 @@ local surfCommands = require("surf_commands")
 ------------------------------------------------------------------------
 local ADMIN_PASSWORD = Config.ADMIN_PASSWORD or "changeme"
 local MAX_PLAYERS = 32
-local MOTD = Config.MOTD or "Welcome to the server!  Type !help for commands."
-local COMMAND_PREFIX = Config.COMMAND_PREFIX or "!"
+local MOTD = Config.MOTD or "Welcome to the server!  Type /help for commands."
+local COMMAND_PREFIX = Config.COMMAND_PREFIX or "/"
 local ANNOUNCE_JOIN_LEAVE = Config.ANNOUNCE_JOIN_LEAVE ~= false
 local LOG_CHAT = Config.LOG_CHAT == true
 local ALLOW_UNVERIFIED_ACTIVATE = Config.ALLOW_UNVERIFIED_ACTIVATE == true
 local LOGIN_PREFIX = COMMAND_PREFIX .. "login "
 local KICK_PREFIX = COMMAND_PREFIX .. "kick "
+local PLACEAT_PREFIX = COMMAND_PREFIX .. "placeat "
 local SETTIME_PREFIX = COMMAND_PREFIX .. "settime "
 local LUABROADCAST_PREFIX = COMMAND_PREFIX .. "luabroadcast "
 local LUACELL_PREFIX = COMMAND_PREFIX .. "luacell "
@@ -77,6 +78,67 @@ local function trim(text)
     end
 
     return (text:gsub("^%s+", ""):gsub("%s+$", ""))
+end
+
+local function parseCommandArgs(text)
+    text = trim(text) or ""
+    local args = {}
+    local length = #text
+    local index = 1
+
+    while index <= length do
+        while index <= length and text:sub(index, index):match("%s") do
+            index = index + 1
+        end
+
+        if index > length then
+            break
+        end
+
+        local current = text:sub(index, index)
+        if current == "\"" then
+            local token = {}
+            local closed = false
+            index = index + 1
+
+            while index <= length do
+                current = text:sub(index, index)
+
+                if current == "\\" and index < length then
+                    local nextChar = text:sub(index + 1, index + 1)
+                    if nextChar == "\"" or nextChar == "\\" then
+                        table.insert(token, nextChar)
+                        index = index + 2
+                    else
+                        table.insert(token, current)
+                        index = index + 1
+                    end
+                elseif current == "\"" then
+                    closed = true
+                    index = index + 1
+                    break
+                else
+                    table.insert(token, current)
+                    index = index + 1
+                end
+            end
+
+            if not closed then
+                return nil, "Missing closing double quote."
+            end
+
+            table.insert(args, table.concat(token))
+        else
+            local startIndex = index
+            while index <= length and not text:sub(index, index):match("%s") do
+                index = index + 1
+            end
+
+            table.insert(args, text:sub(startIndex, index - 1))
+        end
+    end
+
+    return args
 end
 
 local function normalizeCellId(cellId)
@@ -148,6 +210,28 @@ local function toPositiveInteger(value)
     return math.floor(number)
 end
 
+local function toNonNegativeNumber(value)
+    local number = tonumber(value)
+    if not number or number < 0 then
+        return nil
+    end
+    return number
+end
+
+local function toPlaceDirection(value)
+    local number = tonumber(value)
+    if not number then
+        return nil
+    end
+
+    local direction = math.floor(number)
+    if direction < 0 or direction > 3 then
+        return nil
+    end
+
+    return direction
+end
+
 local function plainPosition(position)
     position = position or {}
     return {
@@ -158,6 +242,35 @@ local function plainPosition(position)
         ry = tonumber(position.ry) or 0,
         rz = tonumber(position.rz) or 0,
     }
+end
+
+local function placeAtPosition(player, distance, direction)
+    local position = plainPosition(player.position)
+    local yaw = position.rz or 0
+    local sinYaw = math.sin(yaw)
+    local cosYaw = math.cos(yaw)
+
+    if direction == 0 then
+        position.x = position.x + sinYaw * distance
+        position.y = position.y + cosYaw * distance
+    elseif direction == 1 then
+        position.x = position.x - sinYaw * distance
+        position.y = position.y - cosYaw * distance
+    elseif direction == 2 then
+        position.x = position.x - cosYaw * distance
+        position.y = position.y + sinYaw * distance
+    elseif direction == 3 then
+        position.x = position.x + cosYaw * distance
+        position.y = position.y - sinYaw * distance
+    end
+
+    return position
+end
+
+local function sendPlaceAtUsage(player)
+    player:sendMessage("Usage: /placeat <refId|\"ref id\"> [count] [distance] [direction]")
+    player:sendMessage("Quote refIds that contain spaces, for example /placeat \"daedric mace\"")
+    player:sendMessage("direction: 0=front, 1=back, 2=left, 3=right")
 end
 
 local function resolveVerifiedTarget(object)
@@ -482,16 +595,17 @@ local function handleChat(player, data)
 
     if msg == COMMAND_PREFIX .. "help" then
         player:sendMessage(
-            "Commands:  !who  !time  !uptime  !nick <n>  !nick off"
-                .. "  !surf"
+            "Commands:  /who  /time  /uptime  /nick <n>  /nick off"
+                .. "  /surf"
                 .. "  /mark <name>  /recall <name>  /marks  /unmark <name>"
                 .. (isAdmin(player)
-                    and "  !kick <name>  !settime <hour>  !luabroadcast [note]"
-                        .. "  !luasend <name> [note]  !luacell [cell]"
-                        .. "  !luaping [name]  !luaburst <name> [count]"
-                        .. "  !luastorage [value]  !luatypes"
+                    and "  /kick <name>  /placeat <refId|\"ref id\"> [count] [distance] [direction]"
+                        .. "  /settime <hour>  /luabroadcast [note]"
+                        .. "  /luasend <name> [note]  /luacell [cell]"
+                        .. "  /luaping [name]  /luaburst <name> [count]"
+                        .. "  /luastorage [value]  /luatypes"
                     or "")
-                .. "  !login <password>"
+                .. "  /login <password>"
         )
         return false
     end
@@ -548,6 +662,83 @@ local function handleChat(player, data)
         return false
     end
 
+    if msg == COMMAND_PREFIX .. "placeat" or msg:sub(1, #PLACEAT_PREFIX) == PLACEAT_PREFIX then
+        if not requireAdmin(player) then
+            return false
+        end
+
+        local args, parseError = parseCommandArgs(msg:sub(#PLACEAT_PREFIX + 1))
+        if not args then
+            player:sendMessage(parseError or "Invalid arguments.")
+            sendPlaceAtUsage(player)
+            return false
+        end
+
+        local refId = args[1]
+        if not refId or refId == "" then
+            sendPlaceAtUsage(player)
+            return false
+        end
+
+        if #args > 4 then
+            sendPlaceAtUsage(player)
+            return false
+        end
+
+        local countText = args[2]
+        local distanceText = args[3]
+        local directionText = args[4]
+
+        local count = 1
+        if countText and countText ~= "" then
+            count = toPositiveInteger(countText)
+            if not count then
+                player:sendMessage("count must be a positive integer.")
+                return false
+            end
+        end
+
+        local distance = 128
+        if distanceText and distanceText ~= "" then
+            distance = toNonNegativeNumber(distanceText)
+            if not distance then
+                player:sendMessage("distance must be a non-negative number.")
+                return false
+            end
+        end
+
+        local direction = 0
+        if directionText and directionText ~= "" then
+            direction = toPlaceDirection(directionText)
+            if direction == nil then
+                player:sendMessage("direction must be 0, 1, 2, or 3.")
+                return false
+            end
+        end
+
+        local cellId = normalizeCellId(player.cell)
+        if not cellId or cellId == "" then
+            player:sendMessage("Unable to determine your current cell.")
+            return false
+        end
+
+        local position = placeAtPosition(player, distance, direction)
+        if not mp.placeObject(refId, count, cellId, position) then
+            player:sendMessage("Failed to queue /placeat for " .. refId .. ".")
+            return false
+        end
+
+        player:sendMessage(string.format(
+            "Placed %s x%d in %s at distance %.1f direction %d.",
+            refId, count, cellId, distance, direction
+        ))
+        mp.log(string.format(
+            "[core] /placeat by %s refId=%s count=%d cell=%s distance=%.1f direction=%d",
+            player.name, refId, count, cellId, distance, direction
+        ))
+        return false
+    end
+
     if msg:sub(1, #SETTIME_PREFIX) == SETTIME_PREFIX then
         if not requireAdmin(player) then
             return false
@@ -560,7 +751,7 @@ local function handleChat(player, data)
                 .. " by " .. player.name .. ".")
             mp.log("[core] settime " .. hour .. " by " .. player.name)
         else
-            player:sendMessage("Usage: !settime <0-23>")
+            player:sendMessage("Usage: /settime <0-23>")
         end
         return false
     end
@@ -591,7 +782,7 @@ local function handleChat(player, data)
 
         local cellId = normalizeCellId(msg:match("^" .. "%" .. COMMAND_PREFIX .. "luacell%s+(.+)$") or player.cell)
         if not cellId or cellId == "" then
-            player:sendMessage("No cell available for !luacell.")
+            player:sendMessage("No cell available for /luacell.")
             return false
         end
 
@@ -758,7 +949,7 @@ local function handleChat(player, data)
         elseif #arg == 0 then
             local current = player:getNickname()
             if current == "" then
-                player:sendMessage("No nickname set.  Usage: !nick <name> | !nick off")
+                player:sendMessage("No nickname set.  Usage: /nick <name> | /nick off")
             else
                 player:sendMessage("Your nickname is: " .. current)
             end
@@ -784,7 +975,7 @@ local function handleChat(player, data)
             return surfHandled
         end
 
-        player:sendMessage("Unknown command.  Type !help for a list.")
+        player:sendMessage("Unknown command.  Type /help for a list.")
         return false
     end
 

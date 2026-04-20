@@ -54,8 +54,8 @@ namespace mwmp
         void applyDisplayMode();
         void scrollToBottom();
 
-        // Returns true if the text was a slash-command and should not be sent
-        // over the network.  Adds any output directly to the local history.
+        // Returns true if the text was handled locally and should not be sent
+        // over the network. Adds any output directly to the local history.
         bool handleCommand(const std::string& text);
 
         NetworkClient& mClient;

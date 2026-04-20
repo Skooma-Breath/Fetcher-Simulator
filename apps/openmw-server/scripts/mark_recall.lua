@@ -64,13 +64,9 @@ end
 local function resolveCommand(msg, commandPrefix)
     local commands = { "mark", "recall", "marks", "unmark" }
     for _, name in ipairs(commands) do
-        local bang = (commandPrefix or "!") .. name
-        local slash = "/" .. name
-        if msg == bang or msg:sub(1, #bang + 1) == bang .. " " then
-            return name, trim(msg:sub(#bang + 1))
-        end
-        if msg == slash or msg:sub(1, #slash + 1) == slash .. " " then
-            return name, trim(msg:sub(#slash + 1))
+        local command = (commandPrefix or "/") .. name
+        if msg == command or msg:sub(1, #command + 1) == command .. " " then
+            return name, trim(msg:sub(#command + 1))
         end
     end
     return nil

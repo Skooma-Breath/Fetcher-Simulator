@@ -895,6 +895,7 @@ namespace MWPhysics
                         .find("fSwimHeightScale")
                         ->mValue.getFloat()))
         , mSlowFall(slowFall)
+        , mJumpVelocity(actor.getPtr().getClass().getJump(actor.getPtr()))
         , mRotation()
         , mMovement(actor.velocity())
         , mWaterlevel(waterlevel)

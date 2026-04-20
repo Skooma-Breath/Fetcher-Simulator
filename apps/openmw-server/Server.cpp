@@ -552,6 +552,17 @@ void MPServer::broadcastGameSettingsToCell(const std::string& cellId)
     }
 }
 
+void MPServer::broadcastGameSettingsToAllPlayers()
+{
+    for (auto& [conn, client] : mClients)
+    {
+        if (!client.handshakeComplete)
+            continue;
+
+        sendGameSettingsToClient(conn, makeCellKey(client.player.cell));
+    }
+}
+
 void MPServer::sendGameSettingsToPlayer(uint32_t guid)
 {
     for (auto& [conn, client] : mClients)
@@ -2513,14 +2524,8 @@ void MPServer::handleObjectPlace(ConnectedClient& c, const uint8_t* data, size_t
     PacketObjectPlace pkt;
     if (!pkt.decode(data, size)) return;
 
-    pkt.object.mpNum = mWorld.nextObjectMpNum++;
-
-    auto& objects = mWorld.placedObjects[pkt.object.cellId];
-    objects.push_back(pkt.object);
-    mLua.upsertPlacedObject(pkt.object);
-
-    if (mPlayerDb)
-        mPlayerDb->upsertWorldObject(pkt.object);
+    if (!acceptPlacedObject(pkt.object))
+        return;
 
     Log(Debug::Info) << "[Server] ObjectPlace accepted: player=" << c.name
                      << " refId=" << pkt.object.refId
@@ -2838,6 +2843,28 @@ bool MPServer::grantPlayerInventoryItem(uint32_t guid, const std::string& refId,
     return client ? grantInventoryItem(*client, refId, count) : false;
 }
 
+bool MPServer::placeObject(const std::string& refId, int count, const std::string& cellId, const Position& position)
+{
+    PlacedObject object;
+    object.refId = refId;
+    object.count = count;
+    object.cellId = cellId;
+    object.position = position;
+
+    if (!acceptPlacedObject(object))
+        return false;
+
+    Log(Debug::Info) << "[Server] Script ObjectPlace accepted: refId=" << object.refId
+                     << " mpNum=" << object.mpNum
+                     << " cell=" << object.cellId
+                     << " count=" << object.count;
+
+    PacketObjectPlace pkt;
+    pkt.object = object;
+    broadcastToCell(object.cellId, pkt.encode());
+    return true;
+}
+
 bool MPServer::removePlacedObjectByMpNum(uint32_t mpNum, const std::string& cellId)
 {
     return removePlacedObjectAuthoritative(mpNum, cellId);
@@ -2878,6 +2905,23 @@ int MPServer::getPlayerCount() const
         if (client.charSelectComplete)
             ++count;
     return count;
+}
+
+bool MPServer::acceptPlacedObject(PlacedObject& object)
+{
+    if (object.refId.empty() || object.cellId.empty() || object.count <= 0)
+        return false;
+
+    object.mpNum = mWorld.nextObjectMpNum++;
+
+    auto& objects = mWorld.placedObjects[object.cellId];
+    objects.push_back(object);
+    mLua.upsertPlacedObject(object);
+
+    if (mPlayerDb)
+        mPlayerDb->upsertWorldObject(object);
+
+    return true;
 }
 
 // ---------------------------------------------------------------------------
