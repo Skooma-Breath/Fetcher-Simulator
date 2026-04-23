@@ -37,6 +37,7 @@
 #include "object.hpp"
 #include "objectvariant.hpp"
 #include "recordstore.hpp"
+#include "types/usertypeutil.hpp"
 
 namespace MWLua
 {
@@ -146,6 +147,10 @@ namespace sol
     {
     };
     template <>
+    struct is_automagical<ESM::Enchantment> : std::false_type
+    {
+    };
+    template <>
     struct is_automagical<ESM::IndexedENAMstruct> : std::false_type
     {
     };
@@ -165,6 +170,105 @@ namespace sol
 
 namespace MWLua
 {
+    static void updateEffectListFromTable(ESM::EffectList& effectList, const sol::table& effectsTable)
+    {
+        const size_t numEffects = effectsTable.size();
+        effectList.mList.resize(numEffects);
+        for (size_t i = 0; i < numEffects; ++i)
+            effectList.mList[i] = LuaUtil::cast<ESM::IndexedENAMstruct>(effectsTable[LuaUtil::toLuaIndex(i)]);
+        effectList.updateIndexes();
+    }
+
+    static void updateSpellFlag(const sol::table& rec, const char* key, int32_t flag, int32_t& flags)
+    {
+        const sol::object value = rec[key];
+        if (value != sol::nil)
+        {
+            if (value.as<bool>())
+                flags |= flag;
+            else
+                flags &= ~flag;
+        }
+    }
+
+    static void updateEnchantmentFlag(const sol::table& rec, const char* key, int32_t flag, int32_t& flags)
+    {
+        const sol::object value = rec[key];
+        if (value != sol::nil)
+        {
+            if (value.as<bool>())
+                flags |= flag;
+            else
+                flags &= ~flag;
+        }
+    }
+
+    ESM::Spell tableToSpell(const sol::table& rec)
+    {
+        ESM::Spell spell = MWLua::Types::initFromTemplate<ESM::Spell>(rec);
+
+        if (rec["name"] != sol::nil)
+            spell.mName = rec["name"];
+
+        if (auto rawType = rec.get<sol::optional<int>>("type"))
+            spell.mData.mType = *rawType;
+        else if (auto rawSubtype = rec.get<sol::optional<int>>("subtype"))
+            spell.mData.mType = *rawSubtype;
+
+        if (spell.mData.mType < ESM::Spell::ST_Spell || spell.mData.mType > ESM::Spell::ST_Power)
+            throw std::runtime_error("Invalid Spell Type provided: " + std::to_string(spell.mData.mType));
+
+        if (rec["cost"] != sol::nil)
+            spell.mData.mCost = rec["cost"];
+        if (rec["flags"] != sol::nil)
+            spell.mData.mFlags = rec["flags"].get<int>();
+        if (rec["effects"] != sol::nil)
+        {
+            sol::table effects = rec["effects"];
+            updateEffectListFromTable(spell.mEffects, effects);
+        }
+
+        updateSpellFlag(rec, "autocalcFlag", ESM::Spell::F_Autocalc, spell.mData.mFlags);
+        updateSpellFlag(rec, "isAutocalc", ESM::Spell::F_Autocalc, spell.mData.mFlags);
+        updateSpellFlag(rec, "starterSpellFlag", ESM::Spell::F_PCStart, spell.mData.mFlags);
+        updateSpellFlag(rec, "alwaysSucceedFlag", ESM::Spell::F_Always, spell.mData.mFlags);
+
+        return spell;
+    }
+
+    ESM::Enchantment tableToEnchantment(const sol::table& rec)
+    {
+        ESM::Enchantment enchantment = MWLua::Types::initFromTemplate<ESM::Enchantment>(rec);
+
+        if (auto rawType = rec.get<sol::optional<int>>("type"))
+            enchantment.mData.mType = *rawType;
+        else if (auto rawSubtype = rec.get<sol::optional<int>>("subtype"))
+            enchantment.mData.mType = *rawSubtype;
+
+        if (enchantment.mData.mType < ESM::Enchantment::CastOnce
+            || enchantment.mData.mType > ESM::Enchantment::ConstantEffect)
+        {
+            throw std::runtime_error("Invalid Enchantment Type provided: " + std::to_string(enchantment.mData.mType));
+        }
+
+        if (rec["cost"] != sol::nil)
+            enchantment.mData.mCost = rec["cost"];
+        if (rec["charge"] != sol::nil)
+            enchantment.mData.mCharge = rec["charge"];
+        if (rec["flags"] != sol::nil)
+            enchantment.mData.mFlags = rec["flags"].get<int>();
+        if (rec["effects"] != sol::nil)
+        {
+            sol::table effects = rec["effects"];
+            updateEffectListFromTable(enchantment.mEffects, effects);
+        }
+
+        updateEnchantmentFlag(rec, "autocalcFlag", ESM::Enchantment::Autocalc, enchantment.mData.mFlags);
+        updateEnchantmentFlag(rec, "isAutocalc", ESM::Enchantment::Autocalc, enchantment.mData.mFlags);
+
+        return enchantment;
+    }
+
     static ESM::RefId toSpellId(const sol::object& spellOrId)
     {
         if (spellOrId.is<ESM::Spell>())
@@ -256,11 +360,13 @@ namespace MWLua
         // Spell store
         sol::table spells(state, sol::create);
         addRecordFunctionBinding<ESM::Spell>(spells, context);
+        spells["createRecordDraft"] = tableToSpell;
         magicApi["spells"] = LuaUtil::makeReadOnly(spells);
 
         // Enchantment store
         sol::table enchantments(state, sol::create);
         addRecordFunctionBinding<ESM::Enchantment>(enchantments, context);
+        enchantments["createRecordDraft"] = tableToEnchantment;
         magicApi["enchantments"] = LuaUtil::makeReadOnly(enchantments);
 
         // MagicEffect store

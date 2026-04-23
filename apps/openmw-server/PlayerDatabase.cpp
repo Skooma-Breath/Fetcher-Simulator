@@ -1,5 +1,6 @@
 #include "PlayerDatabase.hpp"
 
+#include <algorithm>
 #include <sqlite3.h>
 #include <components/debug/debuglog.hpp>
 
@@ -119,6 +120,45 @@ CREATE TABLE IF NOT EXISTS world_doors (
 
 CREATE INDEX IF NOT EXISTS idx_world_doors_cell ON world_doors(cell_id);
 
+CREATE TABLE IF NOT EXISTS world_dynamic_records (
+    record_type   TEXT    NOT NULL,
+    record_id     TEXT    NOT NULL,
+    record_scope  TEXT    NOT NULL DEFAULT 'permanent',
+    record_data   BLOB    NOT NULL,
+    created_at    INTEGER NOT NULL DEFAULT 0,
+    updated_at    INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY(record_type, record_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_world_dynamic_records_scope
+    ON world_dynamic_records(record_scope);
+
+CREATE TABLE IF NOT EXISTS world_dynamic_record_catalog (
+    record_type    TEXT    NOT NULL,
+    record_id      TEXT    NOT NULL,
+    record_scope   TEXT    NOT NULL DEFAULT 'permanent',
+    is_persistent  INTEGER NOT NULL DEFAULT 1,
+    created_at     INTEGER NOT NULL DEFAULT 0,
+    updated_at     INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY(record_type, record_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_world_dynamic_record_catalog_persistent
+    ON world_dynamic_record_catalog(is_persistent);
+
+CREATE TABLE IF NOT EXISTS world_dynamic_record_links (
+    record_id    TEXT    NOT NULL,
+    link_kind    TEXT    NOT NULL,
+    owner_a      TEXT    NOT NULL DEFAULT '',
+    owner_b      TEXT    NOT NULL DEFAULT '',
+    owner_c      TEXT    NOT NULL DEFAULT '',
+    owner_index  INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY(record_id, link_kind, owner_a, owner_b, owner_c, owner_index)
+);
+
+CREATE INDEX IF NOT EXISTS idx_world_dynamic_record_links_record
+    ON world_dynamic_record_links(record_id);
+
 CREATE TABLE IF NOT EXISTS character_inventory (
     character_id          INTEGER NOT NULL REFERENCES characters(id) ON DELETE CASCADE,
     item_index            INTEGER NOT NULL,
@@ -213,6 +253,35 @@ static const char* kMigrations[] = {
     "  rot_z REAL NOT NULL DEFAULT 0,"
     "  PRIMARY KEY(character_id, mark_name))",
     "CREATE INDEX IF NOT EXISTS idx_character_marks_character ON character_marks(character_id)",
+    "CREATE TABLE IF NOT EXISTS world_dynamic_records ("
+    "  record_type TEXT NOT NULL,"
+    "  record_id TEXT NOT NULL,"
+    "  record_scope TEXT NOT NULL DEFAULT 'permanent',"
+    "  record_data BLOB NOT NULL,"
+    "  created_at INTEGER NOT NULL DEFAULT 0,"
+    "  updated_at INTEGER NOT NULL DEFAULT 0,"
+    "  PRIMARY KEY(record_type, record_id))",
+    "CREATE INDEX IF NOT EXISTS idx_world_dynamic_records_scope ON world_dynamic_records(record_scope)",
+    "CREATE TABLE IF NOT EXISTS world_dynamic_record_catalog ("
+    "  record_type TEXT NOT NULL,"
+    "  record_id TEXT NOT NULL,"
+    "  record_scope TEXT NOT NULL DEFAULT 'permanent',"
+    "  is_persistent INTEGER NOT NULL DEFAULT 1,"
+    "  created_at INTEGER NOT NULL DEFAULT 0,"
+    "  updated_at INTEGER NOT NULL DEFAULT 0,"
+    "  PRIMARY KEY(record_type, record_id))",
+    "CREATE INDEX IF NOT EXISTS idx_world_dynamic_record_catalog_persistent"
+    " ON world_dynamic_record_catalog(is_persistent)",
+    "CREATE TABLE IF NOT EXISTS world_dynamic_record_links ("
+    "  record_id TEXT NOT NULL,"
+    "  link_kind TEXT NOT NULL,"
+    "  owner_a TEXT NOT NULL DEFAULT '',"
+    "  owner_b TEXT NOT NULL DEFAULT '',"
+    "  owner_c TEXT NOT NULL DEFAULT '',"
+    "  owner_index INTEGER NOT NULL DEFAULT 0,"
+    "  PRIMARY KEY(record_id, link_kind, owner_a, owner_b, owner_c, owner_index))",
+    "CREATE INDEX IF NOT EXISTS idx_world_dynamic_record_links_record"
+    " ON world_dynamic_record_links(record_id)",
 };
 
 // ============================================================================
@@ -221,11 +290,86 @@ static const char* kMigrations[] = {
 
 namespace
 {
+    struct BrowsableTableDef
+    {
+        const char* name;
+        const char* orderBy;
+    };
+
+    static const BrowsableTableDef kBrowsableTableDefs[] = {
+        { "accounts", "id" },
+        { "characters", "id" },
+        { "account_keypairs", "id" },
+        { "world_objects", "mp_num" },
+        { "world_containers", "cell_id, ref_id, ref_num" },
+        { "world_container_items", "cell_id, ref_id, ref_num, item_index" },
+        { "world_doors", "cell_id, ref_id, ref_num" },
+        { "world_dynamic_records", "created_at, record_type, record_id" },
+        { "world_dynamic_record_catalog", "created_at, record_type, record_id" },
+        { "world_dynamic_record_links", "record_id, link_kind, owner_a, owner_b, owner_c, owner_index" },
+        { "character_inventory", "character_id, item_index" },
+        { "character_equipment", "character_id, slot" },
+        { "character_marks", "character_id, mark_name" },
+    };
+
     void checkSqlite(int rc, sqlite3* db, const char* op)
     {
         if (rc != SQLITE_OK && rc != SQLITE_ROW && rc != SQLITE_DONE)
             throw std::runtime_error(
                 std::string("[PlayerDB] ") + op + ": " + sqlite3_errmsg(db));
+    }
+
+    void clearDynamicRecordLinksForOwner(
+        sqlite3* db, sqlite3_stmt* stmt, std::string_view linkKind,
+        std::string_view ownerA, std::string_view ownerB, std::string_view ownerC)
+    {
+        sqlite3_bind_text(stmt, 1, linkKind.data(), static_cast<int>(linkKind.size()), SQLITE_TRANSIENT);
+        sqlite3_bind_text(stmt, 2, ownerA.data(), static_cast<int>(ownerA.size()), SQLITE_TRANSIENT);
+        sqlite3_bind_text(stmt, 3, ownerB.data(), static_cast<int>(ownerB.size()), SQLITE_TRANSIENT);
+        sqlite3_bind_text(stmt, 4, ownerC.data(), static_cast<int>(ownerC.size()), SQLITE_TRANSIENT);
+        checkSqlite(sqlite3_step(stmt), db, "clearDynamicRecordLinksForOwner");
+        sqlite3_reset(stmt);
+        sqlite3_clear_bindings(stmt);
+    }
+
+    void insertDynamicRecordLink(
+        sqlite3* db, sqlite3_stmt* stmt, std::string_view recordId, std::string_view linkKind,
+        std::string_view ownerA, std::string_view ownerB, std::string_view ownerC, int64_t ownerIndex)
+    {
+        if (recordId.empty())
+            return;
+
+        sqlite3_bind_text(stmt, 1, recordId.data(), static_cast<int>(recordId.size()), SQLITE_TRANSIENT);
+        sqlite3_bind_text(stmt, 2, linkKind.data(), static_cast<int>(linkKind.size()), SQLITE_TRANSIENT);
+        sqlite3_bind_text(stmt, 3, ownerA.data(), static_cast<int>(ownerA.size()), SQLITE_TRANSIENT);
+        sqlite3_bind_text(stmt, 4, ownerB.data(), static_cast<int>(ownerB.size()), SQLITE_TRANSIENT);
+        sqlite3_bind_text(stmt, 5, ownerC.data(), static_cast<int>(ownerC.size()), SQLITE_TRANSIENT);
+        sqlite3_bind_int64(stmt, 6, ownerIndex);
+        checkSqlite(sqlite3_step(stmt), db, "insertDynamicRecordLink");
+        sqlite3_reset(stmt);
+        sqlite3_clear_bindings(stmt);
+    }
+
+    const BrowsableTableDef* findBrowsableTableDef(std::string_view tableName)
+    {
+        for (const BrowsableTableDef& entry : kBrowsableTableDefs)
+        {
+            if (tableName == entry.name)
+                return &entry;
+        }
+        return nullptr;
+    }
+
+    std::optional<std::string> sqliteColumnToString(sqlite3_stmt* stmt, int index)
+    {
+        if (sqlite3_column_type(stmt, index) == SQLITE_NULL)
+            return std::nullopt;
+
+        const char* text = reinterpret_cast<const char*>(sqlite3_column_text(stmt, index));
+        if (!text)
+            return std::string();
+
+        return std::string(text, static_cast<std::size_t>(sqlite3_column_bytes(stmt, index)));
     }
 }
 
@@ -620,11 +764,12 @@ std::vector<Item> PlayerDatabase::loadCharacterInventory(int64_t characterId)
     return items;
 }
 
-void PlayerDatabase::saveCharacterInventory(int64_t characterId, const std::vector<Item>& items)
+void PlayerDatabase::saveCharacterInventory(int64_t characterId, const std::vector<Item>& items, bool touchLastSeen)
 {
     exec("BEGIN");
     try
     {
+        const std::string characterKey = std::to_string(characterId);
         sqlite3_stmt* clear = prepare("DELETE FROM character_inventory WHERE character_id=?1");
         sqlite3_bind_int64(clear, 1, characterId);
         checkSqlite(sqlite3_step(clear), mDb, "clearCharacterInventory");
@@ -650,10 +795,31 @@ void PlayerDatabase::saveCharacterInventory(int64_t characterId, const std::vect
         }
         sqlite3_finalize(insert);
 
-        sqlite3_stmt* mark = prepare(
-            "UPDATE characters SET inventory_saved=1, last_seen=?1 WHERE id=?2");
-        sqlite3_bind_int64(mark, 1, static_cast<int64_t>(std::time(nullptr)));
-        sqlite3_bind_int64(mark, 2, characterId);
+        sqlite3_stmt* clearLinks = prepare(
+            "DELETE FROM world_dynamic_record_links"
+            " WHERE link_kind=?1 AND owner_a=?2 AND owner_b=?3 AND owner_c=?4");
+        clearDynamicRecordLinksForOwner(mDb, clearLinks, "inventory_item", characterKey, "", "");
+        sqlite3_finalize(clearLinks);
+
+        sqlite3_stmt* insertLink = prepare(
+            "INSERT OR REPLACE INTO world_dynamic_record_links(record_id, link_kind, owner_a, owner_b, owner_c, owner_index)"
+            " VALUES(?1, ?2, ?3, ?4, ?5, ?6)");
+        for (std::size_t i = 0; i < items.size(); ++i)
+            insertDynamicRecordLink(mDb, insertLink, items[i].refId, "inventory_item", characterKey, "", "", static_cast<int64_t>(i));
+        sqlite3_finalize(insertLink);
+
+        sqlite3_stmt* mark = prepare(touchLastSeen
+            ? "UPDATE characters SET inventory_saved=1, last_seen=?1 WHERE id=?2"
+            : "UPDATE characters SET inventory_saved=1 WHERE id=?1");
+        if (touchLastSeen)
+        {
+            sqlite3_bind_int64(mark, 1, static_cast<int64_t>(std::time(nullptr)));
+            sqlite3_bind_int64(mark, 2, characterId);
+        }
+        else
+        {
+            sqlite3_bind_int64(mark, 1, characterId);
+        }
         checkSqlite(sqlite3_step(mark), mDb, "markCharacterInventorySaved");
         sqlite3_finalize(mark);
 
@@ -695,11 +861,12 @@ std::vector<EquipmentItem> PlayerDatabase::loadCharacterEquipment(int64_t charac
     return equipment;
 }
 
-void PlayerDatabase::saveCharacterEquipment(int64_t characterId, const std::vector<EquipmentItem>& equipment)
+void PlayerDatabase::saveCharacterEquipment(int64_t characterId, const std::vector<EquipmentItem>& equipment, bool touchLastSeen)
 {
     exec("BEGIN");
     try
     {
+        const std::string characterKey = std::to_string(characterId);
         sqlite3_stmt* clear = prepare("DELETE FROM character_equipment WHERE character_id=?1");
         sqlite3_bind_int64(clear, 1, characterId);
         checkSqlite(sqlite3_step(clear), mDb, "clearCharacterEquipment");
@@ -727,10 +894,35 @@ void PlayerDatabase::saveCharacterEquipment(int64_t characterId, const std::vect
         }
         sqlite3_finalize(insert);
 
-        sqlite3_stmt* mark = prepare(
-            "UPDATE characters SET equipment_saved=1, last_seen=?1 WHERE id=?2");
-        sqlite3_bind_int64(mark, 1, static_cast<int64_t>(std::time(nullptr)));
-        sqlite3_bind_int64(mark, 2, characterId);
+        sqlite3_stmt* clearLinks = prepare(
+            "DELETE FROM world_dynamic_record_links"
+            " WHERE link_kind=?1 AND owner_a=?2 AND owner_b=?3 AND owner_c=?4");
+        clearDynamicRecordLinksForOwner(mDb, clearLinks, "equipment_item", characterKey, "", "");
+        sqlite3_finalize(clearLinks);
+
+        sqlite3_stmt* insertLink = prepare(
+            "INSERT OR REPLACE INTO world_dynamic_record_links(record_id, link_kind, owner_a, owner_b, owner_c, owner_index)"
+            " VALUES(?1, ?2, ?3, ?4, ?5, ?6)");
+        for (const EquipmentItem& entry : equipment)
+        {
+            if (entry.item.refId.empty())
+                continue;
+            insertDynamicRecordLink(mDb, insertLink, entry.item.refId, "equipment_item", characterKey, "", "", entry.slot);
+        }
+        sqlite3_finalize(insertLink);
+
+        sqlite3_stmt* mark = prepare(touchLastSeen
+            ? "UPDATE characters SET equipment_saved=1, last_seen=?1 WHERE id=?2"
+            : "UPDATE characters SET equipment_saved=1 WHERE id=?1");
+        if (touchLastSeen)
+        {
+            sqlite3_bind_int64(mark, 1, static_cast<int64_t>(std::time(nullptr)));
+            sqlite3_bind_int64(mark, 2, characterId);
+        }
+        else
+        {
+            sqlite3_bind_int64(mark, 1, characterId);
+        }
         checkSqlite(sqlite3_step(mark), mDb, "markCharacterEquipmentSaved");
         sqlite3_finalize(mark);
 
@@ -778,40 +970,85 @@ std::vector<PlacedObject> PlayerDatabase::loadWorldObjects()
 
 void PlayerDatabase::upsertWorldObject(const PlacedObject& object)
 {
-    sqlite3_stmt* s = prepare(
-        "INSERT INTO world_objects(mp_num, cell_id, ref_id, item_count, pos_x, pos_y, pos_z, rot_x, rot_y, rot_z)"
-        " VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)"
-        " ON CONFLICT(mp_num) DO UPDATE SET"
-        " cell_id=excluded.cell_id,"
-        " ref_id=excluded.ref_id,"
-        " item_count=excluded.item_count,"
-        " pos_x=excluded.pos_x,"
-        " pos_y=excluded.pos_y,"
-        " pos_z=excluded.pos_z,"
-        " rot_x=excluded.rot_x,"
-        " rot_y=excluded.rot_y,"
-        " rot_z=excluded.rot_z");
+    exec("BEGIN");
+    try
+    {
+        const std::string ownerA = std::to_string(object.mpNum);
 
-    sqlite3_bind_int64(s, 1, object.mpNum);
-    sqlite3_bind_text(s, 2, object.cellId.c_str(), -1, SQLITE_TRANSIENT);
-    sqlite3_bind_text(s, 3, object.refId.c_str(), -1, SQLITE_TRANSIENT);
-    sqlite3_bind_int(s, 4, object.count);
-    sqlite3_bind_double(s, 5, object.position.pos[0]);
-    sqlite3_bind_double(s, 6, object.position.pos[1]);
-    sqlite3_bind_double(s, 7, object.position.pos[2]);
-    sqlite3_bind_double(s, 8, object.position.rot[0]);
-    sqlite3_bind_double(s, 9, object.position.rot[1]);
-    sqlite3_bind_double(s, 10, object.position.rot[2]);
-    checkSqlite(sqlite3_step(s), mDb, "upsertWorldObject");
-    sqlite3_finalize(s);
+        sqlite3_stmt* s = prepare(
+            "INSERT INTO world_objects(mp_num, cell_id, ref_id, item_count, pos_x, pos_y, pos_z, rot_x, rot_y, rot_z)"
+            " VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)"
+            " ON CONFLICT(mp_num) DO UPDATE SET"
+            " cell_id=excluded.cell_id,"
+            " ref_id=excluded.ref_id,"
+            " item_count=excluded.item_count,"
+            " pos_x=excluded.pos_x,"
+            " pos_y=excluded.pos_y,"
+            " pos_z=excluded.pos_z,"
+            " rot_x=excluded.rot_x,"
+            " rot_y=excluded.rot_y,"
+            " rot_z=excluded.rot_z");
+
+        sqlite3_bind_int64(s, 1, object.mpNum);
+        sqlite3_bind_text(s, 2, object.cellId.c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_text(s, 3, object.refId.c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_int(s, 4, object.count);
+        sqlite3_bind_double(s, 5, object.position.pos[0]);
+        sqlite3_bind_double(s, 6, object.position.pos[1]);
+        sqlite3_bind_double(s, 7, object.position.pos[2]);
+        sqlite3_bind_double(s, 8, object.position.rot[0]);
+        sqlite3_bind_double(s, 9, object.position.rot[1]);
+        sqlite3_bind_double(s, 10, object.position.rot[2]);
+        checkSqlite(sqlite3_step(s), mDb, "upsertWorldObject");
+        sqlite3_finalize(s);
+
+        sqlite3_stmt* clearLinks = prepare(
+            "DELETE FROM world_dynamic_record_links"
+            " WHERE link_kind=?1 AND owner_a=?2 AND owner_b=?3 AND owner_c=?4");
+        clearDynamicRecordLinksForOwner(mDb, clearLinks, "placed_object", ownerA, object.cellId, "");
+        sqlite3_finalize(clearLinks);
+
+        sqlite3_stmt* insertLink = prepare(
+            "INSERT OR REPLACE INTO world_dynamic_record_links(record_id, link_kind, owner_a, owner_b, owner_c, owner_index)"
+            " VALUES(?1, ?2, ?3, ?4, ?5, ?6)");
+        insertDynamicRecordLink(mDb, insertLink, object.refId, "placed_object", ownerA, object.cellId, "", 0);
+        sqlite3_finalize(insertLink);
+
+        exec("COMMIT");
+    }
+    catch (...)
+    {
+        try { exec("ROLLBACK"); } catch (...) {}
+        throw;
+    }
 }
 
 void PlayerDatabase::deleteWorldObject(uint32_t mpNum)
 {
-    sqlite3_stmt* s = prepare("DELETE FROM world_objects WHERE mp_num=?1");
-    sqlite3_bind_int64(s, 1, mpNum);
-    checkSqlite(sqlite3_step(s), mDb, "deleteWorldObject");
-    sqlite3_finalize(s);
+    exec("BEGIN");
+    try
+    {
+        const std::string ownerA = std::to_string(mpNum);
+
+        sqlite3_stmt* s = prepare("DELETE FROM world_objects WHERE mp_num=?1");
+        sqlite3_bind_int64(s, 1, mpNum);
+        checkSqlite(sqlite3_step(s), mDb, "deleteWorldObject");
+        sqlite3_finalize(s);
+
+        sqlite3_stmt* clearLinks = prepare(
+            "DELETE FROM world_dynamic_record_links WHERE link_kind=?1 AND owner_a=?2");
+        sqlite3_bind_text(clearLinks, 1, "placed_object", -1, SQLITE_STATIC);
+        sqlite3_bind_text(clearLinks, 2, ownerA.c_str(), -1, SQLITE_TRANSIENT);
+        checkSqlite(sqlite3_step(clearLinks), mDb, "deleteWorldObject(link)");
+        sqlite3_finalize(clearLinks);
+
+        exec("COMMIT");
+    }
+    catch (...)
+    {
+        try { exec("ROLLBACK"); } catch (...) {}
+        throw;
+    }
 }
 
 std::vector<ContainerRecord> PlayerDatabase::loadContainerRecords()
@@ -877,6 +1114,8 @@ void PlayerDatabase::upsertContainerRecord(const ContainerRecord& record)
     exec("BEGIN");
     try
     {
+        const std::string ownerC = std::to_string(record.refNum);
+
         sqlite3_stmt* parent = prepare(
             "INSERT INTO world_containers(cell_id, ref_id, ref_num, mp_num, has_authority)"
             " VALUES(?1, ?2, ?3, ?4, ?5)"
@@ -919,6 +1158,54 @@ void PlayerDatabase::upsertContainerRecord(const ContainerRecord& record)
         }
         sqlite3_finalize(itemStmt);
 
+        sqlite3_stmt* clearLinks = prepare(
+            "DELETE FROM world_dynamic_record_links"
+            " WHERE link_kind=?1 AND owner_a=?2 AND owner_b=?3 AND owner_c=?4");
+        clearDynamicRecordLinksForOwner(mDb, clearLinks, "container_parent", record.cellId, record.refId, ownerC);
+        clearDynamicRecordLinksForOwner(mDb, clearLinks, "container_item", record.cellId, record.refId, ownerC);
+        sqlite3_finalize(clearLinks);
+
+        sqlite3_stmt* insertLink = prepare(
+            "INSERT OR REPLACE INTO world_dynamic_record_links(record_id, link_kind, owner_a, owner_b, owner_c, owner_index)"
+            " VALUES(?1, ?2, ?3, ?4, ?5, ?6)");
+        insertDynamicRecordLink(mDb, insertLink, record.refId, "container_parent", record.cellId, record.refId, ownerC, 0);
+        for (std::size_t i = 0; i < record.items.size(); ++i)
+            insertDynamicRecordLink(
+                mDb, insertLink, record.items[i].refId, "container_item",
+                record.cellId, record.refId, ownerC, static_cast<int64_t>(i));
+        sqlite3_finalize(insertLink);
+
+        exec("COMMIT");
+    }
+    catch (...)
+    {
+        try { exec("ROLLBACK"); } catch (...) {}
+        throw;
+    }
+}
+
+void PlayerDatabase::deleteContainerRecord(std::string_view cellId, std::string_view refId, uint32_t refNum)
+{
+    exec("BEGIN");
+    try
+    {
+        const std::string ownerC = std::to_string(refNum);
+
+        sqlite3_stmt* s = prepare(
+            "DELETE FROM world_containers WHERE cell_id=?1 AND ref_id=?2 AND ref_num=?3");
+        sqlite3_bind_text(s, 1, cellId.data(), static_cast<int>(cellId.size()), SQLITE_TRANSIENT);
+        sqlite3_bind_text(s, 2, refId.data(), static_cast<int>(refId.size()), SQLITE_TRANSIENT);
+        sqlite3_bind_int64(s, 3, refNum);
+        checkSqlite(sqlite3_step(s), mDb, "deleteContainerRecord");
+        sqlite3_finalize(s);
+
+        sqlite3_stmt* clearLinks = prepare(
+            "DELETE FROM world_dynamic_record_links"
+            " WHERE link_kind=?1 AND owner_a=?2 AND owner_b=?3 AND owner_c=?4");
+        clearDynamicRecordLinksForOwner(mDb, clearLinks, "container_parent", cellId, refId, ownerC);
+        clearDynamicRecordLinksForOwner(mDb, clearLinks, "container_item", cellId, refId, ownerC);
+        sqlite3_finalize(clearLinks);
+
         exec("COMMIT");
     }
     catch (...)
@@ -958,23 +1245,327 @@ std::vector<DoorEntry> PlayerDatabase::loadDoorStates()
 
 void PlayerDatabase::upsertDoorState(const DoorEntry& entry)
 {
+    exec("BEGIN");
+    try
+    {
+        const std::string ownerC = std::to_string(entry.refNum);
+
+        sqlite3_stmt* s = prepare(
+            "INSERT INTO world_doors(cell_id, ref_id, ref_num, mp_num, is_open, is_locked, lock_level)"
+            " VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7)"
+            " ON CONFLICT(cell_id, ref_id, ref_num) DO UPDATE SET"
+            " mp_num=excluded.mp_num,"
+            " is_open=excluded.is_open,"
+            " is_locked=excluded.is_locked,"
+            " lock_level=excluded.lock_level");
+        sqlite3_bind_text(s, 1, entry.cellId.c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_text(s, 2, entry.refId.c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_int64(s, 3, entry.refNum);
+        sqlite3_bind_int64(s, 4, entry.mpNum);
+        sqlite3_bind_int(s, 5, entry.isOpen ? 1 : 0);
+        sqlite3_bind_int(s, 6, entry.isLocked ? 1 : 0);
+        sqlite3_bind_int(s, 7, entry.lockLevel);
+        checkSqlite(sqlite3_step(s), mDb, "upsertDoorState");
+        sqlite3_finalize(s);
+
+        sqlite3_stmt* clearLinks = prepare(
+            "DELETE FROM world_dynamic_record_links"
+            " WHERE link_kind=?1 AND owner_a=?2 AND owner_b=?3 AND owner_c=?4");
+        clearDynamicRecordLinksForOwner(mDb, clearLinks, "door_state", entry.cellId, entry.refId, ownerC);
+        sqlite3_finalize(clearLinks);
+
+        sqlite3_stmt* insertLink = prepare(
+            "INSERT OR REPLACE INTO world_dynamic_record_links(record_id, link_kind, owner_a, owner_b, owner_c, owner_index)"
+            " VALUES(?1, ?2, ?3, ?4, ?5, ?6)");
+        insertDynamicRecordLink(mDb, insertLink, entry.refId, "door_state", entry.cellId, entry.refId, ownerC, 0);
+        sqlite3_finalize(insertLink);
+
+        exec("COMMIT");
+    }
+    catch (...)
+    {
+        try { exec("ROLLBACK"); } catch (...) {}
+        throw;
+    }
+}
+
+void PlayerDatabase::deleteDoorState(std::string_view cellId, std::string_view refId, uint32_t refNum)
+{
+    exec("BEGIN");
+    try
+    {
+        const std::string ownerC = std::to_string(refNum);
+
+        sqlite3_stmt* s = prepare(
+            "DELETE FROM world_doors WHERE cell_id=?1 AND ref_id=?2 AND ref_num=?3");
+        sqlite3_bind_text(s, 1, cellId.data(), static_cast<int>(cellId.size()), SQLITE_TRANSIENT);
+        sqlite3_bind_text(s, 2, refId.data(), static_cast<int>(refId.size()), SQLITE_TRANSIENT);
+        sqlite3_bind_int64(s, 3, refNum);
+        checkSqlite(sqlite3_step(s), mDb, "deleteDoorState");
+        sqlite3_finalize(s);
+
+        sqlite3_stmt* clearLinks = prepare(
+            "DELETE FROM world_dynamic_record_links"
+            " WHERE link_kind=?1 AND owner_a=?2 AND owner_b=?3 AND owner_c=?4");
+        clearDynamicRecordLinksForOwner(mDb, clearLinks, "door_state", cellId, refId, ownerC);
+        sqlite3_finalize(clearLinks);
+
+        exec("COMMIT");
+    }
+    catch (...)
+    {
+        try { exec("ROLLBACK"); } catch (...) {}
+        throw;
+    }
+}
+
+std::vector<PersistedDynamicRecord> PlayerDatabase::loadDynamicRecords()
+{
     sqlite3_stmt* s = prepare(
-        "INSERT INTO world_doors(cell_id, ref_id, ref_num, mp_num, is_open, is_locked, lock_level)"
-        " VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7)"
-        " ON CONFLICT(cell_id, ref_id, ref_num) DO UPDATE SET"
-        " mp_num=excluded.mp_num,"
-        " is_open=excluded.is_open,"
-        " is_locked=excluded.is_locked,"
-        " lock_level=excluded.lock_level");
-    sqlite3_bind_text(s, 1, entry.cellId.c_str(), -1, SQLITE_TRANSIENT);
-    sqlite3_bind_text(s, 2, entry.refId.c_str(), -1, SQLITE_TRANSIENT);
-    sqlite3_bind_int64(s, 3, entry.refNum);
-    sqlite3_bind_int64(s, 4, entry.mpNum);
-    sqlite3_bind_int(s, 5, entry.isOpen ? 1 : 0);
-    sqlite3_bind_int(s, 6, entry.isLocked ? 1 : 0);
-    sqlite3_bind_int(s, 7, entry.lockLevel);
-    checkSqlite(sqlite3_step(s), mDb, "upsertDoorState");
+        "SELECT record_type, record_id, record_scope, record_data, created_at, updated_at"
+        " FROM world_dynamic_records ORDER BY created_at, record_type, record_id");
+
+    std::vector<PersistedDynamicRecord> records;
+    while (sqlite3_step(s) == SQLITE_ROW)
+    {
+        PersistedDynamicRecord record;
+        auto textCol = [&](int i) -> std::string {
+            const char* t = reinterpret_cast<const char*>(sqlite3_column_text(s, i));
+            return t ? t : "";
+        };
+
+        record.recordType = textCol(0);
+        record.recordId = textCol(1);
+        record.recordScope = textCol(2);
+
+        const void* blob = sqlite3_column_blob(s, 3);
+        const int blobSize = sqlite3_column_bytes(s, 3);
+        if (blob && blobSize > 0)
+            record.data.assign(static_cast<const char*>(blob), static_cast<std::size_t>(blobSize));
+
+        record.createdAt = sqlite3_column_int64(s, 4);
+        record.updatedAt = sqlite3_column_int64(s, 5);
+        records.push_back(std::move(record));
+    }
+
     sqlite3_finalize(s);
+    return records;
+}
+
+void PlayerDatabase::upsertDynamicRecord(const PersistedDynamicRecord& record)
+{
+    sqlite3_stmt* s = prepare(
+        "INSERT INTO world_dynamic_records(record_type, record_id, record_scope, record_data, created_at, updated_at)"
+        " VALUES(?1, ?2, ?3, ?4, COALESCE(?5, strftime('%s', 'now')), ?6)"
+        " ON CONFLICT(record_type, record_id) DO UPDATE SET"
+        " record_scope=excluded.record_scope,"
+        " record_data=excluded.record_data,"
+        " updated_at=excluded.updated_at");
+
+    const int64_t createdAt = record.createdAt != 0 ? record.createdAt : static_cast<int64_t>(std::time(nullptr));
+    const int64_t updatedAt = record.updatedAt != 0 ? record.updatedAt : static_cast<int64_t>(std::time(nullptr));
+
+    sqlite3_bind_text(s, 1, record.recordType.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(s, 2, record.recordId.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(s, 3, record.recordScope.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_blob(s, 4, record.data.data(), static_cast<int>(record.data.size()), SQLITE_TRANSIENT);
+    sqlite3_bind_int64(s, 5, createdAt);
+    sqlite3_bind_int64(s, 6, updatedAt);
+    checkSqlite(sqlite3_step(s), mDb, "upsertDynamicRecord");
+    sqlite3_finalize(s);
+}
+
+void PlayerDatabase::deleteDynamicRecord(std::string_view recordType, std::string_view recordId)
+{
+    sqlite3_stmt* s = prepare("DELETE FROM world_dynamic_records WHERE record_type=?1 AND record_id=?2");
+    sqlite3_bind_text(s, 1, recordType.data(), static_cast<int>(recordType.size()), SQLITE_TRANSIENT);
+    sqlite3_bind_text(s, 2, recordId.data(), static_cast<int>(recordId.size()), SQLITE_TRANSIENT);
+    checkSqlite(sqlite3_step(s), mDb, "deleteDynamicRecord");
+    sqlite3_finalize(s);
+}
+
+std::vector<DynamicRecordCatalogEntry> PlayerDatabase::loadDynamicRecordCatalog()
+{
+    sqlite3_stmt* s = prepare(
+        "SELECT c.record_type, c.record_id, c.record_scope, c.is_persistent, c.created_at, c.updated_at,"
+        " COALESCE(("
+        "   SELECT COUNT(*) FROM world_dynamic_record_links l WHERE l.record_id = c.record_id"
+        " ), 0)"
+        " FROM world_dynamic_record_catalog c ORDER BY c.created_at, c.record_type, c.record_id");
+
+    std::vector<DynamicRecordCatalogEntry> records;
+    while (sqlite3_step(s) == SQLITE_ROW)
+    {
+        DynamicRecordCatalogEntry record;
+        auto textCol = [&](int i) -> std::string {
+            const char* t = reinterpret_cast<const char*>(sqlite3_column_text(s, i));
+            return t ? t : "";
+        };
+
+        record.recordType = textCol(0);
+        record.recordId = textCol(1);
+        record.recordScope = textCol(2);
+        record.persistent = sqlite3_column_int(s, 3) != 0;
+        record.createdAt = sqlite3_column_int64(s, 4);
+        record.updatedAt = sqlite3_column_int64(s, 5);
+        record.linkCount = sqlite3_column_int64(s, 6);
+        records.push_back(std::move(record));
+    }
+
+    sqlite3_finalize(s);
+    return records;
+}
+
+void PlayerDatabase::upsertDynamicRecordCatalog(const DynamicRecordCatalogEntry& record)
+{
+    sqlite3_stmt* s = prepare(
+        "INSERT INTO world_dynamic_record_catalog(record_type, record_id, record_scope, is_persistent, created_at, updated_at)"
+        " VALUES(?1, ?2, ?3, ?4, COALESCE(?5, strftime('%s', 'now')), ?6)"
+        " ON CONFLICT(record_type, record_id) DO UPDATE SET"
+        " record_scope=excluded.record_scope,"
+        " is_persistent=excluded.is_persistent,"
+        " updated_at=excluded.updated_at");
+
+    const int64_t createdAt = record.createdAt != 0 ? record.createdAt : static_cast<int64_t>(std::time(nullptr));
+    const int64_t updatedAt = record.updatedAt != 0 ? record.updatedAt : static_cast<int64_t>(std::time(nullptr));
+
+    sqlite3_bind_text(s, 1, record.recordType.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(s, 2, record.recordId.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(s, 3, record.recordScope.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_int(s, 4, record.persistent ? 1 : 0);
+    sqlite3_bind_int64(s, 5, createdAt);
+    sqlite3_bind_int64(s, 6, updatedAt);
+    checkSqlite(sqlite3_step(s), mDb, "upsertDynamicRecordCatalog");
+    sqlite3_finalize(s);
+}
+
+void PlayerDatabase::deleteDynamicRecordCatalog(std::string_view recordType, std::string_view recordId)
+{
+    sqlite3_stmt* s = prepare("DELETE FROM world_dynamic_record_catalog WHERE record_type=?1 AND record_id=?2");
+    sqlite3_bind_text(s, 1, recordType.data(), static_cast<int>(recordType.size()), SQLITE_TRANSIENT);
+    sqlite3_bind_text(s, 2, recordId.data(), static_cast<int>(recordId.size()), SQLITE_TRANSIENT);
+    checkSqlite(sqlite3_step(s), mDb, "deleteDynamicRecordCatalog");
+    sqlite3_finalize(s);
+}
+
+void PlayerDatabase::deleteDynamicRecordLinks(std::string_view recordId)
+{
+    sqlite3_stmt* s = prepare("DELETE FROM world_dynamic_record_links WHERE record_id=?1");
+    sqlite3_bind_text(s, 1, recordId.data(), static_cast<int>(recordId.size()), SQLITE_TRANSIENT);
+    checkSqlite(sqlite3_step(s), mDb, "deleteDynamicRecordLinks");
+    sqlite3_finalize(s);
+}
+
+void PlayerDatabase::replaceDynamicRecordDependencies(
+    std::string_view ownerRecordType, std::string_view ownerRecordId, const std::vector<std::string>& dependencyRecordIds)
+{
+    sqlite3_stmt* clearLinks = prepare(
+        "DELETE FROM world_dynamic_record_links"
+        " WHERE link_kind=?1 AND owner_a=?2 AND owner_b=?3 AND owner_c=?4");
+    clearDynamicRecordLinksForOwner(mDb, clearLinks, "record_dependency", ownerRecordType, ownerRecordId, "");
+    sqlite3_finalize(clearLinks);
+
+    if (dependencyRecordIds.empty())
+        return;
+
+    sqlite3_stmt* insertLink = prepare(
+        "INSERT OR REPLACE INTO world_dynamic_record_links(record_id, link_kind, owner_a, owner_b, owner_c, owner_index)"
+        " VALUES(?1, ?2, ?3, ?4, ?5, ?6)");
+
+    int64_t ownerIndex = 0;
+    for (const auto& dependencyRecordId : dependencyRecordIds)
+    {
+        insertDynamicRecordLink(
+            mDb, insertLink, dependencyRecordId, "record_dependency", ownerRecordType, ownerRecordId, "", ownerIndex++);
+    }
+
+    sqlite3_finalize(insertLink);
+}
+
+std::vector<int64_t> PlayerDatabase::listCharactersWithSavedItems()
+{
+    sqlite3_stmt* s = prepare(
+        "SELECT id FROM characters WHERE inventory_saved != 0 OR equipment_saved != 0 ORDER BY id");
+
+    std::vector<int64_t> ids;
+    while (sqlite3_step(s) == SQLITE_ROW)
+        ids.push_back(sqlite3_column_int64(s, 0));
+
+    sqlite3_finalize(s);
+    return ids;
+}
+
+std::vector<DatabaseTableInfo> PlayerDatabase::listBrowsableTables()
+{
+    std::vector<DatabaseTableInfo> results;
+    results.reserve(sizeof(kBrowsableTableDefs) / sizeof(kBrowsableTableDefs[0]));
+
+    for (const BrowsableTableDef& entry : kBrowsableTableDefs)
+    {
+        const std::string sql = "SELECT COUNT(*) FROM " + std::string(entry.name);
+        sqlite3_stmt* s = prepare(sql.c_str());
+
+        DatabaseTableInfo info;
+        info.name = entry.name;
+        if (sqlite3_step(s) == SQLITE_ROW)
+            info.rowCount = sqlite3_column_int64(s, 0);
+
+        sqlite3_finalize(s);
+        results.push_back(std::move(info));
+    }
+
+    return results;
+}
+
+std::optional<DatabaseBrowsePage> PlayerDatabase::browseTable(
+    std::string_view tableName, int64_t offset, int64_t limit)
+{
+    const BrowsableTableDef* definition = findBrowsableTableDef(tableName);
+    if (!definition)
+        return std::nullopt;
+
+    offset = std::max<int64_t>(0, offset);
+    limit = std::clamp<int64_t>(limit <= 0 ? 100 : limit, 1, 500);
+
+    DatabaseBrowsePage page;
+    page.tableName = definition->name;
+    page.offset = offset;
+    page.limit = limit;
+
+    {
+        const std::string countSql = "SELECT COUNT(*) FROM " + std::string(definition->name);
+        sqlite3_stmt* countStmt = prepare(countSql.c_str());
+        if (sqlite3_step(countStmt) == SQLITE_ROW)
+            page.totalRows = sqlite3_column_int64(countStmt, 0);
+        sqlite3_finalize(countStmt);
+    }
+
+    const std::string querySql = "SELECT * FROM " + std::string(definition->name)
+        + " ORDER BY " + definition->orderBy + " LIMIT ?1 OFFSET ?2";
+    sqlite3_stmt* s = prepare(querySql.c_str());
+    sqlite3_bind_int64(s, 1, limit);
+    sqlite3_bind_int64(s, 2, offset);
+
+    const int columnCount = sqlite3_column_count(s);
+    page.columns.reserve(static_cast<std::size_t>(columnCount));
+    for (int i = 0; i < columnCount; ++i)
+        page.columns.emplace_back(sqlite3_column_name(s, i));
+
+    int rc = SQLITE_ROW;
+    while ((rc = sqlite3_step(s)) == SQLITE_ROW)
+    {
+        std::vector<std::optional<std::string>> row;
+        row.reserve(static_cast<std::size_t>(columnCount));
+
+        for (int i = 0; i < columnCount; ++i)
+            row.push_back(sqliteColumnToString(s, i));
+
+        page.rows.push_back(std::move(row));
+    }
+
+    sqlite3_finalize(s);
+    checkSqlite(rc, mDb, "browseTable");
+    return page;
 }
 
 int64_t PlayerDatabase::addKeypair(int64_t accountId,

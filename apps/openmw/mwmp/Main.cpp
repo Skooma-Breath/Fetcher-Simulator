@@ -16,6 +16,7 @@
 #include <components/openmw-mp/Packets/Player/PacketPlayerResurrect.hpp>
 #include <components/openmw-mp/Packets/System/PacketGameSettings.hpp>
 #include <components/openmw-mp/Packets/System/PacketHandshake.hpp>
+#include <components/openmw-mp/Packets/Worldstate/PacketRecordDynamic.hpp>
 #include <components/openmw-mp/Packets/Worldstate/PacketWorldTime.hpp>
 #include <components/openmw-mp/Packets/Object/PacketDoorState.hpp>
 #include <components/openmw-mp/Packets/Object/PacketObjectPlace.hpp>
@@ -704,6 +705,14 @@ void Main::registerProtocolHandlers()
             if (pkt.authorGuid == mPlayerSync->localPlayer().guid) return;
             for (const auto& d : pkt.doors)
                 mObjectSync->onServerDoorState(d.cellId, d.refId, d.refNum, d.isOpen);
+        });
+
+    proto.registerHandler(PacketType::RecordDynamic,
+        [this](const uint8_t* data, size_t size)
+        {
+            PacketRecordDynamic pkt;
+            if (!pkt.decode(data, size)) return;
+            mWorldStateSync->onServerRecordDynamic(pkt.action, pkt.recordType, std::move(pkt.entries));
         });
 
     // --- Persisted / relayed world objects ---

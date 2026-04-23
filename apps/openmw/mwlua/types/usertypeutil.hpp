@@ -5,6 +5,7 @@
 #include "modelproperty.hpp"
 
 #include "apps/openmw/mwbase/environment.hpp"
+#include "apps/openmw/mwworld/esmstore.hpp"
 
 #include <components/resource/resourcesystem.hpp>
 
@@ -148,6 +149,15 @@ namespace MWLua::Types
                 return rec["template"].get<MutableRecord<Record>>().find();
             else
                 return LuaUtil::cast<Record>(rec["template"]);
+        }
+        if (rec["baseId"] != sol::nil)
+        {
+            const std::string_view baseId = rec["baseId"].get<std::string_view>();
+            const ESM::RefId refId = ESM::RefId::deserializeText(baseId);
+            const Record* baseRecord = MWBase::Environment::get().getESMStore()->get<Record>().search(refId);
+            if (!baseRecord)
+                throw std::runtime_error("Unknown baseId '" + std::string(baseId) + "'");
+            return *baseRecord;
         }
         Record out;
         out.blank();

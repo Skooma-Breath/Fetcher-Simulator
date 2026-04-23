@@ -14,6 +14,8 @@
 #include "bindings/PlayerBindings.hpp"
 
 #include <algorithm>
+#include <cctype>
+#include <charconv>
 #include <chrono>
 #include <cmath>
 #include <cstring>
@@ -23,6 +25,7 @@
 #include <stdexcept>
 #include <string_view>
 #include <thread>
+#include <unordered_set>
 #include <variant>
 
 #include <components/debug/debuglog.hpp>
@@ -50,6 +53,7 @@
 #include <components/openmw-mp/Packets/Object/PacketObjectMove.hpp>
 #include <components/openmw-mp/Packets/Object/PacketContainer.hpp>
 #include <components/openmw-mp/Packets/Object/PacketDoorState.hpp>
+#include <components/openmw-mp/Packets/Worldstate/PacketRecordDynamic.hpp>
 #include <components/openmw-mp/Packets/Actor/PacketActorAI.hpp>
 #include <components/openmw-mp/Packets/Actor/PacketActorAnimFlags.hpp>
 #include <components/openmw-mp/Packets/Actor/PacketActorAnimPlay.hpp>
@@ -69,6 +73,80 @@
 // Format: specialization, attr[0], attr[1], skills[0..4][0..1], isPlayable, services
 namespace
 {
+    std::string jsonEscape(std::string_view text)
+    {
+        std::string out;
+        out.reserve(text.size() + 8);
+        for (char c : text)
+        {
+            switch (c)
+            {
+                case '\\': out += "\\\\"; break;
+                case '"': out += "\\\""; break;
+                case '\b': out += "\\b"; break;
+                case '\f': out += "\\f"; break;
+                case '\n': out += "\\n"; break;
+                case '\r': out += "\\r"; break;
+                case '\t': out += "\\t"; break;
+                default:
+                    if (static_cast<unsigned char>(c) < 0x20)
+                    {
+                        char buffer[8];
+                        std::snprintf(buffer, sizeof(buffer), "\\u%04x", static_cast<unsigned char>(c));
+                        out += buffer;
+                    }
+                    else
+                    {
+                        out.push_back(c);
+                    }
+                    break;
+            }
+        }
+        return out;
+    }
+
+    std::string makeJsonErrorBody(std::string_view error)
+    {
+        return std::string("{\"ok\":false,\"error\":\"") + jsonEscape(error) + "\"}";
+    }
+
+    std::string makeDynamicRecordKey(std::string_view recordType, std::string_view recordId)
+    {
+        std::string key;
+        key.reserve(recordType.size() + 1 + recordId.size());
+        key.append(recordType);
+        key.push_back('\x1f');
+        key.append(recordId);
+        return key;
+    }
+
+    std::optional<uint64_t> parseGeneratedRecordNumber(
+        std::string_view prefix, std::string_view recordType, std::string_view recordId)
+    {
+        if (prefix.empty() || recordType.empty())
+            return std::nullopt;
+
+        std::string expectedPrefix;
+        expectedPrefix.reserve(prefix.size() + recordType.size() + 2);
+        expectedPrefix.append(prefix);
+        expectedPrefix.push_back('_');
+        expectedPrefix.append(recordType);
+        expectedPrefix.push_back('_');
+
+        if (!recordId.starts_with(expectedPrefix))
+            return std::nullopt;
+
+        std::string_view suffix = recordId.substr(expectedPrefix.size());
+        if (suffix.empty())
+            return std::nullopt;
+
+        uint64_t value = 0;
+        const auto [ptr, ec] = std::from_chars(suffix.data(), suffix.data() + suffix.size(), value);
+        if (ec != std::errc() || ptr != suffix.data() + suffix.size())
+            return std::nullopt;
+        return value;
+    }
+
     constexpr unsigned char sLuaFormatVersion = 0;
     constexpr unsigned char sLuaShortStringFlag = 0x20;
 
@@ -381,6 +459,21 @@ namespace
             appendOrMergeContainerItem(normalized, item);
 
         items = std::move(normalized);
+    }
+
+    bool sameItemIdentity(const mwmp::Item& left, const mwmp::Item& right)
+    {
+        return left.refId == right.refId
+            && left.charge == right.charge
+            && std::abs(left.enchantmentCharge - right.enchantmentCharge) < 0.001f
+            && left.soul == right.soul;
+    }
+
+    bool inventoryContainsItemIdentity(const std::vector<mwmp::Item>& items, const mwmp::Item& target)
+    {
+        return std::any_of(items.begin(), items.end(), [&](const mwmp::Item& item) {
+            return sameItemIdentity(item, target);
+        });
     }
 
     void applyContainerDelta(std::vector<mwmp::ContainerItem>& items,
@@ -794,6 +887,10 @@ void MPServer::run()
 
     Log(Debug::Info) << "[Server] Listening on port " << mPort;
 
+    mGeneratedRecordIdPrefix = mLua.getString("Config", "GENERATED_RECORD_ID_PREFIX", "$custom");
+    if (mGeneratedRecordIdPrefix.empty())
+        mGeneratedRecordIdPrefix = "$custom";
+
     // Open player database.
     try
     {
@@ -806,6 +903,9 @@ void MPServer::run()
         Log(Debug::Error) << "[Server] PlayerDatabase failed to open: " << e.what();
         // Non-fatal — server runs without persistence if DB unavailable.
     }
+
+    mLua.syncGeneratedRecordState(
+        mGeneratedRecordIdPrefix, buildGeneratedDynamicRecordCounters(mGeneratedRecordIdPrefix));
 
     // If config.lua set Config.SPAWN_CELL, let it override the C++ default.
     // mDefaultSpawnCell may already be set by main.cpp (CLI flag); only
@@ -835,9 +935,25 @@ void MPServer::run()
     Log(Debug::Info) << "[Server] Max chars per account: "
                      << (mMaxCharsPerAccount == 0 ? "unlimited" : std::to_string(mMaxCharsPerAccount));
 
+    mAdminHttpEnabled = mLua.getBool("Config", "ADMIN_HTTP_ENABLED", true);
+    mAdminHttpHost = mLua.getString("Config", "ADMIN_HTTP_HOST", "127.0.0.1");
+    mAdminHttpPort = std::max(1, mLua.getInt("Config", "ADMIN_HTTP_PORT", 8081));
+    mAdminHttpTimeoutMs = std::max(1, mLua.getInt("Config", "ADMIN_HTTP_TIMEOUT_MS", 250));
+
+    std::string normalizedAdminHttpHost = mAdminHttpHost;
+    std::transform(normalizedAdminHttpHost.begin(), normalizedAdminHttpHost.end(), normalizedAdminHttpHost.begin(),
+        [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    if (normalizedAdminHttpHost != "127.0.0.1" && normalizedAdminHttpHost != "localhost")
+    {
+        Log(Debug::Warning) << "[Server] ADMIN_HTTP_HOST must stay loopback-only; forcing 127.0.0.1 instead of "
+                            << mAdminHttpHost;
+        mAdminHttpHost = "127.0.0.1";
+    }
+
     syncLuaSnapshot();
     mLua.start();
     mLua.onServerInit();
+    startAdminHttpServer();
 
     // Register with the master server (async — does not block the tick loop).
     if (!mMasterUrl.empty())
@@ -879,6 +995,7 @@ void MPServer::run()
 // ---------------------------------------------------------------------------
 void MPServer::shutdown()
 {
+    stopAdminHttpServer();
     mLua.stop();
 
     // Tell the master server we are gone immediately (synchronous, best-effort).
@@ -933,6 +1050,8 @@ void MPServer::tick(float dt)
 
     // Send a heartbeat to the master server at most once every 30 seconds.
     mMasterClient.tickHeartbeat(dt, getPlayerCount());
+
+    flushScheduledGeneratedDynamicRecordGc();
 }
 
 // ---------------------------------------------------------------------------
@@ -1286,6 +1405,8 @@ void MPServer::loadPersistentWorldState()
 
     uint32_t maxMpNum = 0;
     std::size_t objectCount = 0;
+    std::size_t dynamicRecordCount = 0;
+    std::vector<DynamicRecordCatalogEntry> dynamicRecordCatalog;
 
     for (const auto& object : mPlayerDb->loadWorldObjects())
     {
@@ -1304,12 +1425,70 @@ void MPServer::loadPersistentWorldState()
     for (const auto& entry : mPlayerDb->loadDoorStates())
         mWorld.doorStates[entry.cellId].push_back(entry);
 
+    dynamicRecordCatalog = mPlayerDb->loadDynamicRecordCatalog();
+
+    for (const auto& record : mPlayerDb->loadDynamicRecords())
+    {
+        WorldState::StoredDynamicRecord stored;
+        stored.recordType = record.recordType;
+        stored.recordId = record.recordId;
+        stored.recordScope = normalizeDynamicRecordScope(record.recordScope);
+        if (stored.recordScope.empty())
+            stored.recordScope = "permanent";
+        stored.persistent = true;
+        stored.data = record.data;
+        stored.sequence = mWorld.nextDynamicRecordSequence++;
+        mWorld.dynamicRecords[makeDynamicRecordKey(stored.recordType, stored.recordId)] = std::move(stored);
+        ++dynamicRecordCount;
+
+        DynamicRecordCatalogEntry catalogEntry;
+        catalogEntry.recordType = record.recordType;
+        catalogEntry.recordId = record.recordId;
+        catalogEntry.recordScope = record.recordScope;
+        catalogEntry.persistent = true;
+        catalogEntry.createdAt = record.createdAt;
+        catalogEntry.updatedAt = record.updatedAt;
+        mPlayerDb->upsertDynamicRecordCatalog(catalogEntry);
+    }
+
+    std::unordered_set<std::string> sessionRecordIds;
+    for (const auto& entry : dynamicRecordCatalog)
+    {
+        if (!entry.persistent && !entry.recordId.empty())
+            sessionRecordIds.insert(entry.recordId);
+    }
+
+    if (!sessionRecordIds.empty())
+    {
+        cleanupDynamicReferences(
+            [&](std::string_view refId) -> bool { return sessionRecordIds.count(std::string(refId)) != 0; },
+            /*broadcastLive=*/false,
+            "startup_session_records");
+
+        for (const auto& entry : dynamicRecordCatalog)
+        {
+            if (entry.persistent)
+                continue;
+            mWorld.dynamicRecords.erase(makeDynamicRecordKey(entry.recordType, entry.recordId));
+            mPlayerDb->replaceDynamicRecordDependencies(entry.recordType, entry.recordId, {});
+            mPlayerDb->deleteDynamicRecord(entry.recordType, entry.recordId);
+            mPlayerDb->deleteDynamicRecordLinks(entry.recordId);
+            mPlayerDb->deleteDynamicRecordCatalog(entry.recordType, entry.recordId);
+        }
+    }
+
+    objectCount = 0;
+    for (const auto& [cellId, objects] : mWorld.placedObjects)
+        objectCount += objects.size();
+    dynamicRecordCount = mWorld.dynamicRecords.size();
+
     mWorld.nextObjectMpNum = std::max<uint32_t>(1, maxMpNum + 1);
 
     Log(Debug::Info) << "[Server] Loaded persistent world state: objects="
                      << objectCount
                      << " containers=" << mWorld.containers.size()
-                     << " doorCells=" << mWorld.doorStates.size();
+                     << " doorCells=" << mWorld.doorStates.size()
+                     << " dynamicRecords=" << dynamicRecordCount;
 }
 
 // ---------------------------------------------------------------------------
@@ -1348,6 +1527,434 @@ void MPServer::sendCellStateToClient(HSteamNetConnection conn, const std::string
         pkt.doors = doorsIt->second;
         sendTo(conn, pkt.encode());
     }
+}
+
+// ---------------------------------------------------------------------------
+void MPServer::sendDynamicRecordsToClient(HSteamNetConnection conn)
+{
+    if (mWorld.dynamicRecords.empty())
+        return;
+
+    std::vector<const WorldState::StoredDynamicRecord*> ordered;
+    ordered.reserve(mWorld.dynamicRecords.size());
+    for (const auto& [key, record] : mWorld.dynamicRecords)
+        ordered.push_back(&record);
+
+    std::sort(ordered.begin(), ordered.end(), [](const auto* left, const auto* right) {
+        return left->sequence < right->sequence;
+    });
+
+    PacketRecordDynamic pkt;
+    pkt.action = DynamicRecordAction::Upsert;
+
+    for (const auto* record : ordered)
+    {
+        if (!pkt.entries.empty() && pkt.recordType != record->recordType)
+        {
+            sendTo(conn, pkt.encode());
+            pkt.entries.clear();
+        }
+
+        pkt.recordType = record->recordType;
+        pkt.entries.push_back({ record->recordId, record->data });
+    }
+
+    if (!pkt.entries.empty())
+        sendTo(conn, pkt.encode());
+}
+
+std::unordered_map<std::string, uint64_t> MPServer::buildGeneratedDynamicRecordCounters(const std::string& prefix) const
+{
+    std::unordered_map<std::string, uint64_t> nextGeneratedNumbers;
+
+    for (const auto& [key, record] : mWorld.dynamicRecords)
+    {
+        if (record.recordScope != "generated")
+            continue;
+
+        const auto maybeGeneratedNum = parseGeneratedRecordNumber(prefix, record.recordType, record.recordId);
+        if (!maybeGeneratedNum)
+            continue;
+
+        uint64_t& nextValue = nextGeneratedNumbers[record.recordType];
+        nextValue = std::max(nextValue, *maybeGeneratedNum + 1);
+    }
+
+    return nextGeneratedNumbers;
+}
+
+std::vector<DynamicRecordCatalogEntry> MPServer::listDynamicRecordCatalog()
+{
+    std::vector<DynamicRecordCatalogEntry> entries;
+    if (mPlayerDb)
+        entries = mPlayerDb->loadDynamicRecordCatalog();
+
+    std::unordered_set<std::string> seenKeys;
+    seenKeys.reserve(entries.size() + mWorld.dynamicRecords.size());
+
+    for (auto& entry : entries)
+    {
+        const std::string key = makeDynamicRecordKey(entry.recordType, entry.recordId);
+        entry.loaded = mWorld.dynamicRecords.find(key) != mWorld.dynamicRecords.end();
+        seenKeys.insert(key);
+    }
+
+    for (const auto& [key, record] : mWorld.dynamicRecords)
+    {
+        if (seenKeys.count(key) != 0)
+            continue;
+
+        DynamicRecordCatalogEntry entry;
+        entry.recordType = record.recordType;
+        entry.recordId = record.recordId;
+        entry.recordScope = record.recordScope;
+        entry.persistent = record.persistent;
+        entry.loaded = true;
+        entries.push_back(std::move(entry));
+    }
+
+    std::sort(entries.begin(), entries.end(), [](const DynamicRecordCatalogEntry& left, const DynamicRecordCatalogEntry& right) {
+        if (left.recordType != right.recordType)
+            return left.recordType < right.recordType;
+        return left.recordId < right.recordId;
+    });
+
+    return entries;
+}
+
+std::optional<DynamicRecordCatalogEntry> MPServer::getDynamicRecordInfo(
+    std::string_view recordType, std::string_view recordId)
+{
+    const std::string normalizedType = normalizeDynamicRecordType(recordType);
+    if (normalizedType.empty() || recordId.empty())
+        return std::nullopt;
+
+    const std::string targetId(recordId);
+    for (const auto& entry : listDynamicRecordCatalog())
+    {
+        if (entry.recordType == normalizedType && entry.recordId == targetId)
+            return entry;
+    }
+
+    return std::nullopt;
+}
+
+std::vector<DatabaseTableInfo> MPServer::listBrowsableTables()
+{
+    return mPlayerDb ? mPlayerDb->listBrowsableTables() : std::vector<DatabaseTableInfo>{};
+}
+
+std::optional<DatabaseBrowsePage> MPServer::browseDatabaseTable(
+    std::string_view tableName, int64_t offset, int64_t limit)
+{
+    if (!mPlayerDb)
+        return std::nullopt;
+
+    return mPlayerDb->browseTable(tableName, offset, limit);
+}
+
+std::vector<DynamicRecordCatalogEntry> MPServer::collectGeneratedDynamicRecordGcCandidates(
+    const std::optional<std::string>& recordType, const std::optional<bool>& persistent)
+{
+    std::vector<DynamicRecordCatalogEntry> candidates;
+
+    const std::string normalizedType = recordType ? normalizeDynamicRecordType(*recordType) : std::string{};
+    if (recordType && normalizedType.empty())
+        return candidates;
+
+    for (const auto& entry : listDynamicRecordCatalog())
+    {
+        if (entry.recordScope != "generated")
+            continue;
+        if (entry.linkCount > 0)
+            continue;
+        if (!normalizedType.empty() && entry.recordType != normalizedType)
+            continue;
+        if (persistent && entry.persistent != *persistent)
+            continue;
+
+        candidates.push_back(entry);
+    }
+
+    return candidates;
+}
+
+std::size_t MPServer::gcGeneratedDynamicRecordsAfterUnlink(std::string_view reason)
+{
+    const auto candidates = collectGeneratedDynamicRecordGcCandidates();
+    if (candidates.empty())
+        return 0;
+
+    std::size_t removed = 0;
+    std::size_t warnedPersistent = 0;
+
+    for (const auto& entry : candidates)
+    {
+        if (entry.persistent)
+        {
+            ++warnedPersistent;
+            Log(Debug::Warning) << "[Server] Generated persistent dynamic record became unlinked and is now a GC candidate:"
+                                << " type=" << entry.recordType
+                                << " id=" << entry.recordId
+                                << " reason=" << reason;
+        }
+
+        if (removeDynamicRecord(entry.recordType, entry.recordId))
+            ++removed;
+    }
+
+    if (removed > 0)
+    {
+        Log(Debug::Info) << "[Server] Auto-GC removed " << removed
+                         << " generated dynamic record(s) after unlink reason=" << reason
+                         << " warnedPersistent=" << warnedPersistent;
+    }
+
+    return removed;
+}
+
+void MPServer::scheduleGeneratedDynamicRecordGc(std::string_view reason, std::chrono::milliseconds delay)
+{
+    mGeneratedRecordGcScheduled = true;
+    mGeneratedRecordGcReason.assign(reason.begin(), reason.end());
+    mGeneratedRecordGcDueTime = std::chrono::steady_clock::now() + delay;
+}
+
+void MPServer::flushScheduledGeneratedDynamicRecordGc()
+{
+    if (!mGeneratedRecordGcScheduled)
+        return;
+
+    if (std::chrono::steady_clock::now() < mGeneratedRecordGcDueTime)
+        return;
+
+    const std::string reason = mGeneratedRecordGcReason.empty() ? "deferred_unlink" : mGeneratedRecordGcReason;
+    mGeneratedRecordGcScheduled = false;
+    mGeneratedRecordGcReason.clear();
+    gcGeneratedDynamicRecordsAfterUnlink(reason);
+}
+
+MPServer::DynamicReferenceCleanupStats MPServer::cleanupDynamicReferences(
+    const std::function<bool(std::string_view)>& shouldRemoveRefId,
+    bool broadcastLive,
+    std::string_view reason)
+{
+    DynamicReferenceCleanupStats stats;
+
+    std::vector<PlacedObject> removedObjects;
+    for (auto it = mWorld.placedObjects.begin(); it != mWorld.placedObjects.end();)
+    {
+        auto& objects = it->second;
+        for (const auto& object : objects)
+        {
+            if (shouldRemoveRefId(object.refId))
+                removedObjects.push_back(object);
+        }
+
+        objects.erase(std::remove_if(objects.begin(), objects.end(),
+            [&](const PlacedObject& object) { return shouldRemoveRefId(object.refId); }),
+            objects.end());
+
+        if (objects.empty())
+            it = mWorld.placedObjects.erase(it);
+        else
+            ++it;
+    }
+
+    for (const auto& object : removedObjects)
+    {
+        ++stats.placedObjects;
+        mLua.removePlacedObject(object.mpNum);
+        if (mPlayerDb)
+            mPlayerDb->deleteWorldObject(object.mpNum);
+
+        if (broadcastLive)
+        {
+            PacketObjectDelete pkt;
+            pkt.mpNum = object.mpNum;
+            pkt.cellId = object.cellId;
+            broadcastToCell(object.cellId, pkt.encode());
+        }
+    }
+
+    std::vector<ContainerRecord> updatedContainers;
+    for (auto it = mWorld.containers.begin(); it != mWorld.containers.end();)
+    {
+        ContainerRecord& record = it->second;
+        if (shouldRemoveRefId(record.refId))
+        {
+            ++stats.containers;
+            if (mPlayerDb)
+                mPlayerDb->deleteContainerRecord(record.cellId, record.refId, record.refNum);
+            it = mWorld.containers.erase(it);
+            continue;
+        }
+
+        const std::size_t oldCount = record.items.size();
+        record.items.erase(std::remove_if(record.items.begin(), record.items.end(),
+            [&](const ContainerItem& item) { return shouldRemoveRefId(item.refId); }),
+            record.items.end());
+
+        if (record.items.size() != oldCount)
+        {
+            stats.containerItems += oldCount - record.items.size();
+            if (mPlayerDb)
+                mPlayerDb->upsertContainerRecord(record);
+            if (broadcastLive)
+                updatedContainers.push_back(record);
+        }
+
+        ++it;
+    }
+
+    if (broadcastLive)
+    {
+        for (const auto& record : updatedContainers)
+        {
+            PacketContainer pkt;
+            pkt.container = record;
+            pkt.mAction = static_cast<uint8_t>(ContainerAction::Set);
+            broadcastToCell(record.cellId, pkt.encode());
+        }
+    }
+
+    for (auto it = mWorld.doorStates.begin(); it != mWorld.doorStates.end();)
+    {
+        auto& entries = it->second;
+        std::vector<DoorEntry> removedEntries;
+        for (const auto& entry : entries)
+        {
+            if (shouldRemoveRefId(entry.refId))
+                removedEntries.push_back(entry);
+        }
+
+        entries.erase(std::remove_if(entries.begin(), entries.end(),
+            [&](const DoorEntry& entry) { return shouldRemoveRefId(entry.refId); }),
+            entries.end());
+
+        for (const auto& entry : removedEntries)
+        {
+            ++stats.doorStates;
+            if (mPlayerDb)
+                mPlayerDb->deleteDoorState(entry.cellId, entry.refId, entry.refNum);
+        }
+
+        if (entries.empty())
+            it = mWorld.doorStates.erase(it);
+        else
+            ++it;
+    }
+
+    std::unordered_set<int64_t> onlineCharacterIds;
+    bool snapshotDirty = false;
+
+    for (auto& [conn, client] : mClients)
+    {
+        if (client.dbCharacterId != 0)
+            onlineCharacterIds.insert(client.dbCharacterId);
+
+        bool inventoryChanged = false;
+        auto& inventory = client.player.inventoryChanges.items;
+        const std::size_t oldInventoryCount = inventory.size();
+        inventory.erase(std::remove_if(inventory.begin(), inventory.end(),
+            [&](const Item& item) { return shouldRemoveRefId(item.refId); }),
+            inventory.end());
+        if (inventory.size() != oldInventoryCount)
+        {
+            stats.inventoryItems += oldInventoryCount - inventory.size();
+            inventoryChanged = true;
+        }
+
+        bool equipmentChanged = false;
+        for (int slot = 0; slot < BasePlayer::NUM_EQUIPMENT_SLOTS; ++slot)
+        {
+            auto& entry = client.player.equipment[slot];
+            if (entry.item.refId.empty())
+                continue;
+
+            if (shouldRemoveRefId(entry.item.refId) || !inventoryContainsItemIdentity(inventory, entry.item))
+            {
+                ++stats.equipmentItems;
+                entry = EquipmentItem{};
+                entry.slot = slot;
+                equipmentChanged = true;
+            }
+        }
+
+        if (!inventoryChanged && !equipmentChanged)
+            continue;
+
+        ++stats.characters;
+        client.player.inventoryChanges.action = BasePlayer::InventoryChanges::Action::Set;
+        if (mPlayerDb && client.dbCharacterId != 0)
+        {
+            mPlayerDb->saveCharacterInventory(client.dbCharacterId, client.player.inventoryChanges.items, false);
+            std::vector<EquipmentItem> equipment(client.player.equipment.begin(), client.player.equipment.end());
+            mPlayerDb->saveCharacterEquipment(client.dbCharacterId, equipment, false);
+        }
+
+        if (broadcastLive)
+        {
+            sendAuthoritativeInventory(client);
+            sendAuthoritativeEquipment(client);
+        }
+        snapshotDirty = true;
+    }
+
+    if (mPlayerDb)
+    {
+        for (const int64_t characterId : mPlayerDb->listCharactersWithSavedItems())
+        {
+            if (onlineCharacterIds.count(characterId) != 0)
+                continue;
+
+            std::vector<Item> inventory = mPlayerDb->loadCharacterInventory(characterId);
+            const std::size_t oldInventoryCount = inventory.size();
+            inventory.erase(std::remove_if(inventory.begin(), inventory.end(),
+                [&](const Item& item) { return shouldRemoveRefId(item.refId); }),
+                inventory.end());
+            const std::size_t removedInventory = oldInventoryCount - inventory.size();
+
+            std::vector<EquipmentItem> equipment = mPlayerDb->loadCharacterEquipment(characterId);
+            const std::size_t oldEquipmentCount = equipment.size();
+            equipment.erase(std::remove_if(equipment.begin(), equipment.end(),
+                [&](const EquipmentItem& entry)
+                {
+                    return shouldRemoveRefId(entry.item.refId)
+                        || !inventoryContainsItemIdentity(inventory, entry.item);
+                }),
+                equipment.end());
+            const std::size_t removedEquipment = oldEquipmentCount - equipment.size();
+
+            if (removedInventory == 0 && removedEquipment == 0)
+                continue;
+
+            stats.inventoryItems += removedInventory;
+            stats.equipmentItems += removedEquipment;
+            ++stats.characters;
+            mPlayerDb->saveCharacterInventory(characterId, inventory, false);
+            mPlayerDb->saveCharacterEquipment(characterId, equipment, false);
+        }
+    }
+
+    if (snapshotDirty)
+        syncLuaSnapshot();
+
+    const std::size_t totalRemoved = stats.placedObjects + stats.containers + stats.containerItems
+        + stats.doorStates + stats.inventoryItems + stats.equipmentItems;
+    if (totalRemoved > 0)
+    {
+        Log(Debug::Info) << "[Server] Cleaned dangling dynamic references (" << reason << "):"
+                         << " placed=" << stats.placedObjects
+                         << " containers=" << stats.containers
+                         << " containerItems=" << stats.containerItems
+                         << " doors=" << stats.doorStates
+                         << " inventoryItems=" << stats.inventoryItems
+                         << " equipmentItems=" << stats.equipmentItems
+                         << " characters=" << stats.characters;
+    }
+
+    return stats;
 }
 
 // ---------------------------------------------------------------------------
@@ -1752,6 +2359,8 @@ void MPServer::handleCharacterSelect(ConnectedClient& c, const uint8_t* data, si
         c.player.name = displayName;
     }
 
+    sendDynamicRecordsToClient(c.conn);
+
     if (sendSavedInventory)
     {
         PacketPlayerInventory inventory;
@@ -1935,6 +2544,7 @@ void MPServer::handlePlayerEquipment(ConnectedClient& c, const uint8_t* data, si
         }
     }
 
+    scheduleGeneratedDynamicRecordGc("player_equipment");
     broadcastToAll(std::vector<uint8_t>(data, data + size), c.conn);
 }
 
@@ -2041,6 +2651,7 @@ void MPServer::handlePlayerInventory(ConnectedClient& c, const uint8_t* data, si
     }
 
     syncLuaSnapshot();
+    scheduleGeneratedDynamicRecordGc("player_inventory");
     broadcastToAll(std::vector<uint8_t>(data, data + size), c.conn);
 }
 
@@ -2559,6 +3170,12 @@ void MPServer::handleObjectDelete(ConnectedClient& c, const uint8_t* data, size_
     if (mPlayerDb)
         mPlayerDb->deleteWorldObject(pkt.mpNum);
 
+    scheduleGeneratedDynamicRecordGc("object_delete");
+
+    Log(Debug::Info) << "[Server] ObjectDelete accepted: player=" << c.name
+                     << " mpNum=" << pkt.mpNum
+                     << " cell=" << pkt.cellId;
+
     broadcastToCell(pkt.cellId, std::vector<uint8_t>(data, data + size), c.conn);
 }
 
@@ -2634,6 +3251,8 @@ void MPServer::handleContainer(ConnectedClient& c, const uint8_t* data, size_t s
         if (mPlayerDb)
             mPlayerDb->upsertContainerRecord(authoritative);
 
+        scheduleGeneratedDynamicRecordGc("container_set");
+
         PacketContainer accepted;
         accepted.container = authoritative;
         accepted.mAction = static_cast<uint8_t>(ContainerAction::Set);
@@ -2671,6 +3290,8 @@ void MPServer::handleContainer(ConnectedClient& c, const uint8_t* data, size_t s
 
     if (mPlayerDb)
         mPlayerDb->upsertContainerRecord(authoritative);
+
+    scheduleGeneratedDynamicRecordGc("container_delta");
 
     const ContainerItem* firstDelta = pkt.container.items.empty() ? nullptr : &pkt.container.items.front();
     Log(Debug::Info) << "[Server] Container(" << static_cast<int>(action) << "): player=" << c.name
@@ -2870,6 +3491,230 @@ bool MPServer::removePlacedObjectByMpNum(uint32_t mpNum, const std::string& cell
     return removePlacedObjectAuthoritative(mpNum, cellId);
 }
 
+bool MPServer::spawnActor(
+    const std::string& refId, uint32_t refNum, uint32_t mpNum, const std::string& cellId, const Position& position)
+{
+    if (refId.empty() || cellId.empty())
+        return false;
+
+    BaseActor actor;
+    actor.refId = refId;
+    actor.refNum = refNum;
+    actor.mpNum = mpNum;
+    actor.cellId = cellId;
+    actor.position = position;
+    actor.equipment.resize(BaseActor::NUM_EQUIPMENT_SLOTS);
+
+    auto& cellState = mWorld.actorCells[cellId];
+    if (cellState.authorityGuid == 0)
+        refreshActorAuthorityForCell(cellId);
+
+    const uint64_t timestamp = currentServerTimeMs();
+    cellState.actors[makeActorKey(actor)] = { actor, timestamp };
+
+    ActorList actorList;
+    actorList.cellId = cellId;
+    actorList.isAuthority = false;
+    actorList.authorityGuid = cellState.authorityGuid;
+    actorList.authorityGeneration = cellState.authorityGeneration;
+    actorList.snapshotSequence = cellState.nextSnapshotSequence++;
+    actorList.serverTimestamp = timestamp;
+    actorList.actors.push_back(actor);
+
+    PacketActorList pkt;
+    pkt.setActorList(&actorList);
+    broadcastToCell(cellId, pkt.encode());
+
+    Log(Debug::Info) << "[Server] Script ActorSpawn accepted: refId=" << actor.refId
+                     << " refNum=" << actor.refNum
+                     << " mpNum=" << actor.mpNum
+                     << " cell=" << actor.cellId;
+    return true;
+}
+
+bool MPServer::removeActor(uint32_t mpNum, const std::string& cellId)
+{
+    if (mpNum == 0 || cellId.empty())
+        return false;
+
+    auto cellIt = mWorld.actorCells.find(cellId);
+    if (cellIt == mWorld.actorCells.end())
+        return false;
+
+    auto& actors = cellIt->second.actors;
+    bool removed = false;
+    for (auto it = actors.begin(); it != actors.end();)
+    {
+        if (it->second.actor.mpNum == mpNum)
+        {
+            it = actors.erase(it);
+            removed = true;
+        }
+        else
+        {
+            ++it;
+        }
+    }
+
+    if (!removed)
+        return false;
+
+    ActorList actorList;
+    actorList.cellId = cellId;
+    actorList.isAuthority = false;
+    actorList.authorityGuid = cellIt->second.authorityGuid;
+    actorList.authorityGeneration = cellIt->second.authorityGeneration;
+    actorList.snapshotSequence = cellIt->second.nextSnapshotSequence++;
+    actorList.serverTimestamp = currentServerTimeMs();
+
+    PacketActorList pkt;
+    pkt.setActorList(&actorList);
+    broadcastToCell(cellId, pkt.encode());
+
+    Log(Debug::Info) << "[Server] Script ActorRemove accepted: mpNum=" << mpNum
+                     << " cell=" << cellId;
+    return true;
+}
+
+bool MPServer::upsertDynamicRecord(const std::string& recordType, const std::string& recordId, const std::string& data,
+    const std::string& recordScope, bool persistent)
+{
+    const std::string normalizedType = normalizeDynamicRecordType(recordType);
+    const std::string normalizedScope = normalizeDynamicRecordScope(recordScope);
+    if (normalizedType.empty() || recordId.empty())
+        return false;
+    if (normalizedScope.empty())
+        return false;
+
+    auto& record = mWorld.dynamicRecords[makeDynamicRecordKey(normalizedType, recordId)];
+    record.recordType = normalizedType;
+    record.recordId = recordId;
+    record.data = data;
+    record.recordScope = normalizedScope;
+    record.persistent = persistent;
+    record.sequence = mWorld.nextDynamicRecordSequence++;
+
+    if (normalizedScope == "generated")
+        mLua.observeGeneratedRecordId(normalizedType, recordId);
+
+    if (mPlayerDb)
+    {
+        DynamicRecordCatalogEntry catalogRecord;
+        catalogRecord.recordType = normalizedType;
+        catalogRecord.recordId = recordId;
+        catalogRecord.recordScope = normalizedScope;
+        catalogRecord.persistent = persistent;
+        mPlayerDb->upsertDynamicRecordCatalog(catalogRecord);
+
+        if (persistent)
+        {
+            PersistedDynamicRecord persisted;
+            persisted.recordType = normalizedType;
+            persisted.recordId = recordId;
+            persisted.recordScope = normalizedScope;
+            persisted.data = data;
+            mPlayerDb->upsertDynamicRecord(persisted);
+        }
+        else
+        {
+            mPlayerDb->deleteDynamicRecord(normalizedType, recordId);
+        }
+    }
+
+    PacketRecordDynamic pkt;
+    pkt.action = DynamicRecordAction::Upsert;
+    pkt.recordType = normalizedType;
+    pkt.entries.push_back({ recordId, data });
+    broadcastToAll(pkt.encode());
+
+    Log(Debug::Info) << "[Server] Upserted dynamic record type=" << normalizedType
+                     << " id=" << recordId
+                     << " scope=" << normalizedScope
+                     << " persistent=" << (persistent ? "true" : "false");
+    return true;
+}
+
+bool MPServer::removeDynamicRecord(const std::string& recordType, const std::string& recordId)
+{
+    const std::string normalizedType = normalizeDynamicRecordType(recordType);
+    if (normalizedType.empty() || recordId.empty())
+        return false;
+
+    auto it = mWorld.dynamicRecords.find(makeDynamicRecordKey(normalizedType, recordId));
+    if (it == mWorld.dynamicRecords.end())
+        return false;
+
+    cleanupDynamicReferences(
+        [&](std::string_view refId) -> bool { return refId == recordId; },
+        /*broadcastLive=*/true,
+        recordId);
+
+    mWorld.dynamicRecords.erase(it);
+
+    if (mPlayerDb)
+    {
+        mPlayerDb->replaceDynamicRecordDependencies(normalizedType, recordId, {});
+        mPlayerDb->deleteDynamicRecord(normalizedType, recordId);
+        mPlayerDb->deleteDynamicRecordCatalog(normalizedType, recordId);
+        mPlayerDb->deleteDynamicRecordLinks(recordId);
+    }
+
+    PacketRecordDynamic pkt;
+    pkt.action = DynamicRecordAction::Remove;
+    pkt.recordType = normalizedType;
+    pkt.entries.push_back({ recordId, {} });
+    broadcastToAll(pkt.encode());
+
+    Log(Debug::Info) << "[Server] Removed dynamic record type=" << normalizedType
+                     << " id=" << recordId;
+    return true;
+}
+
+bool MPServer::setDynamicRecordDependencies(
+    const std::string& recordType, const std::string& recordId, const std::vector<std::string>& dependencyRecordIds)
+{
+    const std::string normalizedType = normalizeDynamicRecordType(recordType);
+    if (normalizedType.empty() || recordId.empty())
+        return false;
+
+    if (mWorld.dynamicRecords.find(makeDynamicRecordKey(normalizedType, recordId)) == mWorld.dynamicRecords.end())
+        return false;
+
+    std::vector<std::string> uniqueDependencies;
+    std::unordered_set<std::string> seen;
+
+    for (const auto& dependencyRecordId : dependencyRecordIds)
+    {
+        if (dependencyRecordId.empty() || dependencyRecordId == recordId)
+            continue;
+        if (!seen.insert(dependencyRecordId).second)
+            continue;
+
+        bool found = false;
+        for (const auto& [key, record] : mWorld.dynamicRecords)
+        {
+            if (record.recordId == dependencyRecordId)
+            {
+                found = true;
+                break;
+            }
+        }
+
+        if (!found)
+            return false;
+
+        uniqueDependencies.push_back(dependencyRecordId);
+    }
+
+    if (mPlayerDb)
+        mPlayerDb->replaceDynamicRecordDependencies(normalizedType, recordId, uniqueDependencies);
+
+    Log(Debug::Info) << "[Server] Set dynamic record dependencies type=" << normalizedType
+                     << " id=" << recordId
+                     << " count=" << uniqueDependencies.size();
+    return true;
+}
+
 // ---------------------------------------------------------------------------
 void MPServer::setPlayerNickname(uint32_t guid, const std::string& nickname)
 {
@@ -2968,6 +3813,17 @@ void MPServer::sendAuthoritativeInventory(ConnectedClient& c)
 }
 
 // ---------------------------------------------------------------------------
+void MPServer::sendAuthoritativeEquipment(ConnectedClient& c, bool includeOthers)
+{
+    PacketPlayerEquipment equipment;
+    equipment.setPlayer(&c.player);
+    const std::vector<uint8_t> encoded = equipment.encode();
+    sendTo(c.conn, encoded);
+    if (includeOthers)
+        broadcastToAll(encoded, c.conn);
+}
+
+// ---------------------------------------------------------------------------
 bool MPServer::grantInventoryItem(ConnectedClient& c, const std::string& refId, int count)
 {
     if (refId.empty() || count <= 0)
@@ -2999,6 +3855,7 @@ bool MPServer::grantInventoryItem(ConnectedClient& c, const std::string& refId, 
 
     sendAuthoritativeInventory(c);
     syncLuaSnapshot();
+    scheduleGeneratedDynamicRecordGc("grant_inventory_item");
     return true;
 }
 
@@ -3024,11 +3881,95 @@ bool MPServer::removePlacedObjectAuthoritative(uint32_t mpNum, const std::string
     if (mPlayerDb)
         mPlayerDb->deleteWorldObject(mpNum);
 
+    scheduleGeneratedDynamicRecordGc("remove_placed_object_authoritative");
+
     PacketObjectDelete pkt;
     pkt.mpNum = mpNum;
     pkt.cellId = cellId;
     broadcastToCell(cellId, pkt.encode());
     return true;
+}
+
+// ---------------------------------------------------------------------------
+void MPServer::startAdminHttpServer()
+{
+    if (!mAdminHttpEnabled)
+        return;
+
+    if (!mAdminHttpServer)
+    {
+        mAdminHttpServer = std::make_unique<AdminHttpServer>(
+            [this](std::string_view action, const std::map<std::string, std::string>& query) {
+                return handleAdminHttpRequest(action, query);
+            });
+    }
+
+    std::string error;
+    if (!mAdminHttpServer->start(mAdminHttpHost, mAdminHttpPort, &error))
+    {
+        Log(Debug::Warning) << "[Server] Failed to start admin HTTP listener on "
+                            << mAdminHttpHost << ":" << mAdminHttpPort
+                            << " error=" << error;
+        mAdminHttpServer.reset();
+        return;
+    }
+
+    Log(Debug::Info) << "[Server] Admin HTTP browser listening at " << mAdminHttpServer->url();
+}
+
+void MPServer::stopAdminHttpServer()
+{
+    if (!mAdminHttpServer)
+        return;
+
+    mAdminHttpServer->stop();
+    mAdminHttpServer.reset();
+}
+
+AdminHttpServer::Response MPServer::handleAdminHttpRequest(
+    std::string_view action, const std::map<std::string, std::string>& query)
+{
+    AdminHttpServer::Response response;
+    response.contentType = "application/json; charset=utf-8";
+
+    if (!mLua.isLoaded() || !mLua.isRunning())
+    {
+        response.status = 503;
+        response.body = makeJsonErrorBody("lua_service_unavailable");
+        return response;
+    }
+
+    LuaWireTable payload;
+    payload.emplace_back("action", std::string(action));
+    for (const auto& [key, value] : query)
+        payload.emplace_back(key, value);
+
+    std::string error;
+    const auto resultData = mLua.callSynchronousInterface(
+        "IntentPolicy", "handleAdminUiHttp", serializeLuaWireTable(payload), mAdminHttpTimeoutMs, &error);
+    if (!resultData)
+    {
+        response.status = error == "timeout" ? 504 : 500;
+        response.body = makeJsonErrorBody(error.empty() ? "admin_http_request_failed" : error);
+        return response;
+    }
+
+    try
+    {
+        const LuaWireTable result = parseLuaWireTable(*resultData);
+        response.status = std::max(100, std::min(599, static_cast<int>(getLuaNumberField(result, "status", 200.0))));
+        response.contentType = getLuaStringField(result, "contentType", response.contentType);
+        response.body = getLuaStringField(result, "body", "{}");
+        if (response.body.empty())
+            response.body = "{}";
+    }
+    catch (const std::exception& e)
+    {
+        response.status = 500;
+        response.body = makeJsonErrorBody(std::string("invalid_admin_http_response:") + e.what());
+    }
+
+    return response;
 }
 
 // ---------------------------------------------------------------------------

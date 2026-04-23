@@ -40,6 +40,7 @@
 #include "../../mwworld/class.hpp"
 #include "../../mwworld/cellstore.hpp"
 #include "../../mwworld/cell.hpp"
+#include "../../mwworld/esmstore.hpp"
 #include "../../mwworld/globals.hpp"
 #include "../../mwworld/inventorystore.hpp"
 #include "../../mwmechanics/creaturestats.hpp"
@@ -76,6 +77,25 @@ namespace
     bool sameEquipment(const EquipmentItem& left, const EquipmentItem& right)
     {
         return left.slot == right.slot && sameItem(left.item, right.item);
+    }
+
+    bool hasRecordId(const MWWorld::ESMStore& store, const std::string& refId)
+    {
+        return !refId.empty() && store.find(ESM::RefId::stringRefId(refId)) != 0;
+    }
+
+    std::string findFirstMissingInventoryRefId(const MWWorld::ESMStore& store, const std::vector<Item>& items)
+    {
+        for (const Item& item : items)
+        {
+            if (item.refId.empty() || item.count <= 0)
+                continue;
+
+            if (!hasRecordId(store, item.refId))
+                return item.refId;
+        }
+
+        return {};
     }
 
     bool inventoryOrder(const Item& left, const Item& right)
@@ -168,7 +188,7 @@ void PlayerSync::setPlayer(const MWWorld::Ptr& /*player*/)
 }
 
 // ---------------------------------------------------------------------------
-void PlayerSync::forceFullSync()
+void PlayerSync::forceFullSync(bool includeInventoryAndEquipment)
 {
     if (mLocal.guid == 0) return; // guid not yet assigned; will be called again after handshake
     // Pull latest cell/stats before sending — player ptr may not be set yet
@@ -234,8 +254,11 @@ void PlayerSync::forceFullSync()
 
     sendBaseInfo();
     sendCellChange();
-    sendEquipment();
-    sendInventory();
+    if (includeInventoryAndEquipment)
+    {
+        sendEquipment();
+        sendInventory();
+    }
     sendDynamicStats();
     mPositionTimer = POSITION_RATE; // force position send next tick
     snapshotPosition();
@@ -1483,12 +1506,29 @@ void PlayerSync::applyPendingAuthoritativeState(const MWWorld::Ptr& player)
     if (!player.getClass().hasInventoryStore(player))
         return;
 
+    MWBase::World* world = MWBase::Environment::get().getWorld();
+    if (!world)
+        return;
+
     MWWorld::InventoryStore& invStore = player.getClass().getInventoryStore(player);
     MWWorld::ContainerStore& containerStore = invStore;
+    const MWWorld::ESMStore& store = world->getStore();
     bool applied = false;
 
     if (mPendingInventoryRestore)
     {
+        const std::string missingRefId = findFirstMissingInventoryRefId(store, mAuthoritativeInventory.items);
+        if (!missingRefId.empty())
+        {
+            if (mLastPendingInventoryMissingRefId != missingRefId)
+            {
+                Log(Debug::Verbose) << "[MP] Delaying inventory restore until record is available: " << missingRefId;
+                mLastPendingInventoryMissingRefId = missingRefId;
+            }
+            return;
+        }
+
+        mLastPendingInventoryMissingRefId.clear();
         invStore.clear();
         for (const Item& item : mAuthoritativeInventory.items)
         {
@@ -1511,6 +1551,52 @@ void PlayerSync::applyPendingAuthoritativeState(const MWWorld::Ptr& player)
 
     if (mPendingEquipmentRestore)
     {
+        std::string missingEquipRefId;
+        for (int slot = 0; slot < BasePlayer::NUM_EQUIPMENT_SLOTS; ++slot)
+        {
+            const EquipmentItem& target = mAuthoritativeEquipment[slot];
+            if (target.item.refId.empty())
+                continue;
+
+            bool found = false;
+            for (auto it = invStore.begin(); it != invStore.end(); ++it)
+            {
+                const MWWorld::CellRef& cellRef = it->getCellRef();
+                if (cellRef.getCount() <= 0)
+                    continue;
+
+                Item liveItem;
+                liveItem.refId = cellRef.getRefId().serializeText();
+                liveItem.count = cellRef.getCount();
+                liveItem.charge = cellRef.getCharge();
+                liveItem.enchantmentCharge = cellRef.getEnchantmentCharge();
+                liveItem.soul = cellRef.getSoul().serializeText();
+
+                if (sameItemIdentity(liveItem, target.item))
+                {
+                    found = true;
+                    break;
+                }
+            }
+
+            if (!found)
+            {
+                missingEquipRefId = target.item.refId;
+                break;
+            }
+        }
+
+        if (!missingEquipRefId.empty())
+        {
+            if (mLastPendingEquipmentMissingRefId != missingEquipRefId)
+            {
+                Log(Debug::Verbose) << "[MP] Delaying equipment restore until item is present: " << missingEquipRefId;
+                mLastPendingEquipmentMissingRefId = missingEquipRefId;
+            }
+            return;
+        }
+
+        mLastPendingEquipmentMissingRefId.clear();
         invStore.unequipAll();
         for (int slot = 0; slot < BasePlayer::NUM_EQUIPMENT_SLOTS; ++slot)
         {

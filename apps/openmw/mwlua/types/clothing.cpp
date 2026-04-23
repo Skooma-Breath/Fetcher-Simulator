@@ -1,6 +1,7 @@
 #include "types.hpp"
 
 #include "modelproperty.hpp"
+#include "usertypeutil.hpp"
 
 #include <components/esm3/loadclot.hpp>
 #include <components/lua/luastate.hpp>
@@ -20,13 +21,9 @@ namespace sol
 namespace
 {
     // Populates a clothing struct from a Lua table.
-    ESM::Clothing tableToClothing(const sol::table& rec)
+    ESM::Clothing tableToClothingImpl(const sol::table& rec)
     {
-        ESM::Clothing clothing;
-        if (rec["template"] != sol::nil)
-            clothing = LuaUtil::cast<ESM::Clothing>(rec["template"]);
-        else
-            clothing.blank();
+        ESM::Clothing clothing = MWLua::Types::initFromTemplate<ESM::Clothing>(rec);
 
         if (rec["name"] != sol::nil)
             clothing.mName = rec["name"];
@@ -64,6 +61,11 @@ namespace
 }
 namespace MWLua
 {
+    ESM::Clothing tableToClothing(const sol::table& rec)
+    {
+        return tableToClothingImpl(rec);
+    }
+
     void addClothingBindings(sol::table clothing, const Context& context)
     {
         clothing["createRecordDraft"] = tableToClothing;

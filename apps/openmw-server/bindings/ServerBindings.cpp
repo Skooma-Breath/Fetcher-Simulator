@@ -3,8 +3,9 @@
 #include <components/lua/serialization.hpp>
 #include <components/lua/storage.hpp>
 #include <components/lua/luastate.hpp>
-#include <sol/sol.hpp>
 #include <components/debug/debuglog.hpp>
+#include <components/openmw-mp/Base/DynamicRecord.hpp>
+#include <sol/sol.hpp>
 
 #include <optional>
 #include <tuple>
@@ -68,6 +69,63 @@ namespace
         table["name"] = mark.name;
         table["cell"] = mark.cell;
         table["position"] = makePositionTable(lua, mark.position);
+        return sol::make_object(thisState, LuaUtil::makeReadOnly(table));
+    }
+
+    sol::object makeDynamicRecordInfoValue(sol::this_state thisState, const DynamicRecordCatalogEntry& record)
+    {
+        sol::state_view lua(thisState);
+        sol::table table(lua, sol::create);
+        table["recordType"] = record.recordType;
+        table["recordId"] = record.recordId;
+        table["scope"] = record.recordScope;
+        table["persistent"] = record.persistent;
+        table["createdAt"] = record.createdAt;
+        table["updatedAt"] = record.updatedAt;
+        table["linkCount"] = record.linkCount;
+        table["loaded"] = record.loaded;
+        return sol::make_object(thisState, LuaUtil::makeReadOnly(table));
+    }
+
+    sol::object makeDatabaseTableInfoValue(sol::this_state thisState, const DatabaseTableInfo& info)
+    {
+        sol::state_view lua(thisState);
+        sol::table table(lua, sol::create);
+        table["name"] = info.name;
+        table["rowCount"] = info.rowCount;
+        return sol::make_object(thisState, LuaUtil::makeReadOnly(table));
+    }
+
+    sol::object makeDatabaseBrowsePageValue(sol::this_state thisState, const DatabaseBrowsePage& page)
+    {
+        sol::state_view lua(thisState);
+        sol::table table(lua, sol::create);
+        table["tableName"] = page.tableName;
+        table["totalRows"] = page.totalRows;
+        table["offset"] = page.offset;
+        table["limit"] = page.limit;
+
+        sol::table columns(lua, sol::create);
+        for (std::size_t i = 0; i < page.columns.size(); ++i)
+            columns[static_cast<int>(i + 1)] = page.columns[i];
+        table["columns"] = LuaUtil::makeReadOnly(columns);
+
+        sol::table rows(lua, sol::create);
+        for (std::size_t rowIndex = 0; rowIndex < page.rows.size(); ++rowIndex)
+        {
+            sol::table row(lua, sol::create);
+            const auto& rowValues = page.rows[rowIndex];
+            for (std::size_t columnIndex = 0; columnIndex < page.columns.size() && columnIndex < rowValues.size(); ++columnIndex)
+            {
+                if (rowValues[columnIndex])
+                    row[page.columns[columnIndex]] = *rowValues[columnIndex];
+                else
+                    row[page.columns[columnIndex]] = sol::lua_nil;
+            }
+            rows[static_cast<int>(rowIndex + 1)] = LuaUtil::makeReadOnly(row);
+        }
+        table["rows"] = LuaUtil::makeReadOnly(rows);
+
         return sol::make_object(thisState, LuaUtil::makeReadOnly(table));
     }
 
@@ -176,6 +234,338 @@ sol::table initMpPackage(LuaUtil::LuaView& view, LuaServerContext* context, LuaU
             return false;
 
         context->queueRemovePlacedObject(mpNum, cellId);
+        return true;
+    });
+
+    mp.set_function("spawnActor",
+        [context](const std::string& refId, uint32_t refNum, uint32_t mpNum, const std::string& cellId,
+            const sol::table& positionTable) -> bool
+    {
+        if (!context || refId.empty() || cellId.empty())
+            return false;
+
+        auto position = parsePositionTable(positionTable);
+        if (!position)
+            return false;
+
+        context->queueSpawnActor(refId, refNum, mpNum, cellId, *position);
+        return true;
+    });
+    mp.set_function("SpawnActor",
+        [context](const std::string& refId, uint32_t refNum, uint32_t mpNum, const std::string& cellId,
+            const sol::table& positionTable) -> bool
+    {
+        if (!context || refId.empty() || cellId.empty())
+            return false;
+
+        auto position = parsePositionTable(positionTable);
+        if (!position)
+            return false;
+
+        context->queueSpawnActor(refId, refNum, mpNum, cellId, *position);
+        return true;
+    });
+
+    mp.set_function("removeActor", [context](uint32_t mpNum, const std::string& cellId) -> bool
+    {
+        if (!context || mpNum == 0 || cellId.empty())
+            return false;
+
+        context->queueRemoveActor(mpNum, cellId);
+        return true;
+    });
+    mp.set_function("RemoveActor", [context](uint32_t mpNum, const std::string& cellId) -> bool
+    {
+        if (!context || mpNum == 0 || cellId.empty())
+            return false;
+
+        context->queueRemoveActor(mpNum, cellId);
+        return true;
+    });
+
+    auto resolveDynamicRecordOptions
+        = [context](const std::string& normalizedType, const std::string& recordId, const sol::optional<sol::table>& options)
+    {
+        bool persistent = true;
+        std::string scope;
+
+        if (options)
+        {
+            if (auto maybePersistent = options->get<sol::optional<bool>>("persistent"))
+                persistent = *maybePersistent;
+            if (auto maybeScope = options->get<sol::optional<std::string>>("scope"))
+                scope = normalizeDynamicRecordScope(*maybeScope);
+        }
+
+        if (scope.empty())
+        {
+            const std::string generatedPrefix = (context ? context->getGeneratedRecordIdPrefix() : std::string("$custom"))
+                + "_" + normalizedType + "_";
+            scope = recordId.rfind(generatedPrefix, 0) == 0 ? "generated" : "permanent";
+        }
+
+        return std::make_pair(scope, persistent);
+    };
+
+    auto queueDynamicRecordUpsert = [context, resolveDynamicRecordOptions](
+                                        const std::string& recordType, const std::string& recordId,
+                                        const sol::table& data, const sol::optional<sol::table>& options) -> bool
+    {
+        if (!context || recordId.empty())
+            return false;
+
+        const std::string normalizedType = normalizeDynamicRecordType(recordType);
+        if (normalizedType.empty())
+            return false;
+
+        const auto [scope, persistent] = resolveDynamicRecordOptions(normalizedType, recordId, options);
+        if (scope.empty())
+            return false;
+
+        context->queueUpsertDynamicRecord(normalizedType, recordId, LuaUtil::serialize(data), scope, persistent);
+        return true;
+    };
+
+    mp.set_function("generateDynamicRecordId", [context](const std::string& recordType, sol::this_state ts) -> sol::object
+    {
+        if (!context)
+            return sol::make_object(ts, sol::nil);
+
+        const std::string normalizedType = normalizeDynamicRecordType(recordType);
+        if (normalizedType.empty())
+            return sol::make_object(ts, sol::nil);
+
+        return sol::make_object(ts, context->generateDynamicRecordId(normalizedType));
+    });
+    mp.set_function("getGeneratedRecordIdPrefix", [context]() -> std::string
+    {
+        return context ? context->getGeneratedRecordIdPrefix() : std::string("$custom");
+    });
+    mp.set_function("GenerateDynamicRecordId", [context](const std::string& recordType, sol::this_state ts) -> sol::object
+    {
+        if (!context)
+            return sol::make_object(ts, sol::nil);
+
+        const std::string normalizedType = normalizeDynamicRecordType(recordType);
+        if (normalizedType.empty())
+            return sol::make_object(ts, sol::nil);
+
+        return sol::make_object(ts, context->generateDynamicRecordId(normalizedType));
+    });
+
+    mp.set_function("upsertDynamicRecord",
+        [queueDynamicRecordUpsert](const std::string& recordType, const std::string& recordId, const sol::table& data,
+            const sol::optional<sol::table>& options) -> bool
+    {
+        return queueDynamicRecordUpsert(recordType, recordId, data, options);
+    });
+    mp.set_function("UpsertDynamicRecord",
+        [queueDynamicRecordUpsert](const std::string& recordType, const std::string& recordId, const sol::table& data,
+            const sol::optional<sol::table>& options) -> bool
+    {
+        return queueDynamicRecordUpsert(recordType, recordId, data, options);
+    });
+
+    mp.set_function("upsertGeneratedRecord", [context](const std::string& recordType, const sol::table& data,
+                                                  const sol::optional<sol::table>& options, sol::this_state ts) -> sol::object
+    {
+        if (!context)
+            return sol::make_object(ts, sol::nil);
+
+        const std::string normalizedType = normalizeDynamicRecordType(recordType);
+        if (normalizedType.empty())
+            return sol::make_object(ts, sol::nil);
+
+        const std::string recordId = context->generateDynamicRecordId(normalizedType);
+        bool persistent = true;
+        if (options)
+        {
+            if (auto maybePersistent = options->get<sol::optional<bool>>("persistent"))
+                persistent = *maybePersistent;
+        }
+
+        context->queueUpsertDynamicRecord(normalizedType, recordId, LuaUtil::serialize(data), "generated", persistent);
+        return sol::make_object(ts, recordId);
+    });
+    mp.set_function("UpsertGeneratedRecord", [context](const std::string& recordType, const sol::table& data,
+                                                  const sol::optional<sol::table>& options, sol::this_state ts) -> sol::object
+    {
+        if (!context)
+            return sol::make_object(ts, sol::nil);
+
+        const std::string normalizedType = normalizeDynamicRecordType(recordType);
+        if (normalizedType.empty())
+            return sol::make_object(ts, sol::nil);
+
+        const std::string recordId = context->generateDynamicRecordId(normalizedType);
+        bool persistent = true;
+        if (options)
+        {
+            if (auto maybePersistent = options->get<sol::optional<bool>>("persistent"))
+                persistent = *maybePersistent;
+        }
+
+        context->queueUpsertDynamicRecord(normalizedType, recordId, LuaUtil::serialize(data), "generated", persistent);
+        return sol::make_object(ts, recordId);
+    });
+
+    mp.set_function("removeDynamicRecord",
+        [context](const std::string& recordType, const std::string& recordId) -> bool
+    {
+        if (!context || recordId.empty())
+            return false;
+
+        const std::string normalizedType = normalizeDynamicRecordType(recordType);
+        if (normalizedType.empty())
+            return false;
+
+        context->queueRemoveDynamicRecord(normalizedType, recordId);
+        return true;
+    });
+    mp.set_function("setDynamicRecordDependencies",
+        [context](const std::string& recordType, const std::string& recordId, const sol::table& dependencyIds) -> bool
+    {
+        if (!context || recordId.empty())
+            return false;
+
+        const std::string normalizedType = normalizeDynamicRecordType(recordType);
+        if (normalizedType.empty())
+            return false;
+
+        std::vector<std::string> values;
+        for (const auto& entry : dependencyIds)
+        {
+            if (!entry.second.is<std::string>())
+                continue;
+
+            const std::string value = entry.second.as<std::string>();
+            if (!value.empty())
+                values.push_back(value);
+        }
+
+        context->queueSetDynamicRecordDependencies(normalizedType, recordId, std::move(values));
+        return true;
+    });
+    mp.set_function("SetDynamicRecordDependencies",
+        [context](const std::string& recordType, const std::string& recordId, const sol::table& dependencyIds) -> bool
+    {
+        if (!context || recordId.empty())
+            return false;
+
+        const std::string normalizedType = normalizeDynamicRecordType(recordType);
+        if (normalizedType.empty())
+            return false;
+
+        std::vector<std::string> values;
+        for (const auto& entry : dependencyIds)
+        {
+            if (!entry.second.is<std::string>())
+                continue;
+
+            const std::string value = entry.second.as<std::string>();
+            if (!value.empty())
+                values.push_back(value);
+        }
+
+        context->queueSetDynamicRecordDependencies(normalizedType, recordId, std::move(values));
+        return true;
+    });
+
+    mp.set_function("listDynamicRecords", [context](sol::this_state ts) -> sol::object
+    {
+        if (!context)
+            return sol::make_object(ts, sol::nil);
+
+        sol::state_view lua(ts);
+        sol::table list(lua, sol::create);
+        int index = 1;
+        for (const auto& entry : context->getDynamicRecordCatalog())
+            list[index++] = makeDynamicRecordInfoValue(ts, entry);
+        return sol::make_object(ts, list);
+    });
+    mp.set_function("getDynamicRecordInfo", [context](const std::string& recordType, const std::string& recordId,
+                                            sol::this_state ts) -> sol::object
+    {
+        if (!context || recordId.empty())
+            return sol::make_object(ts, sol::nil);
+
+        const std::string normalizedType = normalizeDynamicRecordType(recordType);
+        if (normalizedType.empty())
+            return sol::make_object(ts, sol::nil);
+
+        auto entry = context->getDynamicRecordInfo(normalizedType, recordId);
+        if (!entry)
+            return sol::make_object(ts, sol::nil);
+
+        return makeDynamicRecordInfoValue(ts, *entry);
+    });
+    mp.set_function("listDatabaseTables", [context](sol::this_state ts) -> sol::object
+    {
+        if (!context)
+            return sol::make_object(ts, sol::nil);
+
+        sol::state_view lua(ts);
+        sol::table list(lua, sol::create);
+        int index = 1;
+        for (const auto& entry : context->listDatabaseTables())
+            list[index++] = makeDatabaseTableInfoValue(ts, entry);
+        return sol::make_object(ts, LuaUtil::makeReadOnly(list));
+    });
+    mp.set_function("browseDatabaseTable",
+        [context](const std::string& tableName, const sol::optional<int64_t>& offset,
+            const sol::optional<int64_t>& limit, sol::this_state ts) -> sol::object
+    {
+        if (!context || tableName.empty())
+            return sol::make_object(ts, sol::nil);
+
+        auto page = context->browseDatabaseTable(tableName, offset.value_or(0), limit.value_or(100));
+        if (!page)
+            return sol::make_object(ts, sol::nil);
+
+        return makeDatabaseBrowsePageValue(ts, *page);
+    });
+    mp.set_function("gcDynamicRecords",
+        [context](const sol::optional<std::string>& recordType, const sol::object& persistentValue,
+            sol::this_state ts) -> sol::object
+    {
+        if (!context)
+            return sol::make_object(ts, sol::nil);
+
+        std::optional<std::string> normalizedType;
+        if (recordType)
+        {
+            const std::string normalized = normalizeDynamicRecordType(*recordType);
+            if (normalized.empty())
+                return sol::make_object(ts, sol::nil);
+            normalizedType = normalized;
+        }
+
+        std::optional<bool> persistent;
+        if (persistentValue != sol::nil)
+        {
+            if (!persistentValue.is<bool>())
+                return sol::make_object(ts, sol::nil);
+            persistent = persistentValue.as<bool>();
+        }
+
+        sol::state_view lua(ts);
+        sol::table list(lua, sol::create);
+        int index = 1;
+        for (const auto& entry : context->queueRemoveUnlinkedGeneratedDynamicRecords(normalizedType, persistent))
+            list[index++] = makeDynamicRecordInfoValue(ts, entry);
+        return sol::make_object(ts, list);
+    });
+    mp.set_function("RemoveDynamicRecord",
+        [context](const std::string& recordType, const std::string& recordId) -> bool
+    {
+        if (!context || recordId.empty())
+            return false;
+
+        const std::string normalizedType = normalizeDynamicRecordType(recordType);
+        if (normalizedType.empty())
+            return false;
+
+        context->queueRemoveDynamicRecord(normalizedType, recordId);
         return true;
     });
 

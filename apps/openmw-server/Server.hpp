@@ -19,10 +19,12 @@
 #include <components/openmw-mp/Base/BaseActor.hpp>
 #include <components/openmw-mp/Base/BaseObject.hpp>
 #include <components/openmw-mp/Base/BasePlayer.hpp>
+#include <components/openmw-mp/Base/DynamicRecord.hpp>
 #include <components/openmw-mp/NetworkMessages.hpp>
 #include <components/openmw-mp/Packets/Object/PacketDoorState.hpp>
 
 #include "LuaServerContext.hpp"
+#include "AdminHttpServer.hpp"
 #include "MasterServerClient.hpp"
 #include "PlayerDatabase.hpp"
 #include <optional>
@@ -123,6 +125,23 @@ public:
     bool grantPlayerInventoryItem(uint32_t guid, const std::string& refId, int count);
     bool placeObject(const std::string& refId, int count, const std::string& cellId, const Position& position);
     bool removePlacedObjectByMpNum(uint32_t mpNum, const std::string& cellId);
+    bool spawnActor(
+        const std::string& refId, uint32_t refNum, uint32_t mpNum, const std::string& cellId, const Position& position);
+    bool removeActor(uint32_t mpNum, const std::string& cellId);
+    bool upsertDynamicRecord(const std::string& recordType, const std::string& recordId, const std::string& data,
+        const std::string& recordScope, bool persistent);
+    bool removeDynamicRecord(const std::string& recordType, const std::string& recordId);
+    bool setDynamicRecordDependencies(
+        const std::string& recordType, const std::string& recordId, const std::vector<std::string>& dependencyRecordIds);
+    std::vector<DynamicRecordCatalogEntry> listDynamicRecordCatalog();
+    std::optional<DynamicRecordCatalogEntry> getDynamicRecordInfo(
+        std::string_view recordType, std::string_view recordId);
+    std::vector<DynamicRecordCatalogEntry> collectGeneratedDynamicRecordGcCandidates(
+        const std::optional<std::string>& recordType = std::nullopt,
+        const std::optional<bool>& persistent = std::nullopt);
+    std::vector<DatabaseTableInfo> listBrowsableTables();
+    std::optional<DatabaseBrowsePage> browseDatabaseTable(
+        std::string_view tableName, int64_t offset = 0, int64_t limit = 100);
 
     // Iterate all fully-connected (post-handshake) players.
     // Used by script bindings to build the mp.getPlayers() table.
@@ -226,9 +245,34 @@ private:
     void syncLuaSnapshot();
     void syncLuaAuthorityState();
     void sendAuthoritativeInventory(ConnectedClient& c);
+    void sendAuthoritativeEquipment(ConnectedClient& c, bool includeOthers = true);
+    void startAdminHttpServer();
+    void stopAdminHttpServer();
+    AdminHttpServer::Response handleAdminHttpRequest(
+        std::string_view action, const std::map<std::string, std::string>& query);
     bool acceptPlacedObject(PlacedObject& object);
     bool grantInventoryItem(ConnectedClient& c, const std::string& refId, int count);
     bool removePlacedObjectAuthoritative(uint32_t mpNum, const std::string& cellId);
+    void sendDynamicRecordsToClient(HSteamNetConnection conn);
+    std::unordered_map<std::string, uint64_t> buildGeneratedDynamicRecordCounters(const std::string& prefix) const;
+    struct DynamicReferenceCleanupStats
+    {
+        std::size_t placedObjects = 0;
+        std::size_t containers = 0;
+        std::size_t containerItems = 0;
+        std::size_t doorStates = 0;
+        std::size_t inventoryItems = 0;
+        std::size_t equipmentItems = 0;
+        std::size_t characters = 0;
+    };
+    DynamicReferenceCleanupStats cleanupDynamicReferences(
+        const std::function<bool(std::string_view)>& shouldRemoveRefId,
+        bool broadcastLive,
+        std::string_view reason);
+    std::size_t gcGeneratedDynamicRecordsAfterUnlink(std::string_view reason);
+    void scheduleGeneratedDynamicRecordGc(
+        std::string_view reason, std::chrono::milliseconds delay = std::chrono::milliseconds(250));
+    void flushScheduledGeneratedDynamicRecordGc();
     void refreshActorAuthorityForCell(const std::string& cellId, uint32_t preferredGuid = 0);
     void sendActorAuthorityToClient(HSteamNetConnection conn, const std::string& cellId);
     void sendActorStateToClient(HSteamNetConnection conn, const std::string& cellId);
@@ -259,6 +303,14 @@ private:
     uint16_t    mPort;
     std::atomic<bool> mRunning { false };
     std::chrono::steady_clock::time_point mStartTime;
+    bool mGeneratedRecordGcScheduled = false;
+    std::chrono::steady_clock::time_point mGeneratedRecordGcDueTime {};
+    std::string mGeneratedRecordGcReason;
+    bool mAdminHttpEnabled = true;
+    int mAdminHttpPort = 8081;
+    int mAdminHttpTimeoutMs = 250;
+    std::string mAdminHttpHost = "127.0.0.1";
+    std::unique_ptr<AdminHttpServer> mAdminHttpServer;
 
     // ── World state ───────────────────────────────────────────────────────
     // Server is the authoritative clock. Day/month/year are tracked so new
@@ -266,6 +318,16 @@ private:
     // 30-day months; full Morrowind calendar accuracy is a later concern.
     struct WorldState
     {
+        struct StoredDynamicRecord
+        {
+            std::string recordType;
+            std::string recordId;
+            std::string data;
+            std::string recordScope = "permanent";
+            bool persistent = true;
+            uint64_t sequence = 0;
+        };
+
         float gameHour   = 8.f;   // 0..24
         int   day        = 1;
         int   month      = 0;     // 0-based (0=Morning Star)
@@ -281,8 +343,10 @@ private:
         std::map<std::string, std::vector<mwmp::DoorEntry>> doorStates;
         std::map<std::string, std::vector<mwmp::PlacedObject>> placedObjects;
         std::unordered_map<std::string, mwmp::ContainerRecord> containers;
+        std::unordered_map<std::string, StoredDynamicRecord> dynamicRecords;
         std::unordered_map<std::string, CellActorState> actorCells;
         uint32_t nextObjectMpNum = 1;
+        uint64_t nextDynamicRecordSequence = 1;
 
         // Weather — reported by the host (guid 1) and relayed to others.
         bool        hasWeather        = false;
@@ -307,6 +371,7 @@ private:
     std::optional<PlayerDatabase> mPlayerDb;
     std::string                   mDbPath            = "playerdata.db";
     std::string                   mDefaultSpawnCell  = "toddtest";
+    std::string                   mGeneratedRecordIdPrefix = "$custom";
     int                           mMaxPlayersConfig   = 32;
     int                           mMaxCharsPerAccount = 5; ///< 0 = unlimited; overridden from config.lua
 

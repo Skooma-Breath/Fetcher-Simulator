@@ -1,6 +1,7 @@
 #include "types.hpp"
 
 #include "modelproperty.hpp"
+#include "usertypeutil.hpp"
 
 #include <components/esm3/loadarmo.hpp>
 #include <components/lua/luastate.hpp>
@@ -20,13 +21,9 @@ namespace sol
 namespace
 {
     // Populates an armor struct from a Lua table.
-    ESM::Armor tableToArmor(const sol::table& rec)
+    ESM::Armor tableToArmorImpl(const sol::table& rec)
     {
-        ESM::Armor armor;
-        if (rec["template"] != sol::nil)
-            armor = LuaUtil::cast<ESM::Armor>(rec["template"]);
-        else
-            armor.blank();
+        ESM::Armor armor = MWLua::Types::initFromTemplate<ESM::Armor>(rec);
         if (rec["name"] != sol::nil)
             armor.mName = rec["name"];
         if (rec["model"] != sol::nil)
@@ -69,6 +66,11 @@ namespace
 
 namespace MWLua
 {
+    ESM::Armor tableToArmor(const sol::table& rec)
+    {
+        return tableToArmorImpl(rec);
+    }
+
     void addArmorBindings(sol::table armor, const Context& context)
     {
         sol::state_view lua = context.sol();

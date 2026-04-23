@@ -1,8 +1,12 @@
 local mp = require("mp")
+local adminUiService = require("admin_ui_service")
+local commandRegistry = require("command_registry")
 local Config = require("config")
 local types = require("openmw.types")
 local intentPolicy = require("intent_policy")
 local markRecallCommands = require("mark_recall")
+local recordDynamicTest = require("recorddynamic_test")
+local recordStore = require("recordstore")
 local surfCommands = require("surf_commands")
 
 ------------------------------------------------------------------------
@@ -18,6 +22,7 @@ local ALLOW_UNVERIFIED_ACTIVATE = Config.ALLOW_UNVERIFIED_ACTIVATE == true
 local LOGIN_PREFIX = COMMAND_PREFIX .. "login "
 local KICK_PREFIX = COMMAND_PREFIX .. "kick "
 local PLACEAT_PREFIX = COMMAND_PREFIX .. "placeat "
+local SPAWNAT_PREFIX = COMMAND_PREFIX .. "spawnat "
 local SETTIME_PREFIX = COMMAND_PREFIX .. "settime "
 local LUABROADCAST_PREFIX = COMMAND_PREFIX .. "luabroadcast "
 local LUACELL_PREFIX = COMMAND_PREFIX .. "luacell "
@@ -271,6 +276,13 @@ local function sendPlaceAtUsage(player)
     player:sendMessage("Usage: /placeat <refId|\"ref id\"> [count] [distance] [direction]")
     player:sendMessage("Quote refIds that contain spaces, for example /placeat \"daedric mace\"")
     player:sendMessage("direction: 0=front, 1=back, 2=left, 3=right")
+end
+
+local function sendSpawnAtUsage(player)
+    player:sendMessage("Usage: /spawnat <refId|\"ref id\"> [distance] [direction] [refNum] [mpNum]")
+    player:sendMessage("Quote refIds that contain spaces, for example /spawnat \"fargoth\"")
+    player:sendMessage("direction: 0=front, 1=back, 2=left, 3=right")
+    player:sendMessage("refNum/mpNum default to 0 when omitted")
 end
 
 local function resolveVerifiedTarget(object)
@@ -594,19 +606,7 @@ local function handleChat(player, data)
     end
 
     if msg == COMMAND_PREFIX .. "help" then
-        player:sendMessage(
-            "Commands:  /who  /time  /uptime  /nick <n>  /nick off"
-                .. "  /surf"
-                .. "  /mark <name>  /recall <name>  /marks  /unmark <name>"
-                .. (isAdmin(player)
-                    and "  /kick <name>  /placeat <refId|\"ref id\"> [count] [distance] [direction]"
-                        .. "  /settime <hour>  /luabroadcast [note]"
-                        .. "  /luasend <name> [note]  /luacell [cell]"
-                        .. "  /luaping [name]  /luaburst <name> [count]"
-                        .. "  /luastorage [value]  /luatypes"
-                    or "")
-                .. "  /login <password>"
-        )
+        commandRegistry.sendHelp(player, COMMAND_PREFIX, isAdmin(player))
         return false
     end
 
@@ -691,29 +691,32 @@ local function handleChat(player, data)
 
         local count = 1
         if countText and countText ~= "" then
-            count = toPositiveInteger(countText)
-            if not count then
+            local parsedCount = toPositiveInteger(countText)
+            if not parsedCount then
                 player:sendMessage("count must be a positive integer.")
                 return false
             end
+            count = parsedCount
         end
 
         local distance = 128
         if distanceText and distanceText ~= "" then
-            distance = toNonNegativeNumber(distanceText)
-            if not distance then
+            local parsedDistance = toNonNegativeNumber(distanceText)
+            if not parsedDistance then
                 player:sendMessage("distance must be a non-negative number.")
                 return false
             end
+            distance = parsedDistance
         end
 
         local direction = 0
         if directionText and directionText ~= "" then
-            direction = toPlaceDirection(directionText)
-            if direction == nil then
+            local parsedDirection = toPlaceDirection(directionText)
+            if parsedDirection == nil then
                 player:sendMessage("direction must be 0, 1, 2, or 3.")
                 return false
             end
+            direction = parsedDirection
         end
 
         local cellId = normalizeCellId(player.cell)
@@ -735,6 +738,97 @@ local function handleChat(player, data)
         mp.log(string.format(
             "[core] /placeat by %s refId=%s count=%d cell=%s distance=%.1f direction=%d",
             player.name, refId, count, cellId, distance, direction
+        ))
+        return false
+    end
+
+    if msg == COMMAND_PREFIX .. "spawnat" or msg:sub(1, #SPAWNAT_PREFIX) == SPAWNAT_PREFIX then
+        if not requireAdmin(player) then
+            return false
+        end
+
+        local args, parseError = parseCommandArgs(msg:sub(#SPAWNAT_PREFIX + 1))
+        if not args then
+            player:sendMessage(parseError or "Invalid arguments.")
+            sendSpawnAtUsage(player)
+            return false
+        end
+
+        local refId = args[1]
+        if not refId or refId == "" then
+            sendSpawnAtUsage(player)
+            return false
+        end
+
+        if #args > 5 then
+            sendSpawnAtUsage(player)
+            return false
+        end
+
+        local distanceText = args[2]
+        local directionText = args[3]
+        local refNumText = args[4]
+        local mpNumText = args[5]
+
+        local distance = 128
+        if distanceText and distanceText ~= "" then
+            local parsedDistance = toNonNegativeNumber(distanceText)
+            if not parsedDistance then
+                player:sendMessage("distance must be a non-negative number.")
+                return false
+            end
+            distance = parsedDistance
+        end
+
+        local direction = 0
+        if directionText and directionText ~= "" then
+            local parsedDirection = toPlaceDirection(directionText)
+            if parsedDirection == nil then
+                player:sendMessage("direction must be 0, 1, 2, or 3.")
+                return false
+            end
+            direction = parsedDirection
+        end
+
+        local refNum = 0
+        if refNumText and refNumText ~= "" then
+            local parsedRefNum = tonumber(refNumText)
+            if not parsedRefNum or parsedRefNum < 0 then
+                player:sendMessage("refNum must be a non-negative integer.")
+                return false
+            end
+            refNum = math.floor(parsedRefNum)
+        end
+
+        local mpNum = 0
+        if mpNumText and mpNumText ~= "" then
+            local parsedMpNum = tonumber(mpNumText)
+            if not parsedMpNum or parsedMpNum < 0 then
+                player:sendMessage("mpNum must be a non-negative integer.")
+                return false
+            end
+            mpNum = math.floor(parsedMpNum)
+        end
+
+        local cellId = normalizeCellId(player.cell)
+        if not cellId or cellId == "" then
+            player:sendMessage("Unable to determine your current cell.")
+            return false
+        end
+
+        local position = placeAtPosition(player, distance, direction)
+        if not mp.spawnActor(refId, refNum, mpNum, cellId, position) then
+            player:sendMessage("Failed to queue /spawnat for " .. refId .. ".")
+            return false
+        end
+
+        player:sendMessage(string.format(
+            "Spawned actor %s in %s at distance %.1f direction %d (refNum=%d mpNum=%d).",
+            refId, cellId, distance, direction, refNum, mpNum
+        ))
+        mp.log(string.format(
+            "[core] /spawnat by %s refId=%s cell=%s distance=%.1f direction=%d refNum=%d mpNum=%d",
+            player.name, refId, cellId, distance, direction, refNum, mpNum
         ))
         return false
     end
@@ -975,6 +1069,33 @@ local function handleChat(player, data)
             return surfHandled
         end
 
+        local recordDynamicHandled = recordDynamicTest.handleChat(player, data, {
+            commandPrefix = COMMAND_PREFIX,
+            parseCommandArgs = parseCommandArgs,
+            requireAdmin = requireAdmin,
+        })
+        if recordDynamicHandled ~= nil then
+            return recordDynamicHandled
+        end
+
+        local recordStoreHandled = recordStore.handleChat(player, data, {
+            commandPrefix = COMMAND_PREFIX,
+            parseCommandArgs = parseCommandArgs,
+            requireAdmin = requireAdmin,
+        })
+        if recordStoreHandled ~= nil then
+            return recordStoreHandled
+        end
+
+        local adminUiHandled = adminUiService.handleChat(player, data, {
+            commandPrefix = COMMAND_PREFIX,
+            requireAdmin = requireAdmin,
+            isAdmin = isAdmin,
+        })
+        if adminUiHandled ~= nil then
+            return adminUiHandled
+        end
+
         player:sendMessage("Unknown command.  Type /help for a list.")
         return false
     end
@@ -989,10 +1110,20 @@ return {
         evaluateIntent = function(intentName, data)
             return intentPolicy.evaluate(intentName, data)
         end,
+        handleAdminUiHttp = function(data)
+            return adminUiService.handleHttpRequest(data, {
+                commandPrefix = COMMAND_PREFIX,
+                isAdmin = function()
+                    return true
+                end,
+            })
+        end,
     },
     eventHandlers = {
         OnServerInit = function(_)
             markRecallCommands.onServerInit()
+            recordStore.onServerInit()
+            recordDynamicTest.onServerInit()
             mp.log("[core] Server ready — " .. mp.getPlayerCount() .. " player(s) connected.")
         end,
 
@@ -1042,6 +1173,13 @@ return {
 
         Activate = function(data)
             handleActivate(data)
+        end,
+
+        AdminUi_Request = function(data)
+            adminUiService.handleRequest(data, {
+                commandPrefix = COMMAND_PREFIX,
+                isAdmin = isAdmin,
+            })
         end,
 
         OnDoorState = function(data)

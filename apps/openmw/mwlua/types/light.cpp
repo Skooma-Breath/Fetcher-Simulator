@@ -1,6 +1,7 @@
 #include "types.hpp"
 
 #include "modelproperty.hpp"
+#include "usertypeutil.hpp"
 
 #include <components/esm3/loadligh.hpp>
 #include <components/lua/luastate.hpp>
@@ -36,13 +37,9 @@ namespace
         }
     }
     // Populates a light struct from a Lua table.
-    ESM::Light tableToLight(const sol::table& rec)
+    ESM::Light tableToLightImpl(const sol::table& rec)
     {
-        ESM::Light light;
-        if (rec["template"] != sol::nil)
-            light = LuaUtil::cast<ESM::Light>(rec["template"]);
-        else
-            light.blank();
+        ESM::Light light = MWLua::Types::initFromTemplate<ESM::Light>(rec);
         if (rec["name"] != sol::nil)
             light.mName = rec["name"];
         if (rec["model"] != sol::nil)
@@ -86,6 +83,11 @@ namespace
 
 namespace MWLua
 {
+    ESM::Light tableToLight(const sol::table& rec)
+    {
+        return tableToLightImpl(rec);
+    }
+
     void addLightBindings(sol::table light, const Context& context)
     {
         auto vfs = MWBase::Environment::get().getResourceSystem()->getVFS();

@@ -1,6 +1,7 @@
 #include "types.hpp"
 
 #include "modelproperty.hpp"
+#include "usertypeutil.hpp"
 
 #include <components/esm3/loadweap.hpp>
 #include <components/lua/luastate.hpp>
@@ -21,13 +22,9 @@ namespace sol
 namespace
 {
     // Populates a weapon struct from a Lua table.
-    ESM::Weapon tableToWeapon(const sol::table& rec)
+    ESM::Weapon tableToWeaponImpl(const sol::table& rec)
     {
-        ESM::Weapon weapon;
-        if (rec["template"] != sol::nil)
-            weapon = LuaUtil::cast<ESM::Weapon>(rec["template"]);
-        else
-            weapon.blank();
+        ESM::Weapon weapon = MWLua::Types::initFromTemplate<ESM::Weapon>(rec);
 
         if (rec["name"] != sol::nil)
             weapon.mName = rec["name"];
@@ -99,6 +96,11 @@ namespace
 
 namespace MWLua
 {
+    ESM::Weapon tableToWeapon(const sol::table& rec)
+    {
+        return tableToWeaponImpl(rec);
+    }
+
     void addWeaponBindings(sol::table weapon, const Context& context)
     {
         sol::state_view lua = context.sol();

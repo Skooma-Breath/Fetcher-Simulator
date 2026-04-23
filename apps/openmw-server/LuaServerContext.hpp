@@ -25,6 +25,7 @@
 
 #include "MpEventQueue.hpp"
 #include "OutboundQueue.hpp"
+#include "PlayerDatabase.hpp"
 #include "PlayerMark.hpp"
 
 namespace mwmp
@@ -78,6 +79,12 @@ public:
     void requestGlobalStorageSnapshot(uint32_t guid);
     std::optional<LuaUtil::BinaryData> evaluateImmediateIntent(
         uint32_t pid, const std::string& eventName, const LuaUtil::BinaryData& data, std::string* error = nullptr);
+    std::optional<LuaUtil::BinaryData> callSynchronousInterface(
+        const std::string& interfaceName,
+        const std::string& identifier,
+        const LuaUtil::BinaryData& data,
+        int timeoutMs,
+        std::string* error = nullptr);
 
     std::string getString(
         const std::string& tableName, const std::string& key, const std::string& defaultVal = "") const;
@@ -109,6 +116,9 @@ public:
     void queueSendServerMessage(uint32_t guid, const std::string& text);
     void queueRelayPlayerChat(uint32_t guid, const std::string& text);
     void queuePlaceObject(const std::string& refId, int count, const std::string& cellId, const Position& position);
+    void queueSpawnActor(
+        const std::string& refId, uint32_t refNum, uint32_t mpNum, const std::string& cellId, const Position& position);
+    void queueRemoveActor(uint32_t mpNum, const std::string& cellId);
     void queueTeleportPlayer(uint32_t guid, const std::string& cellId, const Position& position);
     void queueUpsertPlayerMark(uint32_t guid, const PlayerMark& mark);
     void queueDeletePlayerMark(uint32_t guid, const std::string& name);
@@ -125,9 +135,28 @@ public:
     bool queueIntentOps(const sol::table& ops, std::string* error = nullptr);
     void queueGrantInventoryItem(uint32_t guid, const std::string& refId, int count);
     void queueRemovePlacedObject(uint32_t mpNum, const std::string& cellId);
+    void queueUpsertDynamicRecord(const std::string& recordType, const std::string& recordId,
+        const LuaUtil::BinaryData& data, const std::string& recordScope, bool persistent);
+    void queueRemoveDynamicRecord(const std::string& recordType, const std::string& recordId);
+    void queueSetDynamicRecordDependencies(
+        const std::string& recordType, const std::string& recordId, std::vector<std::string> dependencyRecordIds);
     void queueRefreshAllGameSettings();
     void queueRefreshCellGameSettings(const std::string& cellId);
     void queueRefreshPlayerGameSettings(uint32_t guid);
+    std::string getGeneratedRecordIdPrefix() const;
+    std::string generateDynamicRecordId(const std::string& recordType);
+    void syncGeneratedRecordState(
+        std::string prefix, const std::unordered_map<std::string, uint64_t>& nextGeneratedNumbers);
+    void observeGeneratedRecordId(const std::string& recordType, const std::string& recordId);
+    std::vector<DynamicRecordCatalogEntry> getDynamicRecordCatalog() const;
+    std::optional<DynamicRecordCatalogEntry> getDynamicRecordInfo(
+        const std::string& recordType, const std::string& recordId) const;
+    std::vector<DynamicRecordCatalogEntry> queueRemoveUnlinkedGeneratedDynamicRecords(
+        const std::optional<std::string>& recordType = std::nullopt,
+        const std::optional<bool>& persistent = std::nullopt);
+    std::vector<DatabaseTableInfo> listDatabaseTables() const;
+    std::optional<DatabaseBrowsePage> browseDatabaseTable(
+        const std::string& tableName, int64_t offset = 0, int64_t limit = 100) const;
 
     void setPlayerData(uint32_t guid, const std::string& key, const std::string& value);
     std::optional<std::string> getPlayerData(uint32_t guid, const std::string& key) const;
@@ -156,6 +185,18 @@ private:
         std::condition_variable condition;
     };
 
+    struct SyncInterfaceRequest
+    {
+        std::string interfaceName;
+        std::string identifier;
+        LuaUtil::BinaryData data;
+        std::optional<LuaUtil::BinaryData> response;
+        std::string error;
+        bool completed = false;
+        std::mutex mutex;
+        std::condition_variable condition;
+    };
+
     std::filesystem::path resolveScriptsDir() const;
     void buildVfs();
     void initConfiguration();
@@ -163,11 +204,14 @@ private:
     void loadScripts();
     std::size_t dispatchQueuedEvents();
     std::size_t processImmediateIntentRequests();
+    std::size_t processSyncInterfaceRequests();
     void processStorageSnapshotRequests();
     std::vector<LuaStorageEntry> makeGlobalStorageSnapshot() const;
     void luaTickLoop();
     std::optional<LuaUtil::BinaryData> evaluateImmediateIntentOnLuaThread(
         uint32_t pid, const std::string& eventName, const LuaUtil::BinaryData& data);
+    std::optional<LuaUtil::BinaryData> callInterfaceOnLuaThread(
+        const std::string& interfaceName, const std::string& identifier, const LuaUtil::BinaryData& data);
 
     LuaUtil::BinaryData makeEmptyPayload() const;
     LuaUtil::BinaryData makeTickPayload() const;
@@ -211,6 +255,8 @@ private:
     std::vector<uint32_t>                      mStorageSnapshotRequests;
     mutable std::mutex                         mImmediateIntentMutex;
     std::vector<std::shared_ptr<ImmediateIntentRequest>> mImmediateIntentRequests;
+    mutable std::mutex                         mSyncInterfaceMutex;
+    std::vector<std::shared_ptr<SyncInterfaceRequest>> mSyncInterfaceRequests;
     mutable std::mutex                         mSnapshotMutex;
     SnapshotState                              mSnapshot;
     mutable std::mutex                         mPlayerDataMutex;
@@ -219,6 +265,9 @@ private:
     std::unordered_map<uint32_t, std::unordered_map<std::string, PlayerMark>> mPlayerMarks;
     mutable std::mutex                         mPlacedObjectsMutex;
     std::unordered_map<uint32_t, PlacedObject> mPlacedObjectsByMpNum;
+    mutable std::mutex                         mGeneratedRecordIdMutex;
+    std::string                                mGeneratedRecordIdPrefix = "$custom";
+    std::unordered_map<std::string, uint64_t>  mNextGeneratedRecordNumByType;
     mutable std::mutex                         mSurfPhysicsMutex;
     SurfPhysicsSettings                        mGlobalSurfPhysicsSettings;
     std::unordered_map<std::string, SurfPhysicsSettings> mCellSurfPhysicsSettings;

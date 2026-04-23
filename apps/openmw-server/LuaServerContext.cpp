@@ -1,6 +1,7 @@
 #include "LuaServerContext.hpp"
 
 #include <algorithm>
+#include <charconv>
 #include <chrono>
 #include <fstream>
 #include <optional>
@@ -64,6 +65,33 @@ namespace
         {
         }
         return out;
+    }
+
+    std::optional<uint64_t> parseGeneratedRecordNumber(
+        std::string_view prefix, std::string_view recordType, std::string_view recordId)
+    {
+        if (prefix.empty() || recordType.empty())
+            return std::nullopt;
+
+        std::string expectedPrefix;
+        expectedPrefix.reserve(prefix.size() + recordType.size() + 2);
+        expectedPrefix.append(prefix);
+        expectedPrefix.push_back('_');
+        expectedPrefix.append(recordType);
+        expectedPrefix.push_back('_');
+
+        if (!recordId.starts_with(expectedPrefix))
+            return std::nullopt;
+
+        std::string_view suffix = recordId.substr(expectedPrefix.size());
+        if (suffix.empty())
+            return std::nullopt;
+
+        uint64_t value = 0;
+        const auto [ptr, ec] = std::from_chars(suffix.data(), suffix.data() + suffix.size(), value);
+        if (ec != std::errc() || ptr != suffix.data() + suffix.size())
+            return std::nullopt;
+        return value;
     }
 
 std::optional<sol::table> loadConfigTable(LuaUtil::LuaState& lua, bool alreadyProtected = false)
@@ -213,6 +241,12 @@ void LuaServerContext::drainOutbound()
             case OutboundLuaActionType::PlaceObject:
                 mServer->placeObject(action.text, action.itemCount, action.cellId, action.position);
                 break;
+            case OutboundLuaActionType::SpawnActor:
+                mServer->spawnActor(action.text, action.actorRefNum, action.actorMpNum, action.cellId, action.position);
+                break;
+            case OutboundLuaActionType::RemoveActor:
+                mServer->removeActor(action.actorMpNum, action.cellId);
+                break;
             case OutboundLuaActionType::TeleportPlayer:
                 mServer->teleportPlayer(action.guid, action.cellId, action.position);
                 break;
@@ -251,6 +285,20 @@ void LuaServerContext::drainOutbound()
                 break;
             case OutboundLuaActionType::RemovePlacedObject:
                 mServer->removePlacedObjectByMpNum(action.mpNum, action.cellId);
+                break;
+            case OutboundLuaActionType::UpsertDynamicRecord:
+                mServer->upsertDynamicRecord(
+                    action.recordType, action.recordId, action.recordData, action.recordScope, action.recordPersistent);
+                break;
+            case OutboundLuaActionType::RemoveDynamicRecord:
+                mServer->removeDynamicRecord(action.recordType, action.recordId);
+                break;
+            case OutboundLuaActionType::SetDynamicRecordDependencies:
+                if (!mServer->setDynamicRecordDependencies(action.recordType, action.recordId, action.dependencyRecordIds))
+                {
+                    Log(Debug::Warning) << "[LuaServerContext] Failed to set dynamic record dependencies for type="
+                                        << action.recordType << " id=" << action.recordId;
+                }
                 break;
             case OutboundLuaActionType::RefreshCellGameSettings:
                 mServer->broadcastGameSettingsToCell(action.cellId);
@@ -362,6 +410,46 @@ std::optional<LuaUtil::BinaryData> LuaServerContext::evaluateImmediateIntent(
     std::unique_lock<std::mutex> lock(request->mutex);
     const bool completed = request->condition.wait_for(
         lock, std::chrono::milliseconds(mImmediateIntentTimeoutMs), [&request]() { return request->completed; });
+    if (!completed)
+    {
+        if (error)
+            *error = "timeout";
+        return std::nullopt;
+    }
+
+    if (error)
+        *error = request->error;
+    return request->response;
+}
+
+std::optional<LuaUtil::BinaryData> LuaServerContext::callSynchronousInterface(
+    const std::string& interfaceName,
+    const std::string& identifier,
+    const LuaUtil::BinaryData& data,
+    int timeoutMs,
+    std::string* error)
+{
+    if (!mLoaded)
+    {
+        if (error)
+            *error = "lua_not_loaded";
+        return std::nullopt;
+    }
+
+    auto request = std::make_shared<SyncInterfaceRequest>();
+    request->interfaceName = interfaceName;
+    request->identifier = identifier;
+    request->data = data;
+
+    {
+        std::lock_guard<std::mutex> lock(mSyncInterfaceMutex);
+        mSyncInterfaceRequests.push_back(request);
+    }
+    mWakeCondition.notify_all();
+
+    std::unique_lock<std::mutex> lock(request->mutex);
+    const bool completed = request->condition.wait_for(
+        lock, std::chrono::milliseconds(std::max(timeoutMs, 1)), [&request]() { return request->completed; });
     if (!completed)
     {
         if (error)
@@ -739,8 +827,38 @@ void LuaServerContext::queuePlaceObject(
     mOutboundQueue.push(std::move(action));
 }
 
+void LuaServerContext::queueSpawnActor(
+    const std::string& refId, uint32_t refNum, uint32_t mpNum, const std::string& cellId, const Position& position)
+{
+    if (refId.empty() || cellId.empty())
+        return;
+
+    OutboundLuaAction action;
+    action.type = OutboundLuaActionType::SpawnActor;
+    action.text = refId;
+    action.actorRefNum = refNum;
+    action.actorMpNum = mpNum;
+    action.cellId = cellId;
+    action.position = position;
+    mOutboundQueue.push(std::move(action));
+}
+
+void LuaServerContext::queueRemoveActor(uint32_t mpNum, const std::string& cellId)
+{
+    if (mpNum == 0 || cellId.empty())
+        return;
+
+    OutboundLuaAction action;
+    action.type = OutboundLuaActionType::RemoveActor;
+    action.actorMpNum = mpNum;
+    action.cellId = cellId;
+    mOutboundQueue.push(std::move(action));
+}
+
 void LuaServerContext::queueTeleportPlayer(uint32_t guid, const std::string& cellId, const Position& position)
 {
+    if (guid == 0 || cellId.empty())
+        return;
     OutboundLuaAction action;
     action.type = OutboundLuaActionType::TeleportPlayer;
     action.guid = guid;
@@ -860,6 +978,128 @@ void LuaServerContext::queueRemovePlacedObject(uint32_t mpNum, const std::string
     action.mpNum = mpNum;
     action.cellId = cellId;
     mOutboundQueue.push(std::move(action));
+}
+
+void LuaServerContext::queueUpsertDynamicRecord(const std::string& recordType, const std::string& recordId,
+    const LuaUtil::BinaryData& data, const std::string& recordScope, bool persistent)
+{
+    OutboundLuaAction action;
+    action.type = OutboundLuaActionType::UpsertDynamicRecord;
+    action.recordType = recordType;
+    action.recordId = recordId;
+    action.recordScope = recordScope;
+    action.recordPersistent = persistent;
+    action.recordData = data;
+    mOutboundQueue.push(std::move(action));
+}
+
+void LuaServerContext::queueRemoveDynamicRecord(const std::string& recordType, const std::string& recordId)
+{
+    OutboundLuaAction action;
+    action.type = OutboundLuaActionType::RemoveDynamicRecord;
+    action.recordType = recordType;
+    action.recordId = recordId;
+    mOutboundQueue.push(std::move(action));
+}
+
+void LuaServerContext::queueSetDynamicRecordDependencies(
+    const std::string& recordType, const std::string& recordId, std::vector<std::string> dependencyRecordIds)
+{
+    OutboundLuaAction action;
+    action.type = OutboundLuaActionType::SetDynamicRecordDependencies;
+    action.recordType = recordType;
+    action.recordId = recordId;
+    action.dependencyRecordIds = std::move(dependencyRecordIds);
+    mOutboundQueue.push(std::move(action));
+}
+
+std::string LuaServerContext::getGeneratedRecordIdPrefix() const
+{
+    std::lock_guard<std::mutex> lock(mGeneratedRecordIdMutex);
+    return mGeneratedRecordIdPrefix;
+}
+
+std::string LuaServerContext::generateDynamicRecordId(const std::string& recordType)
+{
+    if (recordType.empty())
+        return {};
+
+    std::lock_guard<std::mutex> lock(mGeneratedRecordIdMutex);
+    uint64_t& nextValue = mNextGeneratedRecordNumByType[recordType];
+    if (nextValue == 0)
+        nextValue = 1;
+
+    const uint64_t generatedNum = nextValue++;
+    return mGeneratedRecordIdPrefix + "_" + recordType + "_" + std::to_string(generatedNum);
+}
+
+void LuaServerContext::syncGeneratedRecordState(
+    std::string prefix, const std::unordered_map<std::string, uint64_t>& nextGeneratedNumbers)
+{
+    if (prefix.empty())
+        prefix = "$custom";
+
+    std::lock_guard<std::mutex> lock(mGeneratedRecordIdMutex);
+    mGeneratedRecordIdPrefix = std::move(prefix);
+    mNextGeneratedRecordNumByType = nextGeneratedNumbers;
+}
+
+void LuaServerContext::observeGeneratedRecordId(const std::string& recordType, const std::string& recordId)
+{
+    if (recordType.empty() || recordId.empty())
+        return;
+
+    std::lock_guard<std::mutex> lock(mGeneratedRecordIdMutex);
+    const auto maybeGeneratedNum = parseGeneratedRecordNumber(mGeneratedRecordIdPrefix, recordType, recordId);
+    if (!maybeGeneratedNum)
+        return;
+
+    uint64_t& nextValue = mNextGeneratedRecordNumByType[recordType];
+    nextValue = std::max(nextValue, *maybeGeneratedNum + 1);
+}
+
+std::vector<DynamicRecordCatalogEntry> LuaServerContext::getDynamicRecordCatalog() const
+{
+    return mServer ? mServer->listDynamicRecordCatalog() : std::vector<DynamicRecordCatalogEntry>{};
+}
+
+std::optional<DynamicRecordCatalogEntry> LuaServerContext::getDynamicRecordInfo(
+    const std::string& recordType, const std::string& recordId) const
+{
+    return mServer ? mServer->getDynamicRecordInfo(recordType, recordId) : std::nullopt;
+}
+
+std::vector<DynamicRecordCatalogEntry> LuaServerContext::queueRemoveUnlinkedGeneratedDynamicRecords(
+    const std::optional<std::string>& recordType, const std::optional<bool>& persistent)
+{
+    std::vector<DynamicRecordCatalogEntry> removed;
+    if (!mServer)
+        return removed;
+
+    const std::string normalizedType = recordType ? normalizeDynamicRecordType(*recordType) : std::string{};
+    if (recordType && normalizedType.empty())
+        return removed;
+
+    for (const auto& entry : mServer->collectGeneratedDynamicRecordGcCandidates(normalizedType.empty()
+             ? std::optional<std::string>{}
+             : std::optional<std::string>{ normalizedType }, persistent))
+    {
+        queueRemoveDynamicRecord(entry.recordType, entry.recordId);
+        removed.push_back(entry);
+    }
+
+    return removed;
+}
+
+std::vector<DatabaseTableInfo> LuaServerContext::listDatabaseTables() const
+{
+    return mServer ? mServer->listBrowsableTables() : std::vector<DatabaseTableInfo>{};
+}
+
+std::optional<DatabaseBrowsePage> LuaServerContext::browseDatabaseTable(
+    const std::string& tableName, int64_t offset, int64_t limit) const
+{
+    return mServer ? mServer->browseDatabaseTable(tableName, offset, limit) : std::nullopt;
 }
 
 void LuaServerContext::queueRefreshAllGameSettings()
@@ -1102,6 +1342,35 @@ std::size_t LuaServerContext::processImmediateIntentRequests()
     return requests.size();
 }
 
+std::size_t LuaServerContext::processSyncInterfaceRequests()
+{
+    std::vector<std::shared_ptr<SyncInterfaceRequest>> requests;
+    {
+        std::lock_guard<std::mutex> lock(mSyncInterfaceMutex);
+        requests.swap(mSyncInterfaceRequests);
+    }
+
+    for (const auto& request : requests)
+    {
+        try
+        {
+            request->response = callInterfaceOnLuaThread(request->interfaceName, request->identifier, request->data);
+        }
+        catch (const std::exception& e)
+        {
+            request->error = e.what();
+        }
+
+        {
+            std::lock_guard<std::mutex> lock(request->mutex);
+            request->completed = true;
+        }
+        request->condition.notify_all();
+    }
+
+    return requests.size();
+}
+
 void LuaServerContext::processStorageSnapshotRequests()
 {
     std::vector<uint32_t> requests;
@@ -1154,6 +1423,7 @@ void LuaServerContext::luaTickLoop()
         try
         {
             processedEvents += processImmediateIntentRequests();
+            processedEvents += processSyncInterfaceRequests();
             processStorageSnapshotRequests();
             processedEvents += dispatchQueuedEvents();
             mGlobalScripts->receiveEvent("OnServerTick", makeTickPayload());
@@ -1225,6 +1495,24 @@ std::optional<LuaUtil::BinaryData> LuaServerContext::evaluateImmediateIntentOnLu
         }
 
         out = LuaUtil::serialize(result);
+    });
+    return out;
+}
+
+std::optional<LuaUtil::BinaryData> LuaServerContext::callInterfaceOnLuaThread(
+    const std::string& interfaceName, const std::string& identifier, const LuaUtil::BinaryData& data)
+{
+    if (!mGlobalScripts)
+        throw std::runtime_error("global_scripts_missing");
+
+    std::optional<LuaUtil::BinaryData> out;
+    mLua->protectedCall([&](LuaUtil::LuaView& view) {
+        sol::object payloadObject = LuaUtil::deserialize(view.sol().lua_state(), data);
+        auto resultObject = mGlobalScripts->callPublicInterface<sol::object>(interfaceName, identifier, payloadObject);
+        if (!resultObject)
+            throw std::runtime_error("public_interface_missing:" + interfaceName + "." + identifier);
+
+        out = LuaUtil::serialize(*resultObject);
     });
     return out;
 }

@@ -35,7 +35,7 @@ namespace mwmp
         void setPlayer(const MWWorld::Ptr& player);
 
         // Force-flush all state immediately (e.g. just after connect)
-        void forceFullSync();
+        void forceFullSync(bool includeInventoryAndEquipment = true);
         void notifyLocalHit(const MWWorld::Ptr& victim, float damage, bool healthDamage, bool knocked,
             const osg::Vec3f& hitPos, int attackType = 0, float attackStrength = 0.f);
         void notifyLocalCastRelease(
@@ -169,6 +169,8 @@ namespace mwmp
         bool mPendingInventoryRestore = false;
         std::array<EquipmentItem, BasePlayer::NUM_EQUIPMENT_SLOTS> mAuthoritativeEquipment{};
         BasePlayer::InventoryChanges mAuthoritativeInventory;
+        std::string mLastPendingInventoryMissingRefId;
+        std::string mLastPendingEquipmentMissingRefId;
 
         // Smoothed Z velocity - raw per-frame Z deltas are very spiky on stairs
         // (discrete step geometry produces alternating large/zero Z displacement).

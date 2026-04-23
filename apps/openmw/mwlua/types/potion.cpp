@@ -1,6 +1,7 @@
 #include "types.hpp"
 
 #include "modelproperty.hpp"
+#include "usertypeutil.hpp"
 
 #include <components/esm3/loadalch.hpp>
 #include <components/lua/luastate.hpp>
@@ -18,16 +19,11 @@ namespace sol
     };
 }
 
-namespace
+namespace MWLua
 {
-    // Populates a potion struct from a Lua table.
     ESM::Potion tableToPotion(const sol::table& rec)
     {
-        ESM::Potion potion;
-        if (rec["template"] != sol::nil)
-            potion = LuaUtil::cast<ESM::Potion>(rec["template"]);
-        else
-            potion.blank();
+        ESM::Potion potion = MWLua::Types::initFromTemplate<ESM::Potion>(rec);
         if (rec["name"] != sol::nil)
             potion.mName = rec["name"];
         if (rec["model"] != sol::nil)
@@ -54,15 +50,17 @@ namespace
             }
             potion.mEffects.updateIndexes();
         }
-        if (rec["isAutocalc"] != sol::nil && rec["isAutocalc"])
-            potion.mData.mFlags = ESM::Potion::Autocalc;
+        if (rec["isAutocalc"] != sol::nil)
+        {
+            if (rec["isAutocalc"])
+                potion.mData.mFlags |= ESM::Potion::Autocalc;
+            else
+                potion.mData.mFlags &= ~ESM::Potion::Autocalc;
+        }
 
         return potion;
     }
-}
 
-namespace MWLua
-{
     void addPotionBindings(sol::table potion, const Context& context)
     {
         addRecordFunctionBinding<ESM::Potion>(potion, context);

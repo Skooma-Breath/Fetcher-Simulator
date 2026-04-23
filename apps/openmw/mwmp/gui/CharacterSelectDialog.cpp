@@ -676,10 +676,15 @@ void CharacterSelectDialog::enterWorld()
         // Send BaseInfo to all peers so they can build the correct-looking
         // remote NPC. This must happen here, AFTER setPlayerRace(), not in
         // the CharacterData handler where the NPC record is still blank.
+        //
+        // Do not include inventory/equipment here for returning players.
+        // The server sends authoritative saved inventory/equipment immediately
+        // after CharacterData, and sending the local template inventory first
+        // can overwrite the saved snapshot with default spawn clothing.
         if (Main::isInitialised())
         {
             Log(Debug::Info) << "[MP] Returning player restore complete — sending full sync";
-            Main::get().getPlayerSync().forceFullSync();
+            Main::get().getPlayerSync().forceFullSync(false);
         }
 
         const std::string targetCell = (spawnCell.empty() ? "toddtest" : spawnCell);

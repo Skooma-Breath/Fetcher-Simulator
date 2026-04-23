@@ -1,6 +1,7 @@
 #include "types.hpp"
 
 #include "modelproperty.hpp"
+#include "usertypeutil.hpp"
 
 #include <components/esm3/loadbook.hpp>
 #include <components/esm3/loadskil.hpp>
@@ -24,16 +25,11 @@ namespace sol
 namespace
 {
     // Populates a book struct from a Lua table.
-    ESM::Book tableToBook(const sol::table& rec)
+    ESM::Book tableToBookImpl(const sol::table& rec)
     {
-        ESM::Book book;
-        if (rec["template"] != sol::nil)
-            book = LuaUtil::cast<ESM::Book>(rec["template"]);
-        else
-        {
-            book.blank();
+        ESM::Book book = MWLua::Types::initFromTemplate<ESM::Book>(rec);
+        if (rec["template"] == sol::nil && rec["baseId"] == sol::nil)
             book.mData.mSkillId = -1;
-        }
         if (rec["name"] != sol::nil)
             book.mName = rec["name"];
         if (rec["model"] != sol::nil)
@@ -81,6 +77,11 @@ namespace
 
 namespace MWLua
 {
+    ESM::Book tableToBook(const sol::table& rec)
+    {
+        return tableToBookImpl(rec);
+    }
+
     void addBookBindings(sol::table book, const Context& context)
     {
         sol::state_view lua = context.sol();

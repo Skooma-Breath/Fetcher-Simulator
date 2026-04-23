@@ -3,6 +3,7 @@
 #include "../stats.hpp"
 #include "actor.hpp"
 #include "modelproperty.hpp"
+#include "usertypeutil.hpp"
 
 #include <components/esm3/loadcrea.hpp>
 #include <components/lua/luastate.hpp>
@@ -12,9 +13,9 @@
 
 namespace
 {
-    ESM::Creature tableToCreature(const sol::table& rec)
+    ESM::Creature tableToCreatureImpl(const sol::table& rec)
     {
-        ESM::Creature crea;
+        ESM::Creature crea = MWLua::Types::initFromTemplate<ESM::Creature>(rec);
         auto setCreatureFlag = [&](std::string_view key, int flag) {
             if (rec[key] == sol::nil)
                 return;
@@ -25,12 +26,6 @@ namespace
             else
                 crea.mFlags &= ~flag;
         };
-
-        // Start from template if provided
-        if (rec["template"] != sol::nil)
-            crea = LuaUtil::cast<ESM::Creature>(rec["template"]);
-        else
-            crea.blank();
 
         // Basic fields
         if (rec["name"] != sol::nil)
@@ -103,6 +98,11 @@ namespace sol
 
 namespace MWLua
 {
+    ESM::Creature tableToCreature(const sol::table& rec)
+    {
+        return tableToCreatureImpl(rec);
+    }
+
     void addCreatureBindings(sol::table creature, const Context& context)
     {
         sol::state_view lua = context.sol();

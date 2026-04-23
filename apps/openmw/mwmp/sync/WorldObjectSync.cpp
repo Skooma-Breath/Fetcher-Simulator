@@ -2,6 +2,8 @@
 
 #include <algorithm>
 #include <cmath>
+#include <exception>
+#include <optional>
 #include <cstdio>
 
 #include <components/debug/debuglog.hpp>
@@ -394,8 +396,19 @@ bool WorldObjectSync::tryPlaceObject(uint32_t mpNum, const std::string& refId,
 
     // Find the ESM record
     const MWWorld::ESMStore& store = world->getStore();
-    MWWorld::ManualRef ref(store, ESM::RefId::stringRefId(refId), count);
-    if (ref.getPtr().isEmpty())
+    std::optional<MWWorld::ManualRef> ref;
+    try
+    {
+        ref.emplace(store, ESM::RefId::stringRefId(refId), count);
+    }
+    catch (const std::exception& e)
+    {
+        Log(Debug::Verbose) << "[MP] WorldObjectSync: delaying place for refId=" << refId
+                            << " reason=" << e.what();
+        return false;
+    }
+
+    if (ref->getPtr().isEmpty())
     {
         Log(Debug::Warning) << "[MP] WorldObjectSync: unknown refId '" << refId << "'";
         return false;
@@ -412,7 +425,7 @@ bool WorldObjectSync::tryPlaceObject(uint32_t mpNum, const std::string& refId,
     for (int i = 0; i < 3; ++i) esmPos.pos[i] = pos.pos[i];
     for (int i = 0; i < 3; ++i) esmPos.rot[i] = pos.rot[i];
 
-    MWWorld::Ptr placed = world->placeObject(ref.getPtr(), cell, esmPos);
+    MWWorld::Ptr placed = world->placeObject(ref->getPtr(), cell, esmPos);
     if (placed.isEmpty())
     {
         Log(Debug::Warning) << "[MP] WorldObjectSync: placeObject failed for " << refId;

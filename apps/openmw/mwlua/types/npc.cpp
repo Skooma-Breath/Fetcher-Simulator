@@ -3,6 +3,7 @@
 #include "actor.hpp"
 #include "modelproperty.hpp"
 #include "servicesoffered.hpp"
+#include "usertypeutil.hpp"
 
 #include <components/esm3/loadfact.hpp>
 #include <components/esm3/loadnpc.hpp>
@@ -46,15 +47,9 @@ namespace
 
         return faction->mRanks.size();
     }
-    ESM::NPC tableToNPC(const sol::table& rec)
+    ESM::NPC tableToNPCImpl(const sol::table& rec)
     {
-        ESM::NPC npc;
-
-        // Start from template if provided
-        if (rec["template"] != sol::nil)
-            npc = LuaUtil::cast<ESM::NPC>(rec["template"]);
-        else
-            npc.blank();
+        ESM::NPC npc = MWLua::Types::initFromTemplate<ESM::NPC>(rec);
 
         npc.mId = {};
 
@@ -191,6 +186,11 @@ namespace
 
 namespace MWLua
 {
+    ESM::NPC tableToNPC(const sol::table& rec)
+    {
+        return tableToNPCImpl(rec);
+    }
+
     void addNpcBindings(sol::table npc, const Context& context)
     {
         addNpcStatsBindings(npc, context);

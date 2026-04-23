@@ -8,6 +8,7 @@
 
 #include <components/lua/serialization.hpp>
 #include <components/openmw-mp/Base/BaseStructs.hpp>
+#include <components/openmw-mp/Base/DynamicRecord.hpp>
 #include <components/openmw-mp/Packets/Lua/PacketLuaStorage.hpp>
 
 #include "PlayerMark.hpp"
@@ -22,6 +23,8 @@ enum class OutboundLuaActionType
     SendServerMessage,
     RelayPlayerChat,
     PlaceObject,
+    SpawnActor,
+    RemoveActor,
     TeleportPlayer,
     UpsertPlayerMark,
     DeletePlayerMark,
@@ -35,6 +38,9 @@ enum class OutboundLuaActionType
     SendLuaStorage,
     GrantInventoryItem,
     RemovePlacedObject,
+    UpsertDynamicRecord,
+    RemoveDynamicRecord,
+    SetDynamicRecordDependencies,
     RefreshCellGameSettings,
     RefreshPlayerGameSettings,
     RefreshAllGameSettings,
@@ -47,12 +53,20 @@ struct OutboundLuaAction
     uint32_t mpNum = 0;
     float worldHour = 0.f;
     int itemCount = 0;
+    bool recordPersistent = true;
+    uint32_t actorRefNum = 0;
+    uint32_t actorMpNum = 0;
     Position position;
     PlayerMark playerMark;
     std::string text;
     std::string eventName;
     std::string cellId;
+    std::string recordType;
+    std::string recordId;
+    std::string recordScope;
+    std::vector<std::string> dependencyRecordIds;
     LuaUtil::BinaryData eventData;
+    LuaUtil::BinaryData recordData;
     LuaStorageAction storageAction = LuaStorageAction::Delta;
     std::string storageSection;
     std::vector<LuaStorageEntry> storageEntries;

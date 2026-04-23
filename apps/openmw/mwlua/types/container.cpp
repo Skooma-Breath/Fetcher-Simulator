@@ -1,6 +1,7 @@
 #include "types.hpp"
 
 #include "modelproperty.hpp"
+#include "usertypeutil.hpp"
 
 #include <components/esm3/loadcont.hpp>
 #include <components/lua/luastate.hpp>
@@ -21,15 +22,9 @@ namespace sol
 
 namespace
 {
-    ESM::Container tableToContainer(const sol::table& rec)
+    ESM::Container tableToContainerImpl(const sol::table& rec)
     {
-        ESM::Container cont;
-
-        // Start from template if provided
-        if (rec["template"] != sol::nil)
-            cont = LuaUtil::cast<ESM::Container>(rec["template"]);
-        else
-            cont.blank();
+        ESM::Container cont = MWLua::Types::initFromTemplate<ESM::Container>(rec);
 
         // Basic fields
         if (rec["name"] != sol::nil)
@@ -66,6 +61,11 @@ namespace
 
 namespace MWLua
 {
+    ESM::Container tableToContainer(const sol::table& rec)
+    {
+        return tableToContainerImpl(rec);
+    }
+
 
     static const MWWorld::Ptr& containerPtr(const Object& o)
     {

@@ -28,6 +28,7 @@
 
 #include <components/openmw-mp/Base/BasePlayer.hpp>
 #include <components/openmw-mp/Base/BaseObject.hpp>
+#include <components/openmw-mp/Base/DynamicRecord.hpp>
 #include <components/openmw-mp/Packets/Object/PacketDoorState.hpp>
 
 #include "PlayerMark.hpp"
@@ -60,6 +61,44 @@ namespace mwmp
         std::string nickname;  ///< cosmetic display name; empty = use slot name
         bool        hasSavedInventory = false;
         bool        hasSavedEquipment = false;
+    };
+
+    struct PersistedDynamicRecord
+    {
+        std::string recordType;
+        std::string recordId;
+        std::string data;
+        std::string recordScope = "permanent";
+        int64_t createdAt = 0;
+        int64_t updatedAt = 0;
+    };
+
+    struct DynamicRecordCatalogEntry
+    {
+        std::string recordType;
+        std::string recordId;
+        std::string recordScope = "permanent";
+        bool persistent = true;
+        int64_t createdAt = 0;
+        int64_t updatedAt = 0;
+        int64_t linkCount = 0;
+        bool loaded = false;
+    };
+
+    struct DatabaseTableInfo
+    {
+        std::string name;
+        int64_t rowCount = 0;
+    };
+
+    struct DatabaseBrowsePage
+    {
+        std::string tableName;
+        int64_t totalRows = 0;
+        int64_t offset = 0;
+        int64_t limit = 0;
+        std::vector<std::string> columns;
+        std::vector<std::vector<std::optional<std::string>>> rows;
     };
 
     class PlayerDatabase
@@ -148,13 +187,14 @@ namespace mwmp
         std::vector<Item> loadCharacterInventory(int64_t characterId);
 
         /// Replace the persisted inventory snapshot for a character.
-        void saveCharacterInventory(int64_t characterId, const std::vector<Item>& items);
+        void saveCharacterInventory(int64_t characterId, const std::vector<Item>& items, bool touchLastSeen = true);
 
         /// Load the last persisted equipment snapshot for a character.
         std::vector<EquipmentItem> loadCharacterEquipment(int64_t characterId);
 
         /// Replace the persisted equipment snapshot for a character.
-        void saveCharacterEquipment(int64_t characterId, const std::vector<EquipmentItem>& equipment);
+        void saveCharacterEquipment(
+            int64_t characterId, const std::vector<EquipmentItem>& equipment, bool touchLastSeen = true);
 
         /// Load persisted multiplayer-placed world objects.
         std::vector<PlacedObject> loadWorldObjects();
@@ -171,11 +211,53 @@ namespace mwmp
         /// Insert or update one server-authoritative container inventory.
         void upsertContainerRecord(const ContainerRecord& record);
 
+        /// Delete one server-authoritative container inventory and its items.
+        void deleteContainerRecord(std::string_view cellId, std::string_view refId, uint32_t refNum);
+
         /// Load persisted door states.
         std::vector<DoorEntry> loadDoorStates();
 
         /// Insert or update one persisted door state entry.
         void upsertDoorState(const DoorEntry& entry);
+
+        /// Delete one persisted door state entry.
+        void deleteDoorState(std::string_view cellId, std::string_view refId, uint32_t refNum);
+
+        /// Load persisted dynamic records shared by all players.
+        std::vector<PersistedDynamicRecord> loadDynamicRecords();
+
+        /// Insert or update one persisted dynamic record.
+        void upsertDynamicRecord(const PersistedDynamicRecord& record);
+
+        /// Delete one persisted dynamic record by (recordType, recordId).
+        void deleteDynamicRecord(std::string_view recordType, std::string_view recordId);
+
+        /// Load dynamic-record catalog metadata for both persistent and session-only ids.
+        std::vector<DynamicRecordCatalogEntry> loadDynamicRecordCatalog();
+
+        /// Insert or update one dynamic-record catalog entry.
+        void upsertDynamicRecordCatalog(const DynamicRecordCatalogEntry& record);
+
+        /// Delete one dynamic-record catalog entry by (recordType, recordId).
+        void deleteDynamicRecordCatalog(std::string_view recordType, std::string_view recordId);
+
+        /// Delete all persisted link rows for a specific record id.
+        void deleteDynamicRecordLinks(std::string_view recordId);
+
+        /// Replace all record-to-record dependency links owned by one dynamic record.
+        void replaceDynamicRecordDependencies(
+            std::string_view ownerRecordType, std::string_view ownerRecordId,
+            const std::vector<std::string>& dependencyRecordIds);
+
+        /// Return character ids that have saved inventory and/or equipment snapshots.
+        std::vector<int64_t> listCharactersWithSavedItems();
+
+        /// Return the read-only table catalog exposed to admin/browser tools.
+        std::vector<DatabaseTableInfo> listBrowsableTables();
+
+        /// Return one paged table slice for admin/browser tools.
+        std::optional<DatabaseBrowsePage> browseTable(
+            std::string_view tableName, int64_t offset = 0, int64_t limit = 100);
 
         /// Lightweight summary used to build PacketCharacterList.
         struct CharacterSummary

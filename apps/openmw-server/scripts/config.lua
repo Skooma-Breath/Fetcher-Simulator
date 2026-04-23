@@ -30,6 +30,11 @@ Config.LUA_SLOW_TICK_MS = 8
 Config.IMMEDIATE_INTENT_TIMEOUT_MS = 50
 -- Keep this off until the server can verify static-world refs from a content index.
 Config.ALLOW_UNVERIFIED_ACTIVATE = false
+Config.GENERATED_RECORD_ID_PREFIX = "$custom"
+Config.ADMIN_HTTP_ENABLED = true
+Config.ADMIN_HTTP_HOST = "127.0.0.1"
+Config.ADMIN_HTTP_PORT = 8081
+Config.ADMIN_HTTP_TIMEOUT_MS = 250
 
 ------------------------------------------------------------------------
 -- Characters
