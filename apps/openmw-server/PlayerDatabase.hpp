@@ -244,6 +244,11 @@ namespace mwmp
         /// Delete all persisted link rows for a specific record id.
         void deleteDynamicRecordLinks(std::string_view recordId);
 
+        /// Runtime-only spawned actor links keep generated actor records alive until despawn/server restart.
+        void upsertSpawnedActorDynamicRecordLink(std::string_view recordId, std::string_view cellId, uint32_t mpNum);
+        void deleteSpawnedActorDynamicRecordLink(uint32_t mpNum, std::string_view cellId);
+        void clearSpawnedActorDynamicRecordLinks();
+
         /// Replace all record-to-record dependency links owned by one dynamic record.
         void replaceDynamicRecordDependencies(
             std::string_view ownerRecordType, std::string_view ownerRecordId,

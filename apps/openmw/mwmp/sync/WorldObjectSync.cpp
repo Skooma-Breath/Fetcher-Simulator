@@ -29,6 +29,7 @@
 
 #include "../network/Client.hpp"
 #include "../Main.hpp"
+#include "ActorSync.hpp"
 #include "PlayerSync.hpp"
 
 namespace mwmp
@@ -36,6 +37,12 @@ namespace mwmp
 
 namespace
 {
+    bool isContainerTarget(const MWWorld::Ptr& ptr)
+    {
+        return !ptr.isEmpty()
+            && (ptr.getType() == ESM::Container::sRecordId || ptr.getClass().isActor());
+    }
+
     bool samePosition(const Position& left, const Position& right)
     {
         constexpr float epsilon = 0.01f;
@@ -178,6 +185,9 @@ void WorldObjectSync::onLocalObjectDeleted(const MWWorld::Ptr& ptr)
     if (mSuppressLocalDelete || ptr.isEmpty() || !ptr.isInCell())
         return;
 
+    if (ptr.getClass().isActor())
+        return;
+
     const uint32_t mpNum = getMpNumForObject(ptr);
 
     if (mpNum == 0)
@@ -203,6 +213,36 @@ void WorldObjectSync::onLocalObjectDeleted(const MWWorld::Ptr& ptr)
     Log(Debug::Verbose) << "[MP] WorldObjectSync: sent ObjectDelete mpNum=" << mpNum;
 }
 
+void WorldObjectSync::onLocalCorpseDisposed(const MWWorld::Ptr& ptr)
+{
+    if (mSuppressLocalDelete || ptr.isEmpty() || !ptr.isInCell() || !ptr.getClass().isActor())
+        return;
+
+    const uint32_t mpNum = getMpNumForObject(ptr);
+    if (mpNum == 0)
+        return;
+
+    std::string cellId;
+    if (const MWWorld::Cell* cell = ptr.getCell()->getCell())
+    {
+        if (cell->isExterior())
+        {
+            char buf[32];
+            std::snprintf(buf, sizeof(buf), "EXT:%d,%d", cell->getGridX(), cell->getGridY());
+            cellId = buf;
+        }
+        else
+            cellId = std::string(cell->getNameId());
+    }
+
+    PacketObjectDelete pkt;
+    pkt.mpNum = mpNum;
+    pkt.cellId = cellId;
+    mClient.sendReliable(pkt.encode());
+    Log(Debug::Info) << "[MP] WorldObjectSync: sent corpse dispose mpNum=" << mpNum
+                     << " cell=" << cellId;
+}
+
 // ---------------------------------------------------------------------------
 // Outbound — local player opens a container
 // ---------------------------------------------------------------------------
@@ -221,35 +261,63 @@ void WorldObjectSync::onLocalContainerOpened(const std::string& cellId,
     pkt.container.mpNum  = mpNum;
     pkt.mAction = static_cast<uint8_t>(ContainerAction::Set);
 
-    // Walk active cells to find the container and snapshot its inventory.
-    auto& scene = static_cast<MWWorld::World*>(world)->getWorldScene();
-    for (MWWorld::CellStore* store : scene.getActiveCells())
+    MWWorld::Ptr target;
+
+    if (mpNum != 0)
     {
-        bool found = false;
-        store->forEach([&](MWWorld::Ptr ptr) -> bool
+        target = getObjectByMpNum(mpNum);
+        if (!isContainerTarget(target))
+            target = MWWorld::Ptr();
+        if (target.isEmpty() && Main::isInitialised())
+            target = Main::get().getActorSync().getActorByMpNum(mpNum);
+    }
+
+    if (target.isEmpty())
+    {
+        // Walk active cells to find the container or actor corpse and snapshot its inventory.
+        auto& scene = static_cast<MWWorld::World*>(world)->getWorldScene();
+        for (MWWorld::CellStore* store : scene.getActiveCells())
         {
-            if (ptr.getType() != ESM::Container::sRecordId)
-                return true;
-            if (ptr.getCellRef().getRefId().toString() != refId)
-                return true;
-            if (refNum != 0 && ptr.getCellRef().getRefNum().mIndex != refNum)
-                return true;
-
-            auto& cstore = ptr.getClass().getContainerStore(ptr);
-            for (auto it = cstore.begin(); it != cstore.end(); ++it)
+            store->forEach([&](MWWorld::Ptr ptr) -> bool
             {
-                ContainerItem ci;
-                ci.refId  = it->getCellRef().getRefId().toString();
-                ci.count  = it->getCellRef().getCount();
-                ci.charge = static_cast<int>(it->getCellRef().getCharge());
-                appendOrMerge(pkt.container.items, ci);
-            }
-            found = true;
-            return false;
-        });
+                if (ptr.getType() != ESM::Container::sRecordId && !ptr.getClass().isActor())
+                    return true;
+                if (ptr.getCellRef().getRefId().toString() != refId)
+                    return true;
+                if (refNum != 0 && ptr.getCellRef().getRefNum().mIndex != refNum)
+                    return true;
 
-        if (found)
-            break;
+                target = ptr;
+                return false;
+            });
+
+            if (!target.isEmpty())
+                break;
+        }
+    }
+
+    if (!target.isEmpty())
+    {
+        if (!isContainerTarget(target))
+        {
+            Log(Debug::Warning) << "[MP] WorldObjectSync: ignoring invalid local container snapshot target refId="
+                                << refId
+                                << " mpNum=" << mpNum
+                                << " refNum=" << refNum
+                                << " cell=" << cellId;
+        }
+        else
+        {
+        auto& cstore = target.getClass().getContainerStore(target);
+        for (auto it = cstore.begin(); it != cstore.end(); ++it)
+        {
+            ContainerItem ci;
+            ci.refId  = it->getCellRef().getRefId().toString();
+            ci.count  = it->getCellRef().getCount();
+            ci.charge = static_cast<int>(it->getCellRef().getCharge());
+            appendOrMerge(pkt.container.items, ci);
+        }
+        }
     }
 
     mClient.sendReliable(pkt.encode());
@@ -353,6 +421,13 @@ uint32_t WorldObjectSync::getMpNumForObject(const MWWorld::Ptr& ptr) const
 {
     if (ptr.isEmpty())
         return 0;
+
+    if (ptr.getClass().isActor() && Main::isInitialised())
+    {
+        const uint32_t actorMpNum = Main::get().getActorSync().getActorMpNum(ptr);
+        if (actorMpNum != 0)
+            return actorMpNum;
+    }
 
     auto it = mMpNumsByObjectId.find(ptr.getCellRef().getRefNum());
     return it != mMpNumsByObjectId.end() ? it->second : 0;
@@ -483,60 +558,86 @@ bool WorldObjectSync::tryApplyContainer(const ContainerRecord& record, Container
     MWBase::World* world = MWBase::Environment::get().getWorld();
     if (!world) return false;
 
-    auto& scene = static_cast<MWWorld::World*>(world)->getWorldScene();
-    for (MWWorld::CellStore* store : scene.getActiveCells())
+    MWWorld::Ptr target;
+
+    if (record.mpNum != 0)
     {
-        MWWorld::Ptr target;
-        store->forEach([&](MWWorld::Ptr ptr) -> bool
+        target = getObjectByMpNum(record.mpNum);
+        if (!isContainerTarget(target))
+            target = MWWorld::Ptr();
+        if (target.isEmpty() && Main::isInitialised())
+            target = Main::get().getActorSync().getActorByMpNum(record.mpNum);
+    }
+
+    if (target.isEmpty())
+    {
+        auto& scene = static_cast<MWWorld::World*>(world)->getWorldScene();
+        for (MWWorld::CellStore* store : scene.getActiveCells())
         {
-            if (ptr.getType() != ESM::Container::sRecordId)
-                return true;
-            if (ptr.getCellRef().getRefId().toString() != record.refId)
-                return true;
-            if (record.refNum != 0 && ptr.getCellRef().getRefNum().mIndex != record.refNum)
-                return true;
-
-            target = ptr;
-            return false;
-        });
-
-        if (target.isEmpty())
-            continue;
-
-        auto& cstore = target.getClass().getContainerStore(target);
-        const MWWorld::ESMStore& esmStore = world->getStore();
-
-        if (action == ContainerAction::Set)
-        {
-            cstore.clear();
-            for (const auto& ci : record.items)
+            store->forEach([&](MWWorld::Ptr ptr) -> bool
             {
-                MWWorld::ManualRef ref(esmStore, ESM::RefId::stringRefId(ci.refId), ci.count);
-                if (!ref.getPtr().isEmpty())
-                    cstore.add(ref.getPtr(), ci.count);
-            }
-        }
-        else if (action == ContainerAction::Add)
-        {
-            for (const auto& ci : record.items)
-            {
-                MWWorld::ManualRef ref(esmStore, ESM::RefId::stringRefId(ci.refId), ci.count);
-                if (!ref.getPtr().isEmpty())
-                    cstore.add(ref.getPtr(), ci.count);
-            }
-        }
-        else if (action == ContainerAction::Remove)
-        {
-            for (const auto& ci : record.items)
-                cstore.remove(ESM::RefId::stringRefId(ci.refId), ci.count);
-        }
+                if (ptr.getType() != ESM::Container::sRecordId && !ptr.getClass().isActor())
+                    return true;
+                if (ptr.getCellRef().getRefId().toString() != record.refId)
+                    return true;
+                if (record.refNum != 0 && ptr.getCellRef().getRefNum().mIndex != record.refNum)
+                    return true;
 
-        Log(Debug::Info) << "[MP] WorldObjectSync: applied Container action="
-                         << static_cast<int>(action)
-                         << " refId=" << record.refId;
+                target = ptr;
+                return false;
+            });
+
+            if (!target.isEmpty())
+                break;
+        }
+    }
+
+    if (target.isEmpty())
+        return false;
+
+    if (!isContainerTarget(target))
+    {
+        Log(Debug::Warning) << "[MP] WorldObjectSync: dropping invalid Container replay for non-container refId="
+                            << record.refId
+                            << " mpNum=" << record.mpNum
+                            << " refNum=" << record.refNum
+                            << " cell=" << record.cellId;
         return true;
     }
-    return false;
+
+    auto& cstore = target.getClass().getContainerStore(target);
+    const MWWorld::ESMStore& esmStore = world->getStore();
+
+    if (action == ContainerAction::Set)
+    {
+        cstore.clear();
+        for (const auto& ci : record.items)
+        {
+            MWWorld::ManualRef ref(esmStore, ESM::RefId::stringRefId(ci.refId), ci.count);
+            if (!ref.getPtr().isEmpty())
+                cstore.add(ref.getPtr(), ci.count);
+        }
+    }
+    else if (action == ContainerAction::Add)
+    {
+        for (const auto& ci : record.items)
+        {
+            MWWorld::ManualRef ref(esmStore, ESM::RefId::stringRefId(ci.refId), ci.count);
+            if (!ref.getPtr().isEmpty())
+                cstore.add(ref.getPtr(), ci.count);
+        }
+    }
+    else if (action == ContainerAction::Remove)
+    {
+        for (const auto& ci : record.items)
+            cstore.remove(ESM::RefId::stringRefId(ci.refId), ci.count);
+    }
+
+    Log(Debug::Info) << "[MP] WorldObjectSync: applied Container action="
+                     << static_cast<int>(action)
+                     << " refId=" << record.refId
+                     << " mpNum=" << record.mpNum;
+    return true;
 }
 
 } // namespace mwmp

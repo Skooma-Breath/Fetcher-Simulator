@@ -55,6 +55,7 @@
 #include <components/openmw-mp/Packets/Player/PacketPlayerAttack.hpp>
 #include <components/openmw-mp/Packets/Player/PacketPlayerCast.hpp>
 
+#include "WorldObjectSync.hpp"
 
 namespace mwmp
 {
@@ -1102,7 +1103,11 @@ void PlayerSync::sendAttack()
 
     const MWMechanics::CreatureStats& stats
         = player.getClass().getCreatureStats(player);
-    const bool pressed = stats.getAttackingOrSpell();
+    const bool canAttack = !stats.isDead()
+        && !stats.isParalyzed()
+        && !stats.getKnockedDown()
+        && !stats.getHitRecovery();
+    const bool pressed = canAttack && stats.getAttackingOrSpell();
 
     // Only send on edge transitions (press and release both matter: press triggers
     // the wind-up animation; release tells the receiver to end it)
@@ -1117,6 +1122,7 @@ void PlayerSync::sendAttack()
     mLocal.attack.damage = 0.f;
     mLocal.attack.target.clear();
     mLocal.attack.targetMpNum = 0;
+    mLocal.attack.targetKind = mwmp::Attack::TargetNone;
     mLocal.attack.hitPos[0] = 0.f;
     mLocal.attack.hitPos[1] = 0.f;
     mLocal.attack.hitPos[2] = 0.f;
@@ -1174,11 +1180,23 @@ void PlayerSync::notifyLocalHit(const MWWorld::Ptr& victim, float damage, bool h
     mLocal.attack.damage = damage;
     mLocal.attack.target = victim.getCellRef().getRefId().serializeText();
     mLocal.attack.targetMpNum = resolveTargetMpNum(victim);
+    mLocal.attack.targetKind = mwmp::Attack::TargetNone;
+    if (mLocal.attack.targetMpNum != 0)
+        mLocal.attack.targetKind = mwmp::Attack::TargetPlayer;
+    else if (Main::isInitialised())
+    {
+        const uint32_t targetActorMpNum = Main::get().getWorldObjectSync().getMpNumForObject(victim);
+        if (targetActorMpNum != 0)
+        {
+            mLocal.attack.targetMpNum = targetActorMpNum;
+            mLocal.attack.targetKind = mwmp::Attack::TargetActor;
+        }
+    }
     mLocal.attack.hitPos[0] = hitPos.x();
     mLocal.attack.hitPos[1] = hitPos.y();
     mLocal.attack.hitPos[2] = hitPos.z();
 
-    if (mLocal.attack.targetMpNum == 0 && Main::isInitialised())
+    if (mLocal.attack.targetKind != mwmp::Attack::TargetPlayer && Main::isInitialised())
         Main::get().sendActorCombatRequest(victim, damage, healthDamage, knocked, hitPos, attackType, attackStrength);
 
     PacketPlayerAttack pkt;

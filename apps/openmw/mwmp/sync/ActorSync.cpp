@@ -35,6 +35,7 @@
 #include "../../mwworld/cellstore.hpp"
 #include "../../mwworld/class.hpp"
 #include "../../mwworld/esmstore.hpp"
+#include "../../mwworld/manualref.hpp"
 #include "../../mwworld/refdata.hpp"
 #include "../../mwworld/scene.hpp"
 #include "../../mwworld/worldimp.hpp"
@@ -64,7 +65,15 @@ namespace
 {
     std::string makeActorKey(const mwmp::BaseActor& actor)
     {
+        if (actor.mpNum != 0)
+            return "mp|" + std::to_string(actor.mpNum);
         return actor.refId + "|" + std::to_string(actor.refNum) + "|" + std::to_string(actor.mpNum);
+    }
+
+    std::string makeLocalActorKey(const std::string& cellId, const MWWorld::Ptr& ptr)
+    {
+        return cellId + "|" + ptr.getCellRef().getRefId().serializeText() + "|"
+            + std::to_string(ptr.getCellRef().getRefNum().mIndex);
     }
 
     float lerpFloat(float current, float target, float alpha)
@@ -98,6 +107,17 @@ namespace
         return nullptr;
     }
 
+    std::string cellIdForPtr(const MWWorld::Ptr& ptr)
+    {
+        if (ptr.isEmpty() || ptr.getCell() == nullptr || ptr.getCell()->getCell() == nullptr)
+            return {};
+
+        const MWWorld::Cell* cell = ptr.getCell()->getCell();
+        if (cell->isExterior())
+            return std::string("EXT:") + std::to_string(cell->getGridX()) + "," + std::to_string(cell->getGridY());
+        return std::string(cell->getNameId());
+    }
+
     bool matchesActor(const MWWorld::Ptr& ptr, const mwmp::BaseActor& actor)
     {
         if (ptr.isEmpty() || ptr.getCell() == nullptr || !ptr.getClass().isActor())
@@ -105,7 +125,7 @@ namespace
 
         if (ptr.getCellRef().getRefId().serializeText() != actor.refId)
             return false;
-        if (actor.refNum != 0 && ptr.getCellRef().getRefNum().mIndex != actor.refNum)
+        if (actor.mpNum == 0 && actor.refNum != 0 && ptr.getCellRef().getRefNum().mIndex != actor.refNum)
             return false;
         return true;
     }
@@ -284,14 +304,57 @@ namespace mwmp
         }
     }
 
+    bool ActorSync::shouldAcceptSnapshot(CellRuntime& cell, const ActorList& list, const char* packetName)
+    {
+        if (cell.latest.authorityGeneration != 0
+            && list.authorityGeneration != 0
+            && list.authorityGeneration < cell.latest.authorityGeneration)
+        {
+            Log(Debug::Info) << "[MP] ActorSync: dropped stale " << packetName
+                             << " cellId=" << list.cellId
+                             << " seq=" << list.snapshotSequence
+                             << " latestSeq=" << cell.latest.snapshotSequence
+                             << " gen=" << list.authorityGeneration
+                             << " latestGen=" << cell.latest.authorityGeneration;
+            return false;
+        }
+
+        if (cell.latest.snapshotSequence != 0
+            && list.snapshotSequence != 0
+            && list.snapshotSequence < cell.latest.snapshotSequence)
+        {
+            Log(Debug::Info) << "[MP] ActorSync: dropped stale " << packetName
+                             << " cellId=" << list.cellId
+                             << " seq=" << list.snapshotSequence
+                             << " latestSeq=" << cell.latest.snapshotSequence
+                             << " gen=" << list.authorityGeneration
+                             << " latestGen=" << cell.latest.authorityGeneration;
+            return false;
+        }
+
+        cell.latest.cellId = list.cellId;
+        cell.latest.authorityGuid = list.authorityGuid;
+        if (list.authorityGeneration != 0)
+            cell.latest.authorityGeneration = list.authorityGeneration;
+        if (list.snapshotSequence != 0)
+            cell.latest.snapshotSequence = list.snapshotSequence;
+        if (list.serverTimestamp != 0)
+            cell.latest.serverTimestamp = list.serverTimestamp;
+
+        return true;
+    }
+
     void ActorSync::onAuthorityUpdate(const ActorList& list)
     {
+        auto& cell = mCells[list.cellId];
+        if (!shouldAcceptSnapshot(cell, list, "ActorAuthority"))
+            return;
+
         const uint32_t localGuid = Main::get().getPlayerSync().localPlayer().guid;
         const bool hasLocalAuthority = (localGuid != 0) && (list.authorityGuid == localGuid);
         const bool previous = hasAuthority(list.cellId);
         mAuthority[list.cellId] = hasLocalAuthority;
 
-        auto& cell = mCells[list.cellId];
         cell.latest.cellId = list.cellId;
         cell.latest.isAuthority = list.isAuthority;
         cell.latest.authorityGuid = list.authorityGuid;
@@ -315,15 +378,21 @@ namespace mwmp
     void ActorSync::onActorListUpdate(const ActorList& list)
     {
         auto& cell = mCells[list.cellId];
+        if (!shouldAcceptSnapshot(cell, list, "ActorList"))
+            return;
+
         cell.latest = list;
 
         std::unordered_map<std::string, ActorRuntime> updatedActors;
         updatedActors.reserve(list.actors.size());
+        std::unordered_set<uint32_t> incomingServerSpawnedMpNums;
 
         for (const auto& actorState : list.actors)
         {
             const std::string actorKey = makeActorKey(actorState);
             ActorRuntime runtime;
+            if (actorState.mpNum != 0)
+                incomingServerSpawnedMpNums.insert(actorState.mpNum);
 
             auto existing = cell.actors.find(actorKey);
             if (existing != cell.actors.end())
@@ -339,12 +408,29 @@ namespace mwmp
             updatedActors[actorKey] = std::move(runtime);
         }
 
+        MWBase::World* world = MWBase::Environment::get().getWorld();
+        for (auto& [actorKey, runtime] : cell.actors)
+        {
+            if (runtime.state.mpNum == 0 || incomingServerSpawnedMpNums.count(runtime.state.mpNum) != 0)
+                continue;
+
+            if (!runtime.boundActor.isEmpty())
+            {
+                forgetServerSpawnedActor(list.cellId, runtime.boundActor, runtime.state.mpNum);
+                if (world)
+                    world->deleteObject(runtime.boundActor);
+            }
+        }
+
         cell.actors = std::move(updatedActors);
     }
 
     void ActorSync::onActorPositionUpdate(const ActorList& list)
     {
         auto& cell = mCells[list.cellId];
+        if (!shouldAcceptSnapshot(cell, list, "ActorPosition"))
+            return;
+
         cell.latest.cellId = list.cellId;
         cell.latest.authorityGuid = list.authorityGuid;
         cell.latest.authorityGeneration = list.authorityGeneration;
@@ -362,6 +448,9 @@ namespace mwmp
     void ActorSync::onActorAnimFlagsUpdate(const ActorList& list)
     {
         auto& cell = mCells[list.cellId];
+        if (!shouldAcceptSnapshot(cell, list, "ActorAnimFlags"))
+            return;
+
         cell.latest.snapshotSequence = list.snapshotSequence;
         cell.latest.serverTimestamp = list.serverTimestamp;
 
@@ -376,6 +465,9 @@ namespace mwmp
     void ActorSync::onActorAnimPlay(const ActorList& list)
     {
         auto& cell = mCells[list.cellId];
+        if (!shouldAcceptSnapshot(cell, list, "ActorAnimPlay"))
+            return;
+
         cell.latest.snapshotSequence = list.snapshotSequence;
         cell.latest.serverTimestamp = list.serverTimestamp;
 
@@ -391,6 +483,9 @@ namespace mwmp
     void ActorSync::onActorAttack(const ActorList& list)
     {
         auto& cell = mCells[list.cellId];
+        if (!shouldAcceptSnapshot(cell, list, "ActorAttack"))
+            return;
+
         Log(Debug::Info) << "[MP] ActorSync: onActorAttack received cellId=" << list.cellId
                          << " actors=" << list.actors.size();
         cell.latest.snapshotSequence = list.snapshotSequence;
@@ -412,6 +507,9 @@ namespace mwmp
     void ActorSync::onActorCast(const ActorList& list)
     {
         auto& cell = mCells[list.cellId];
+        if (!shouldAcceptSnapshot(cell, list, "ActorCast"))
+            return;
+
         Log(Debug::Info) << "[MP] ActorSync: onActorCast received cellId=" << list.cellId
                          << " actors=" << list.actors.size();
         cell.latest.snapshotSequence = list.snapshotSequence;
@@ -434,6 +532,9 @@ namespace mwmp
     void ActorSync::onActorDeath(const ActorList& list)
     {
         auto& cell = mCells[list.cellId];
+        if (!shouldAcceptSnapshot(cell, list, "ActorDeath"))
+            return;
+
         cell.latest.snapshotSequence = list.snapshotSequence;
         cell.latest.serverTimestamp = list.serverTimestamp;
 
@@ -457,6 +558,9 @@ namespace mwmp
     void ActorSync::onActorEquipment(const ActorList& list)
     {
         auto& cell = mCells[list.cellId];
+        if (!shouldAcceptSnapshot(cell, list, "ActorEquipment"))
+            return;
+
         cell.latest.snapshotSequence = list.snapshotSequence;
         cell.latest.serverTimestamp = list.serverTimestamp;
 
@@ -471,6 +575,9 @@ namespace mwmp
     void ActorSync::onActorStatsDynamic(const ActorList& list)
     {
         auto& cell = mCells[list.cellId];
+        if (!shouldAcceptSnapshot(cell, list, "ActorStatsDynamic"))
+            return;
+
         cell.latest.snapshotSequence = list.snapshotSequence;
         cell.latest.serverTimestamp = list.serverTimestamp;
 
@@ -489,6 +596,9 @@ namespace mwmp
     void ActorSync::onActorAI(const ActorList& list)
     {
         auto& cell = mCells[list.cellId];
+        if (!shouldAcceptSnapshot(cell, list, "ActorAI"))
+            return;
+
         cell.latest.snapshotSequence = list.snapshotSequence;
         cell.latest.serverTimestamp = list.serverTimestamp;
 
@@ -502,6 +612,10 @@ namespace mwmp
 
     void ActorSync::onActorCombatRequest(const ActorList& list)
     {
+        auto& cell = mCells[list.cellId];
+        if (!shouldAcceptSnapshot(cell, list, "ActorCombatRequest"))
+            return;
+
         const uint32_t localGuid = Main::get().getPlayerSync().localPlayer().guid;
 
         // Handle NPC->player damage: routed to the victim player (us) by the server.
@@ -633,17 +747,38 @@ namespace mwmp
         for (const BaseActor& actorState : list.actors)
         {
             MWWorld::Ptr victim;
-            try
+            auto cellIt = mCells.find(list.cellId);
+            if (cellIt != mCells.end())
             {
-                victim = world->getPtr(ESM::RefId::stringRefId(actorState.refId), false);
+                const std::string actorKey = makeActorKey(actorState);
+                auto runtimeIt = cellIt->second.actors.find(actorKey);
+                if (runtimeIt != cellIt->second.actors.end() && resolveActorBinding(list.cellId, runtimeIt->second))
+                    victim = runtimeIt->second.boundActor;
             }
-            catch (...) {}
+
+            if (victim.isEmpty())
+            {
+                try
+                {
+                    victim = world->getPtr(ESM::RefId::stringRefId(actorState.refId), false);
+                }
+                catch (...) {}
+            }
 
             if (victim.isEmpty())
                 continue;
 
+            MWMechanics::CreatureStats& victimStats = victim.getClass().getCreatureStats(victim);
+            if (victimStats.isDead())
+            {
+                Log(Debug::Info) << "[MP] ActorSync: CombatRequest ignored for dead victim="
+                                 << actorState.refId << " mpNum=" << actorState.mpNum;
+                continue;
+            }
+
             Log(Debug::Info) << "[MP] ActorSync: CombatRequest from guid=" << list.authorityGuid
                              << " victim=" << actorState.refId
+                             << " mpNum=" << actorState.mpNum
                              << " attackerEmpty=" << attacker.isEmpty();
 
             // Use startCombat so the NPC enters combat with the attacker unconditionally.
@@ -672,7 +807,6 @@ namespace mwmp
                     // vanilla unarmed damage split on the authority so follow-up
                     // punches against grounded targets stay as health damage instead
                     // of reapplying fatigue and pinning the KO state.
-                    const MWMechanics::CreatureStats& victimStats = victim.getClass().getCreatureStats(victim);
                     healthDamage = victimStats.isParalyzed() || victimStats.getKnockedDown();
                 }
 
@@ -698,6 +832,27 @@ namespace mwmp
     {
         auto it = mAuthority.find(cellId);
         return (it != mAuthority.end()) && it->second;
+    }
+
+    uint32_t ActorSync::getActorMpNum(const MWWorld::Ptr& ptr) const
+    {
+        if (ptr.isEmpty() || !ptr.getClass().isActor())
+            return 0;
+
+        const std::string cellId = cellIdForPtr(ptr);
+        if (cellId.empty())
+            return 0;
+
+        return mappedMpNumForPtr(cellId, ptr);
+    }
+
+    MWWorld::Ptr ActorSync::getActorByMpNum(uint32_t mpNum) const
+    {
+        if (mpNum == 0)
+            return MWWorld::Ptr();
+
+        auto it = mServerSpawnedActorsByMpNum.find(mpNum);
+        return it != mServerSpawnedActorsByMpNum.end() ? it->second : MWWorld::Ptr();
     }
 
     void ActorSync::sendCombatRequest(const MWWorld::Ptr& victim, float damage, bool healthDamage, bool knocked,
@@ -731,16 +886,27 @@ namespace mwmp
             return;
         }
 
+        const MWMechanics::CreatureStats& victimStats = victim.getClass().getCreatureStats(victim);
+        if (victimStats.isDead())
+        {
+            Log(Debug::Info) << "[MP] ActorSync: sendCombatRequest skipped: victim is already dead";
+            return;
+        }
+
+        const uint32_t victimMpNum = mappedMpNumForPtr(cellId, victim);
+
         ActorList request;
         request.cellId = cellId;
         request.authorityGuid = Main::get().getPlayerSync().localPlayer().guid;
 
         BaseActor requestedActor;
         requestedActor.refId = victim.getCellRef().getRefId().serializeText();
-        requestedActor.refNum = victim.getCellRef().getRefNum().mIndex;
+        requestedActor.refNum = victimMpNum != 0 ? 0 : victim.getCellRef().getRefNum().mIndex;
+        requestedActor.mpNum = victimMpNum;
         requestedActor.cellId = cellId;
         requestedActor.attack.target = victim.getCellRef().getRefId().serializeText();
-        requestedActor.attack.targetMpNum = 0;
+        requestedActor.attack.targetMpNum = victimMpNum;
+        requestedActor.attack.targetKind = mwmp::Attack::TargetActor;
         requestedActor.attack.hit = true;
         requestedActor.attack.block = false;
         requestedActor.attack.miss = false;
@@ -759,6 +925,7 @@ namespace mwmp
         pkt.setActorList(&request);
         mClient.sendReliable(pkt.encode());
         Log(Debug::Info) << "[MP] ActorSync: sent CombatRequest for victim=" << requestedActor.refId
+                         << " mpNum=" << requestedActor.mpNum
                          << " damage=" << requestedActor.attack.damage
                          << " healthDamage=" << healthDamage
                          << " cellId=" << cellId
@@ -789,6 +956,7 @@ namespace mwmp
         npcActor.refId = npcAttacker.getCellRef().getRefId().serializeText();
         npcActor.refNum = npcAttacker.getCellRef().getRefNum().mIndex;
         npcActor.cellId = cellId;
+        npcActor.attack.targetKind = mwmp::Attack::TargetPlayer;
         npcActor.attack.hit = true;
         npcActor.attack.healthDamage = healthDamage;
         npcActor.attack.damage = damage;
@@ -947,6 +1115,46 @@ namespace mwmp
         }
     }
 
+    void ActorSync::rememberServerSpawnedActor(const std::string& cellId, const MWWorld::Ptr& ptr, uint32_t mpNum)
+    {
+        if (mpNum == 0 || ptr.isEmpty())
+            return;
+
+        mMpNumsByLocalActor[makeLocalActorKey(cellId, ptr)] = mpNum;
+        mServerSpawnedActorsByMpNum[mpNum] = ptr;
+    }
+
+    void ActorSync::forgetServerSpawnedActor(const std::string& cellId, const MWWorld::Ptr& ptr, uint32_t mpNum)
+    {
+        if (!ptr.isEmpty())
+            mMpNumsByLocalActor.erase(makeLocalActorKey(cellId, ptr));
+
+        if (mpNum == 0)
+            return;
+
+        auto it = mServerSpawnedActorsByMpNum.find(mpNum);
+        if (it != mServerSpawnedActorsByMpNum.end() && (ptr.isEmpty() || it->second == ptr))
+            mServerSpawnedActorsByMpNum.erase(it);
+    }
+
+    uint32_t ActorSync::mappedMpNumForPtr(const std::string& cellId, const MWWorld::Ptr& ptr) const
+    {
+        if (ptr.isEmpty())
+            return 0;
+
+        auto localIt = mMpNumsByLocalActor.find(makeLocalActorKey(cellId, ptr));
+        if (localIt != mMpNumsByLocalActor.end())
+            return localIt->second;
+
+        for (const auto& [mpNum, mappedPtr] : mServerSpawnedActorsByMpNum)
+        {
+            if (!mappedPtr.isEmpty() && mappedPtr == ptr)
+                return mpNum;
+        }
+
+        return 0;
+    }
+
     void ActorSync::sendAuthoritativeActorUpdates(const std::string& cellId, CellRuntime& cell, float dt)
     {
         MWBase::World* world = MWBase::Environment::get().getWorld();
@@ -972,6 +1180,13 @@ namespace mwmp
         outgoing.cellId = cell.outboundCellId;
         outgoing.isAuthority = true;
         outgoing.authorityGuid = Main::get().getPlayerSync().localPlayer().guid;
+        std::unordered_set<uint32_t> sentServerSpawnedMpNums;
+
+        for (auto& [actorKey, actor] : cell.actors)
+        {
+            if (actor.state.mpNum != 0)
+                resolveActorBinding(cell.outboundCellId, actor);
+        }
 
         MWWorld::Ptr playerPtr = world->getPlayerPtr();
         targetCell->forEach([&](MWWorld::Ptr ptr) -> bool
@@ -989,6 +1204,14 @@ namespace mwmp
             actor.refId = ptr.getCellRef().getRefId().serializeText();
             actor.refNum = ptr.getCellRef().getRefNum().mIndex;
             actor.cellId = cell.outboundCellId;
+            const uint32_t mappedMpNum = mappedMpNumForPtr(cell.outboundCellId, ptr);
+            if (mappedMpNum != 0)
+            {
+                if (!sentServerSpawnedMpNums.insert(mappedMpNum).second)
+                    return true;
+                actor.mpNum = mappedMpNum;
+                actor.refNum = 0;
+            }
 
             const auto& pos = ptr.getRefData().getPosition();
             for (int i = 0; i < 3; ++i)
@@ -999,38 +1222,39 @@ namespace mwmp
 
             MWMechanics::CreatureStats& stats = ptr.getClass().getCreatureStats(ptr);
             MWMechanics::Movement& movement = ptr.getClass().getMovementSettings(ptr);
+            actor.isDead = stats.isDead();
             actor.animFlags.movementFlags = 0;
-            if (stats.getMovementFlag(MWMechanics::CreatureStats::Flag_Run))
+            if (!actor.isDead && stats.getMovementFlag(MWMechanics::CreatureStats::Flag_Run))
                 actor.animFlags.movementFlags |= AnimFlags::MF_RUN;
-            if (stats.getMovementFlag(MWMechanics::CreatureStats::Flag_Sneak))
+            if (!actor.isDead && stats.getMovementFlag(MWMechanics::CreatureStats::Flag_Sneak))
                 actor.animFlags.movementFlags |= AnimFlags::MF_SNEAK;
             // Capture knockout/knockdown/recovery hit-state so non-authority
             // clients can replicate the correct hit animations, fatigue sign,
             // and damage type (hand-to-hand switches to health damage when
             // the victim is knocked down).
-            if (stats.getKnockedDown())
+            if (!actor.isDead && stats.getKnockedDown())
                 actor.animFlags.movementFlags |= AnimFlags::MF_KNOCKED_DOWN;
-            if (stats.getFatigue().getCurrent() < 0.f || stats.getFatigue().getBase() == 0.f)
+            if (!actor.isDead && (stats.getFatigue().getCurrent() < 0.f || stats.getFatigue().getBase() == 0.f))
                 actor.animFlags.movementFlags |= AnimFlags::MF_KNOCKED_OUT;
-            if (stats.getHitRecovery())
+            if (!actor.isDead && stats.getHitRecovery())
                 actor.animFlags.movementFlags |= AnimFlags::MF_RECOVERY;
             // Capture body-relative movement axes so the remote CC can classify
             // walk/run/strafe animations without needing a separate AnimFlags packet.
-            actor.animFlags.animFwd  = movement.mPosition[1];
-            actor.animFlags.animSide = movement.mPosition[0];
+            actor.animFlags.animFwd  = actor.isDead ? 0.f : movement.mPosition[1];
+            actor.animFlags.animSide = actor.isDead ? 0.f : movement.mPosition[0];
             actor.ai.type = BaseActor::AIAction::Type::None;
             MWMechanics::AiSequence& aiSequence = stats.getAiSequence();
-            if (aiSequence.isInCombat())
+            if (!actor.isDead && aiSequence.isInCombat())
                 actor.ai.type = BaseActor::AIAction::Type::Combat;
             // Use 0.1f threshold to filter out head-tracking micro-inputs that
             // would otherwise trigger locomotion animation on remote clients.
-            actor.isMoving = std::abs(movement.mPosition[0]) > 0.1f
+            actor.isMoving = !actor.isDead && (std::abs(movement.mPosition[0]) > 0.1f
                 || std::abs(movement.mPosition[1]) > 0.1f
                 || std::abs(actor.velocity.linear[0]) > 1.f
-                || std::abs(actor.velocity.linear[1]) > 1.f;
-            actor.hasWeaponDrawn = stats.getDrawState() == MWMechanics::DrawState::Weapon;
-            actor.hasSpellReadied = stats.getDrawState() == MWMechanics::DrawState::Spell;
-            actor.isAttackingOrCasting = stats.getAttackingOrSpell();
+                || std::abs(actor.velocity.linear[1]) > 1.f);
+            actor.hasWeaponDrawn = !actor.isDead && stats.getDrawState() == MWMechanics::DrawState::Weapon;
+            actor.hasSpellReadied = !actor.isDead && stats.getDrawState() == MWMechanics::DrawState::Spell;
+            actor.isAttackingOrCasting = !actor.isDead && stats.getAttackingOrSpell();
             actor.dynamicStats.health.base = stats.getHealth().getBase();
             actor.dynamicStats.health.current = stats.getHealth().getCurrent();
             actor.dynamicStats.health.mod = stats.getHealth().getModifier();
@@ -1040,8 +1264,6 @@ namespace mwmp
             actor.dynamicStats.fatigue.base = stats.getFatigue().getBase();
             actor.dynamicStats.fatigue.current = stats.getFatigue().getCurrent();
             actor.dynamicStats.fatigue.mod = stats.getFatigue().getModifier();
-            actor.isDead = stats.isDead();
-
             // Capture equipped items for visual sync (weapon in hand etc.)
             if (ptr.getClass().hasInventoryStore(ptr))
             {
@@ -1076,24 +1298,47 @@ namespace mwmp
             // Non-authority clients use this to replicate the exact animation (walk,
             // idle variant, etc.) rather than relying on mPosition → CharacterController
             // inference which is unreliable when NPC scripts re-add AI packages each frame.
-            if (MWRender::Animation* animObj = world->getAnimation(ptr))
+            if (!actor.isDead)
             {
-                std::string_view activeGrp = animObj->getActiveGroup(MWRender::BoneGroup_LowerBody);
-                actor.animFlags.currentAnimGroup = std::string(activeGrp);
+                if (MWRender::Animation* animObj = world->getAnimation(ptr))
+                {
+                    std::string_view activeGrp = animObj->getActiveGroup(MWRender::BoneGroup_LowerBody);
+                    actor.animFlags.currentAnimGroup = std::string(activeGrp);
+                }
             }
 
             outgoing.actors.push_back(std::move(actor));
             return true;
         });
 
-        if (!cell.initialListSent)
+        std::unordered_set<std::string> outgoingKeys;
+        outgoingKeys.reserve(outgoing.actors.size());
+        for (const auto& actorState : outgoing.actors)
+            outgoingKeys.insert(makeActorKey(actorState));
+
+        bool actorKeySetChanged = !cell.initialListSent || outgoingKeys.size() != cell.actors.size();
+        if (!actorKeySetChanged)
+        {
+            for (const auto& [actorKey, runtime] : cell.actors)
+            {
+                if (outgoingKeys.find(actorKey) == outgoingKeys.end())
+                {
+                    actorKeySetChanged = true;
+                    break;
+                }
+            }
+        }
+
+        if (actorKeySetChanged)
         {
             PacketActorList listPacket;
             listPacket.setActorList(&outgoing);
             mClient.sendReliable(listPacket.encode());
+            const bool wasInitialList = !cell.initialListSent;
             cell.initialListSent = true;
             Log(Debug::Info) << "[MP] ActorSync: sent ActorList for " << cell.outboundCellId
-                             << " actors=" << outgoing.actors.size();
+                             << " actors=" << outgoing.actors.size()
+                             << " reason=" << (wasInitialList ? "initial" : "keyset");
         }
 
         cell.positionSendTimer += dt;
@@ -1160,13 +1405,10 @@ namespace mwmp
                 if (actor.isDead && !alreadySent)
                 {
                     // Read the death anim group from the base node.
-                    std::string deathGroup;
-                    MWWorld::Ptr deathPtr;
-                    try { deathPtr = world->getPtr(ESM::RefId::stringRefId(actor.refId), false); }
-                    catch (...) {}
-                    if (!deathPtr.isEmpty())
+                    std::string deathGroup = actor.deathAnimGroup;
+                    if (deathGroup.empty() && prevIt != cell.actors.end() && !prevIt->second.boundActor.isEmpty())
                     {
-                        if (auto* baseNode = deathPtr.getRefData().getBaseNode())
+                        if (auto* baseNode = prevIt->second.boundActor.getRefData().getBaseNode())
                             baseNode->getUserValue("mp_death_anim_group", deathGroup);
                     }
 
@@ -1331,10 +1573,13 @@ namespace mwmp
         // and remove actors no longer present.
         {
             std::unordered_set<std::string> currentKeys;
+            std::unordered_set<uint32_t> currentServerSpawnedMpNums;
             for (const auto& actorState : outgoing.actors)
             {
                 const std::string key = makeActorKey(actorState);
                 currentKeys.insert(key);
+                if (actorState.mpNum != 0)
+                    currentServerSpawnedMpNums.insert(actorState.mpNum);
                 cell.actors[key].state = actorState;
                 cell.actors[key].lastAttackingOrCasting = actorState.isAttackingOrCasting;
                 // Mark deathPacketSent if we sent a death packet for this actor
@@ -1347,9 +1592,19 @@ namespace mwmp
             for (auto it = cell.actors.begin(); it != cell.actors.end(); )
             {
                 if (currentKeys.find(it->first) == currentKeys.end())
+                {
+                    if (it->second.state.mpNum != 0
+                        && currentServerSpawnedMpNums.count(it->second.state.mpNum) == 0
+                        && !it->second.boundActor.isEmpty())
+                    {
+                        forgetServerSpawnedActor(cell.outboundCellId, it->second.boundActor, it->second.state.mpNum);
+                    }
                     it = cell.actors.erase(it);
+                }
                 else
+                {
                     ++it;
+                }
             }
         }
         cell.latest = outgoing;
@@ -1361,19 +1616,33 @@ namespace mwmp
         if (!world)
             return false;
 
+        const bool expectsServerSpawn = actor.state.mpNum != 0;
+
         if (!actor.boundActor.isEmpty() && matchesActor(actor.boundActor, actor.state))
         {
-            if (actor.boundActor.getCell() != nullptr)
+            if ((!expectsServerSpawn || mappedMpNumForPtr(cellId, actor.boundActor) == actor.state.mpNum)
+                && actor.boundActor.getCell() != nullptr)
             {
-                const MWWorld::Cell* currentCell = actor.boundActor.getCell()->getCell();
-                if (currentCell != nullptr)
+                if (cellIdForPtr(actor.boundActor) == cellId)
+                    return true;
+            }
+        }
+
+        if (expectsServerSpawn)
+        {
+            auto mappedIt = mServerSpawnedActorsByMpNum.find(actor.state.mpNum);
+            if (mappedIt != mServerSpawnedActorsByMpNum.end())
+            {
+                if (!mappedIt->second.isEmpty()
+                    && matchesActor(mappedIt->second, actor.state)
+                    && cellIdForPtr(mappedIt->second) == cellId)
                 {
-                    const std::string currentCellId = currentCell->isExterior()
-                        ? (std::string("EXT:") + std::to_string(currentCell->getGridX()) + "," + std::to_string(currentCell->getGridY()))
-                        : std::string(currentCell->getNameId());
-                    if (currentCellId == cellId)
-                        return true;
+                    actor.boundActor = mappedIt->second;
+                    rememberServerSpawnedActor(cellId, actor.boundActor, actor.state.mpNum);
+                    return true;
                 }
+
+                mServerSpawnedActorsByMpNum.erase(mappedIt);
             }
         }
 
@@ -1390,19 +1659,68 @@ namespace mwmp
         {
             if (!matchesActor(ptr, actor.state))
                 return true;
+            if (expectsServerSpawn && mappedMpNumForPtr(cellId, ptr) != actor.state.mpNum)
+                return true;
 
             found = ptr;
             return false;
         });
 
-        if (found.isEmpty() && !actor.boundActor.isEmpty())
+        if (found.isEmpty() && !actor.boundActor.isEmpty()
+            && (!expectsServerSpawn || mappedMpNumForPtr(cellId, actor.boundActor) == actor.state.mpNum))
         {
             actor.boundActor = world->moveObject(actor.boundActor, targetCell,
                 osg::Vec3f(actor.state.position.pos[0], actor.state.position.pos[1], actor.state.position.pos[2]));
             found = actor.boundActor;
         }
 
+        if (found.isEmpty() && expectsServerSpawn)
+        {
+            try
+            {
+                MWWorld::ManualRef ref(world->getStore(), ESM::RefId::stringRefId(actor.state.refId), 1);
+                MWWorld::Ptr actorTemplate = ref.getPtr();
+                if (actorTemplate.isEmpty() || !actorTemplate.getClass().isActor())
+                {
+                    Log(Debug::Warning) << "[MP] ActorSync: cannot spawn non-actor refId=" << actor.state.refId;
+                    actor.boundActor = MWWorld::Ptr();
+                    return false;
+                }
+
+                ESM::Position esmPos;
+                for (int i = 0; i < 3; ++i)
+                {
+                    esmPos.pos[i] = actor.state.position.pos[i];
+                    esmPos.rot[i] = actor.state.position.rot[i];
+                }
+
+                found = world->placeObject(actorTemplate, targetCell, esmPos);
+                if (found.isEmpty())
+                {
+                    Log(Debug::Warning) << "[MP] ActorSync: placeObject failed for spawned actor refId="
+                                        << actor.state.refId << " mpNum=" << actor.state.mpNum;
+                    actor.boundActor = MWWorld::Ptr();
+                    return false;
+                }
+
+                rememberServerSpawnedActor(cellId, found, actor.state.mpNum);
+                Log(Debug::Info) << "[MP] ActorSync: spawned actor refId=" << actor.state.refId
+                                 << " mpNum=" << actor.state.mpNum
+                                 << " cell=" << cellId;
+            }
+            catch (const std::exception& e)
+            {
+                Log(Debug::Verbose) << "[MP] ActorSync: delaying actor spawn for refId=" << actor.state.refId
+                                    << " mpNum=" << actor.state.mpNum
+                                    << " reason=" << e.what();
+                actor.boundActor = MWWorld::Ptr();
+                return false;
+            }
+        }
+
         actor.boundActor = found;
+        if (expectsServerSpawn)
+            rememberServerSpawnedActor(cellId, actor.boundActor, actor.state.mpNum);
         return !actor.boundActor.isEmpty();
     }
 
@@ -1431,9 +1749,11 @@ namespace mwmp
         // authority's real position happens on the very first frame the authority
         // reports the NPC as no longer knocked, which coincides with the start
         // of the get-up animation.
-        const uint32_t earlyHitFlags = actor.state.animFlags.movementFlags
-            & (AnimFlags::MF_KNOCKED_DOWN | AnimFlags::MF_KNOCKED_OUT | AnimFlags::MF_RECOVERY);
-        const bool skipPositionUpdate = (earlyHitFlags & (AnimFlags::MF_KNOCKED_DOWN | AnimFlags::MF_KNOCKED_OUT)) != 0;
+        const uint32_t earlyHitFlags = actor.state.isDead ? 0
+            : (actor.state.animFlags.movementFlags
+                & (AnimFlags::MF_KNOCKED_DOWN | AnimFlags::MF_KNOCKED_OUT | AnimFlags::MF_RECOVERY));
+        const bool skipPositionUpdate = actor.state.isDead
+            || (earlyHitFlags & (AnimFlags::MF_KNOCKED_DOWN | AnimFlags::MF_KNOCKED_OUT)) != 0;
         if (!skipPositionUpdate)
         {
             actor.boundActor = world->moveObject(actor.boundActor, osg::Vec3f(pos.pos[0], pos.pos[1], pos.pos[2]));
@@ -1446,7 +1766,8 @@ namespace mwmp
         // Only drive movement positions when there is a real locomotion input.
         const float fwdMag  = std::abs(actor.state.animFlags.animFwd);
         const float sideMag = std::abs(actor.state.animFlags.animSide);
-        const bool shouldDriveLocomotion = actor.state.isMoving
+        const bool shouldDriveLocomotion = !actor.state.isDead
+            && actor.state.isMoving
             && (fwdMag > 0.1f || sideMag > 0.1f);
         movement.mPosition[0] = shouldDriveLocomotion ? actor.state.animFlags.animSide : 0.f;
         movement.mPosition[1] = shouldDriveLocomotion ? actor.state.animFlags.animFwd  : 0.f;
@@ -1486,8 +1807,9 @@ namespace mwmp
         stats.setMovementFlag(MWMechanics::CreatureStats::Flag_ForceMoveJump,
             (actor.state.animFlags.movementFlags & AnimFlags::MF_JUMP) != 0);
 
-        const uint32_t hitFlags = actor.state.animFlags.movementFlags
-            & (AnimFlags::MF_KNOCKED_DOWN | AnimFlags::MF_KNOCKED_OUT | AnimFlags::MF_RECOVERY);
+        const uint32_t hitFlags = actor.state.isDead ? 0
+            : (actor.state.animFlags.movementFlags
+                & (AnimFlags::MF_KNOCKED_DOWN | AnimFlags::MF_KNOCKED_OUT | AnimFlags::MF_RECOVERY));
         const bool hitFlagsChanged = (hitFlags != actor.lastAppliedHitFlags);
         const bool isKnockedOut = (hitFlags & AnimFlags::MF_KNOCKED_OUT) != 0;
         const bool isKnockedDown = (hitFlags & AnimFlags::MF_KNOCKED_DOWN) != 0;

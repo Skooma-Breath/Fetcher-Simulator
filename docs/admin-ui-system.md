@@ -72,9 +72,16 @@ This keeps the UI implementation in standard OpenMW client Lua instead of reintr
 
 ## Current Scope
 
-`/helpmenu` currently opens a two-tab window.
+`/helpmenu` currently opens a three-tab help menu window intended for rapid multiplayer testing.
 
 Opening the menu itself no longer requires admin login, but record mutation actions still do.
+
+The current client-side shell is also much closer to native OpenMW windows than the original rough prototype:
+
+- centered by default on open
+- draggable and resizable in-game
+- scrollable when the current resolution is too small to show the whole window at once
+- styled to match the stock title-bar/border treatment closely enough for iterative UI work
 
 ### Commands Tab
 
@@ -114,6 +121,20 @@ The create form currently supports:
 - generated/permanent scope
 - session/persistent lifetime
 
+### Database Tab
+
+Shows:
+
+- the approved server-side database table catalog
+- paged read-only row browsing for each approved table
+- the same data model used by the loopback web browser
+
+Current goals:
+
+- make live server state and persistence easier to inspect during multiplayer debugging
+- keep read access server-owned and structured instead of exposing direct SQL
+- prepare for later write tooling without coupling the first browser slice to unsafe mutation paths
+
 ## Relationship To RecordDynamic
 
 The admin UI is a frontend over the existing `RecordDynamic` / `recordstore` system.
@@ -138,6 +159,7 @@ Not implemented yet:
 - actor spawn/despawn UI
 - server-memory inspection beyond the current player/record snapshot
 - a web write/admin frontend beyond the current read-only database browser
+- in-game mutation tools for database rows or actor runtime state
 
 There is also no special container/object delete helper in the UI yet, so container-linked cleanup still follows the same server limitations documented in `recorddynamic-system.md`.
 
@@ -183,7 +205,7 @@ The next practical order is:
 
 1. refine the advanced record editor with richer effect editing and type-specific validation feedback
 2. add a live state tab for players, loaded cells, placed objects, and actor authority
-3. extend the `Database` tab with better row formatting and record-linked navigation
+3. extend the `Database` tab and `/admin/` browser with better row formatting and record-linked navigation
 4. add admin actions for placed-object cleanup and future actor spawn/despawn
 5. extend the loopback HTTP API beyond read-only browsing with explicit auth and mutation endpoints when we are ready to expose record actions in the browser
 
@@ -200,7 +222,8 @@ Use this minimal validation pass after restarting the server and client:
 7. confirm it appears in the list immediately
 8. delete an unlinked record from the list
 9. create another record, place it with `/placeat`, then confirm Delete is disabled once `links > 0`
-10. run Sync Meta and GC Unlinked from the UI and confirm the toast/status footer updates
+10. switch to the Database tab and confirm tables/rows load
+11. run Sync Meta and GC Unlinked from the UI and confirm the toast/status footer updates
 
 If the UI opens but does not populate, check:
 

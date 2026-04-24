@@ -175,8 +175,16 @@ namespace mwmp
     // -----------------------------------------------------------------------
     struct Attack
     {
+        enum TargetKind : uint8_t
+        {
+            TargetNone = 0,
+            TargetPlayer = 1,
+            TargetActor = 2,
+        };
+
         std::string target;         // refId of target (empty = none)
         uint32_t    targetMpNum = 0;
+        uint8_t     targetKind = TargetNone;
         float       hitPos[3] = { 0.f, 0.f, 0.f };
         bool        hit     = false;
         bool        block   = false;

@@ -95,13 +95,16 @@ namespace MWGui
         MWWorld::ContainerStore& store = source.getClass().getContainerStore(source);
         mItemSources.emplace_back(source, store.resolveTemporarily());
 
-        if (source.getType() == ESM::Container::sRecordId)
+        if (source.getType() == ESM::Container::sRecordId
+            || (source.getClass().isActor() && source.getClass().getCreatureStats(source).isDead()))
         {
             mSyncInfo.enabled = true;
             mSyncInfo.cellId = makeCellId(source);
             mSyncInfo.refId = source.getCellRef().getRefId().serializeText();
             mSyncInfo.refNum = source.getCellRef().getRefNum().mIndex;
             mSyncInfo.mpNum = mwmp::Main::get().getWorldObjectSync().getMpNumForObject(source);
+            if (mSyncInfo.cellId.empty())
+                mSyncInfo.enabled = false;
         }
     }
 
@@ -219,6 +222,9 @@ namespace MWGui
         mItems.clear();
         for (auto& source : mItemSources)
         {
+            if (source.first.isEmpty())
+                continue;
+
             MWWorld::ContainerStore& store = source.first.getClass().getContainerStore(source.first);
 
             for (MWWorld::ContainerStoreIterator it = store.begin(); it != store.end(); ++it)

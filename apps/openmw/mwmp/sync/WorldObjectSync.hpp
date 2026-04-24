@@ -42,6 +42,10 @@ namespace mwmp
         // Called when the local player picks up or otherwise deletes an MP-placed object.
         void onLocalObjectDeleted(const MWWorld::Ptr& ptr);
 
+        // Called when the local player clicks the vanilla Dispose of Corpse button
+        // for a dead server-spawned actor corpse.
+        void onLocalCorpseDisposed(const MWWorld::Ptr& ptr);
+
         // Called when the local player opens a container.
         // Sends action=Set with its current contents so the server can take authority.
         void onLocalContainerOpened(const std::string& cellId,

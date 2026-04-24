@@ -37,6 +37,8 @@ namespace mwmp
         void onActorCombatRequest(const ActorList& list);
 
         bool hasAuthority(const std::string& cellId) const;
+        uint32_t getActorMpNum(const MWWorld::Ptr& ptr) const;
+        MWWorld::Ptr getActorByMpNum(uint32_t mpNum) const;
         void sendCombatRequest(const MWWorld::Ptr& victim, float damage, bool healthDamage, bool knocked,
             const osg::Vec3f& hitPos, int attackType, float attackStrength);
         void sendNpcPlayerDamage(uint32_t victimGuid, float damage, bool healthDamage, bool isDead, int attackType,
@@ -110,12 +112,18 @@ namespace mwmp
         void mergeActorState(ActorRuntime& actor, const BaseActor& state, bool includeTransform);
         void advanceSmoothing(ActorRuntime& actor, float dt);
         void sendAuthoritativeActorUpdates(const std::string& cellId, CellRuntime& cell, float dt);
+        bool shouldAcceptSnapshot(CellRuntime& cell, const ActorList& list, const char* packetName);
         bool resolveActorBinding(const std::string& cellId, ActorRuntime& actor);
         void applyBoundActorState(ActorRuntime& actor);
+        void rememberServerSpawnedActor(const std::string& cellId, const MWWorld::Ptr& ptr, uint32_t mpNum);
+        void forgetServerSpawnedActor(const std::string& cellId, const MWWorld::Ptr& ptr, uint32_t mpNum);
+        uint32_t mappedMpNumForPtr(const std::string& cellId, const MWWorld::Ptr& ptr) const;
 
         NetworkClient& mClient;
         std::unordered_map<std::string, CellRuntime> mCells;
         std::unordered_map<std::string, bool>        mAuthority;
+        std::unordered_map<std::string, uint32_t>    mMpNumsByLocalActor;
+        std::unordered_map<uint32_t, MWWorld::Ptr>   mServerSpawnedActorsByMpNum;
     };
 
 } // namespace mwmp

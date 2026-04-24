@@ -29,6 +29,9 @@
 #include "../mwbase/scriptmanager.hpp"
 #include "../mwbase/windowmanager.hpp"
 
+#include "../mwmp/Main.hpp"
+#include "../mwmp/sync/WorldObjectSync.hpp"
+
 #include "../mwworld/class.hpp"
 #include "../mwworld/esmstore.hpp"
 
@@ -37,6 +40,19 @@ namespace
     bool isWhitespace(MyGUI::UString::code_point c)
     {
         return c == ' ' || c == '\t';
+    }
+
+    std::string makeConsoleUniqueIndex(const MWWorld::Ptr& ptr)
+    {
+        if (ptr.isEmpty())
+            return {};
+
+        uint32_t mpNum = 0;
+        if (mwmp::Main::isInitialised())
+            mpNum = mwmp::Main::get().getWorldObjectSync().getMpNumForObject(ptr);
+
+        const uint32_t refNum = (mpNum != 0) ? 0 : ptr.getCellRef().getRefNum().mIndex;
+        return std::to_string(refNum) + "-" + std::to_string(mpNum);
     }
 }
 
@@ -806,7 +822,8 @@ namespace MWGui
         if (!mConsoleMode.empty())
             title = mConsoleMode + " " + title;
         if (!mPtr.isEmpty())
-            title.append(" (" + mPtr.getCellRef().getRefId().toDebugString() + ")");
+            title.append(
+                " (" + mPtr.getCellRef().getRefId().toDebugString() + " " + makeConsoleUniqueIndex(mPtr) + ")");
         setTitle(title);
     }
 

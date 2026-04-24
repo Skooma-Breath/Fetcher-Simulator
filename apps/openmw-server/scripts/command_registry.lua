@@ -163,7 +163,7 @@ local COMMANDS = {
         id = "spawnat",
         category = "Admin",
         usage = "/spawnat <refId|\"ref id\"> [distance] [direction] [refNum] [mpNum]",
-        summary = "Spawn a server-authoritative actor placeholder.",
+        summary = "Spawn a server-authoritative actor in your current cell.",
         adminOnly = true,
     },
     {

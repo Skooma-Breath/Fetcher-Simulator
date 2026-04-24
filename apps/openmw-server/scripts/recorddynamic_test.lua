@@ -251,11 +251,15 @@ local function formatPlaceHint(prefix, recordType, recordId)
         return definition.hint
     end
 
+    if recordType == "npc" or recordType == "creature" then
+        return "use " .. prefix .. "spawnat " .. recordId
+    end
+
     if definition and definition.canPlace then
         return "use " .. prefix .. "placeat " .. recordId
     end
 
-    return "/spawnat still needs actor authority"
+    return "no direct placement command for this record type"
 end
 
 local function buildMagicEffects(presetName)

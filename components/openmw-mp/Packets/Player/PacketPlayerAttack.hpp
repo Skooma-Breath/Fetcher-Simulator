@@ -16,8 +16,10 @@ namespace mwmp
     //
     // Client receive:
     //   1. Resolve attacker NPC Ptr from guid.
-    //   2. Resolve target: if targetMpNum != 0 look up remote player NPC;
-    //      otherwise look up world object by refId.
+    //   2. Resolve target using Attack::targetKind:
+    //      TargetPlayer -> local/remote player by guid
+    //      TargetActor  -> spawned actor by mpNum
+    //      TargetNone   -> refId-only cosmetic fallback
     //   3. If hit == true, apply the authoritative resolved hit locally.
     //   4. Keep the remote attack animation in sync using the chosen attack type.
     // -----------------------------------------------------------------------
@@ -32,6 +34,7 @@ namespace mwmp
             ws.write(mPlayer->guid);
             ws.writeString(mPlayer->attack.target);
             ws.write(mPlayer->attack.targetMpNum);
+            ws.write(mPlayer->attack.targetKind);
             ws.write(mPlayer->attack.hitPos[0]);
             ws.write(mPlayer->attack.hitPos[1]);
             ws.write(mPlayer->attack.hitPos[2]);
@@ -52,6 +55,7 @@ namespace mwmp
             rs.read(mPlayer->guid);
             mPlayer->attack.target     = rs.readString();
             rs.read(mPlayer->attack.targetMpNum);
+            rs.read(mPlayer->attack.targetKind);
             rs.read(mPlayer->attack.hitPos[0]);
             rs.read(mPlayer->attack.hitPos[1]);
             rs.read(mPlayer->attack.hitPos[2]);

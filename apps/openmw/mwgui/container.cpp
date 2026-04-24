@@ -188,6 +188,7 @@ namespace MWGui
         bool loot = mPtr.getClass().isActor() && mPtr.getClass().getCreatureStats(mPtr).isDead();
 
         std::unique_ptr<ItemModel> model;
+        bool shouldSyncOpen = false;
         if (mPtr.getClass().hasInventoryStore(mPtr))
         {
             if (mPtr.getClass().isNpc() && !loot && !lootAnyway)
@@ -197,18 +198,23 @@ namespace MWGui
                     !mPtr.getClass().getCreatureStats(mPtr).getKnockedDown());
             }
             else
+            {
                 model = std::make_unique<InventoryItemModel>(container);
+                shouldSyncOpen = loot;
+            }
         }
         else
         {
             model = std::make_unique<ContainerItemModel>(container);
+            shouldSyncOpen = true;
+        }
 
+        if (shouldSyncOpen)
             mwmp::Main::get().getWorldObjectSync().onLocalContainerOpened(
                 makeCellId(container),
                 container.getCellRef().getRefId().serializeText(),
                 container.getCellRef().getRefNum().mIndex,
                 mwmp::Main::get().getWorldObjectSync().getMpNumForObject(container));
-        }
 
         mDisposeCorpseButton->setVisible(loot);
         mModel = model.get();
@@ -289,6 +295,8 @@ namespace MWGui
 
         if (auto* containerModel = dynamic_cast<ContainerItemModel*>(mModel))
             containerModel->beginSyncBatch(mwmp::ContainerAction::Remove);
+        else if (auto* inventoryModel = dynamic_cast<InventoryItemModel*>(mModel))
+            inventoryModel->beginSyncBatch(mwmp::ContainerAction::Remove);
 
         for (size_t i = 0; i < mModel->getItemCount(); ++i)
         {
@@ -310,6 +318,8 @@ namespace MWGui
 
         if (auto* containerModel = dynamic_cast<ContainerItemModel*>(mModel))
             containerModel->endSyncBatch();
+        else if (auto* inventoryModel = dynamic_cast<InventoryItemModel*>(mModel))
+            inventoryModel->endSyncBatch();
 
         MWBase::Environment::get().getWindowManager()->removeGuiMode(GM_Container);
     }
@@ -328,6 +338,8 @@ namespace MWGui
                 MWBase::Environment::get().getWindowManager()->messageBox("#{sDisposeCorpseFail}");
             else
             {
+                mwmp::Main::get().getWorldObjectSync().onLocalCorpseDisposed(ptr);
+
                 MWMechanics::CreatureStats& creatureStats = ptr.getClass().getCreatureStats(ptr);
 
                 // If we dispose corpse before end of death animation, we should update death counter counter manually.

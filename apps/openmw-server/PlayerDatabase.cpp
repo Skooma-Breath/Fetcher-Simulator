@@ -1456,6 +1456,46 @@ void PlayerDatabase::deleteDynamicRecordLinks(std::string_view recordId)
     sqlite3_finalize(s);
 }
 
+void PlayerDatabase::upsertSpawnedActorDynamicRecordLink(
+    std::string_view recordId, std::string_view cellId, uint32_t mpNum)
+{
+    if (recordId.empty() || cellId.empty() || mpNum == 0)
+        return;
+
+    const std::string ownerA = std::to_string(mpNum);
+
+    sqlite3_stmt* insertLink = prepare(
+        "INSERT OR REPLACE INTO world_dynamic_record_links(record_id, link_kind, owner_a, owner_b, owner_c, owner_index)"
+        " VALUES(?1, ?2, ?3, ?4, ?5, ?6)");
+    insertDynamicRecordLink(mDb, insertLink, recordId, "spawned_actor", ownerA, cellId, "", 0);
+    sqlite3_finalize(insertLink);
+}
+
+void PlayerDatabase::deleteSpawnedActorDynamicRecordLink(uint32_t mpNum, std::string_view cellId)
+{
+    if (mpNum == 0)
+        return;
+
+    const std::string ownerA = std::to_string(mpNum);
+
+    sqlite3_stmt* s = prepare(
+        "DELETE FROM world_dynamic_record_links"
+        " WHERE link_kind=?1 AND owner_a=?2 AND (?3='' OR owner_b=?3)");
+    sqlite3_bind_text(s, 1, "spawned_actor", -1, SQLITE_STATIC);
+    sqlite3_bind_text(s, 2, ownerA.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(s, 3, cellId.data(), static_cast<int>(cellId.size()), SQLITE_TRANSIENT);
+    checkSqlite(sqlite3_step(s), mDb, "deleteSpawnedActorDynamicRecordLink");
+    sqlite3_finalize(s);
+}
+
+void PlayerDatabase::clearSpawnedActorDynamicRecordLinks()
+{
+    sqlite3_stmt* s = prepare("DELETE FROM world_dynamic_record_links WHERE link_kind=?1");
+    sqlite3_bind_text(s, 1, "spawned_actor", -1, SQLITE_STATIC);
+    checkSqlite(sqlite3_step(s), mDb, "clearSpawnedActorDynamicRecordLinks");
+    sqlite3_finalize(s);
+}
+
 void PlayerDatabase::replaceDynamicRecordDependencies(
     std::string_view ownerRecordType, std::string_view ownerRecordId, const std::vector<std::string>& dependencyRecordIds)
 {

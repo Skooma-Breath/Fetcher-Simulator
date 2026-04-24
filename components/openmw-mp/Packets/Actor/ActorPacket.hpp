@@ -192,6 +192,7 @@ namespace mwmp
         {
             ws.writeString(attack.target);
             ws.write(attack.targetMpNum);
+            ws.write(attack.targetKind);
             ws.write(attack.hitPos[0]);
             ws.write(attack.hitPos[1]);
             ws.write(attack.hitPos[2]);
@@ -211,6 +212,7 @@ namespace mwmp
         {
             attack.target = rs.readString();
             rs.read(attack.targetMpNum);
+            rs.read(attack.targetKind);
             rs.read(attack.hitPos[0]);
             rs.read(attack.hitPos[1]);
             rs.read(attack.hitPos[2]);

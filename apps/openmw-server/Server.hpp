@@ -294,6 +294,11 @@ private:
     };
 
     // ── State ─────────────────────────────────────────────────────────────
+    ActorRegistryRecord* findTrackedActor(CellActorState& cellState,
+        const BaseActor& actor,
+        const ConnectedClient& sender,
+        const char* packetName);
+
     ISteamNetworkingSockets* mInterface    = nullptr;
     HSteamListenSocket       mListenSocket = k_HSteamListenSocket_Invalid;
     HSteamNetPollGroup       mPollGroup    = k_HSteamNetPollGroup_Invalid;
@@ -346,6 +351,7 @@ private:
         std::unordered_map<std::string, StoredDynamicRecord> dynamicRecords;
         std::unordered_map<std::string, CellActorState> actorCells;
         uint32_t nextObjectMpNum = 1;
+        uint32_t nextActorMpNum = 1;
         uint64_t nextDynamicRecordSequence = 1;
 
         // Weather — reported by the host (guid 1) and relayed to others.

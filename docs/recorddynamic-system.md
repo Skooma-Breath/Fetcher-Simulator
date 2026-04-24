@@ -6,7 +6,7 @@
 
 The current implementation is intended to support:
 
-- Server-created custom records referenced by placed objects and future spawned actors
+- Server-created custom records referenced by placed objects and spawned actors
 - Stable explicit record IDs shared across all clients
 - Persistence of shared records across server restarts
 - A migration path toward TES3MP-style generated vs permanent record handling
@@ -191,7 +191,7 @@ What this means in practice:
 Current limitation:
 
 - The link table currently tracks persisted references, but there is not yet a full higher-level GC policy deciding when an unreferenced generated record should be hard-deleted automatically
-- Runtime-only links for future spawned actors still need to be added when `/spawnat` exists
+- Spawned actor links are runtime-only and are cleared on server restart because spawned actors are not yet persisted as world state
 
 ## Lua API
 
@@ -447,16 +447,28 @@ Compared to TES3MP:
 - TES3MP provides dynamic-record transport and record authoring helpers, but it does not provide this same explicit persisted catalog/link-count model
 - OpenMW should therefore keep the stronger catalog/link policy instead of trying to preserve TES3MP's looser lifecycle behavior
 
-## Relationship to `/placeat` and Future `/spawnat`
+## Relationship to `/placeat` and `/spawnat`
 
 `/placeat` can now rely on shared dynamic records because clients receive the custom record definition before placed-object replay.
 
-For future `/spawnat` actor work, the intended flow is:
+`/spawnat` is now the live actor-spawn path for synced static and dynamic actor records.
+
+Current flow:
 
 1. Create or reuse a dynamic `npc` or `creature` record
 2. Sync that record through `RecordDynamic`
 3. Spawn the actor instance using server authority
-4. Add runtime link tracking so the actor instance keeps its generated dependencies alive until despawn or cleanup
+4. Insert the actor into the authoritative server actor registry and broadcast it through `ActorList`
+5. Route non-authority hits through `ActorCombatRequest` using the exact spawned-actor `mpNum`
+6. Keep runtime link tracking so the actor instance keeps its generated dependencies alive until despawn, removal, or restart
+
+Current corpse behavior for spawned actors:
+
+- dead spawned actors can be activated by non-authority players
+- first activate opens the corpse container, even when it is empty
+- corpse inventory snapshots and container deltas flow through the server-owned container sync path
+- `Dispose of Corpse` sends an explicit multiplayer dispose request instead of relying on local object deletion side effects
+- the server removes the corpse authoritatively only after the corpse container is empty
 
 This avoids relying on client-local `world.createRecord` IDs, which are not multiplayer-safe.
 
@@ -552,13 +564,17 @@ Recommended next slices, updated to reflect current progress:
      - added Lua bindings for spawning and removing authoritative actors
      - added admin `/spawnat <refId> [distance] [direction] [refNum] [mpNum]`
      - spawned actors are inserted into the existing server `actorCells` registry and broadcast through `ActorList`
+     - clients now create missing server-spawned actors from `ActorList` when the actor has a server `mpNum`
+     - `/spawnat` now server-assigns actor `mpNum` when omitted or passed as `0`
+     - dynamic `npc` and `creature` records are re-sent to the cell immediately before the spawn `ActorList`
+     - spawned dynamic actors create `spawned_actor` links so generated actor records stay alive until despawn, disappearance from authoritative actor lists, or server restart
+     - non-authority combat now identifies spawned actors by exact `mpNum` and no longer relies on coarse `refId` hit replay
+     - spawned actor corpse open/loot/dispose flow is now synced across clients through the server container/dispose path
    - current limitation:
-     - this is an initial authoritative actor-spawn foundation, not a full dynamic-actor lifecycle yet
+     - spawned actors are still runtime-only; they are not persisted across server restart
    - remaining work:
-     - sync dynamic actor records before spawn when the `refId` is a custom `npc` or `creature`
-     - add runtime link ownership for spawned actors
-     - unlink on despawn/reset/removal
-     - decide whether actor ids should be server-assigned automatically instead of relying on optional admin-provided `refNum`/`mpNum`
+     - add an admin despawn command/UI flow around the existing remove binding
+     - persist spawned actors only if/when we decide they should become durable world state
 
 5. Keep the persistence policy aligned with implementation
    - status: decided and partially encoded
@@ -692,8 +708,12 @@ Use this exact order in the next multiplayer test session.
    - create or reuse a dynamic `npc` or `creature` record id if desired
    - run `/spawnat <recordId>` or `/spawnat <baseActorId>`
    - confirm the server logs the authoritative actor spawn
-   - confirm clients in the cell receive the actor through `ActorList`
-   - confirm `/spawnat` currently provides authoritative actor placement, even though full runtime dependency ownership is still pending
+   - confirm clients in the cell receive and visibly create the actor through `ActorList`
+   - for dynamic actor records, confirm `world_dynamic_record_links` shows a `spawned_actor` row while the actor exists
+   - kill at least one spawned actor from the non-authority client and confirm:
+     - one death event is accepted for the killed actor
+     - the corpse container opens correctly
+     - looting and `Dispose of Corpse` remove the corpse for both clients
 12. Verify forced-removal policy:
    - create or keep one generated record that still has links
    - run the normal remove path and confirm it soft-fails while links remain
@@ -729,24 +749,24 @@ Implemented or effectively present in the current working tree:
 - lifetime validation for cross-record dependencies
 - richer magic test helpers with non-empty effect presets
 - admin/test commands for spell and trap authoring flows
-- initial authoritative `/spawnat` support backed by the server actor registry and `ActorList` broadcast path
-- `openmw-server` now builds successfully in the existing `MSVC2022_64` build tree for the `Debug` configuration after these changes
+- authoritative `/spawnat` support backed by the server actor registry, client-side actor creation from `ActorList`, dynamic actor record replay, server-assigned actor mpNums, and runtime `spawned_actor` links
+- exact spawned-actor combat routing via `ActorCombatRequest` and actor `mpNum`
+- synced corpse open/loot/dispose handling for spawned actors, including vanilla-style `Dispose of Corpse` gating on an empty container
+- `openmw-server` and `openmw` now build successfully in the existing `MSVC2022_64` build tree for the `RelWithDebInfo` configuration after these changes
 - test/admin commands for record creation, inspection, sync, and GC
 
 Still remaining after this session:
 
-1. runtime link tracking for spawned actors and future cell-reset unlinking
-2. syncing dynamic `npc` and `creature` records automatically before actor spawn when `/spawnat` uses custom actor ids
-3. future actor inventory/spell dependency extraction and validation
-4. validation that container-related automatic GC behavior is safe in all live multiplayer cases
-5. any batching/rate-limiting or observability polish needed for larger auto-GC waves
-6. deciding whether actor ids should be fully server-assigned for `/spawnat`
-7. broader cleanup/reset participation for future despawn and cell-reset flows
-8. broader full-project build/test coverage beyond the successfully built `openmw-server` target
+1. admin despawn command/UI flow around spawned actor removal
+2. future actor inventory/spell dependency extraction and validation
+3. validation that container-related automatic GC behavior is safe in all live multiplayer cases
+4. any batching/rate-limiting or observability polish needed for larger auto-GC waves
+5. deciding whether spawned actors should remain runtime-only or become persisted world state
+6. broader cleanup/reset participation for future despawn and cell-reset flows
+7. broader full-project build/test coverage beyond the successfully built `openmw-server` and `openmw` targets
 
 Recommended next implementation order:
 
-1. actor runtime link tracking plus despawn/reset unlinking
-2. automatic dynamic actor-record sync for `/spawnat`
-3. future actor inventory/spell dependency helpers and validation
-4. cell-reset/runtime unlink integration and auto-GC polish
+1. admin despawn command/UI flow
+2. future actor inventory/spell dependency helpers and validation
+3. cell-reset/runtime unlink integration and auto-GC polish

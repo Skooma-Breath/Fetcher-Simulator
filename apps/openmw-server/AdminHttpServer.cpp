@@ -973,6 +973,13 @@ namespace
                 <td>Currently unused, normally <code>0</code></td>
               </tr>
               <tr>
+                <td><code>spawned_actor</code></td>
+                <td>Spawned actor's server <code>mpNum</code></td>
+                <td>Cell id</td>
+                <td>Empty</td>
+                <td>Currently unused, normally <code>0</code></td>
+              </tr>
+              <tr>
                 <td><code>container_parent</code></td>
                 <td>Cell id</td>
                 <td>Container ref id</td>

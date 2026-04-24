@@ -1,6 +1,12 @@
 #ifndef MWGUI_INVENTORY_ITEM_MODEL_H
 #define MWGUI_INVENTORY_ITEM_MODEL_H
 
+#include <optional>
+#include <string>
+#include <vector>
+
+#include <components/openmw-mp/Base/BaseObject.hpp>
+
 #include "itemmodel.hpp"
 
 namespace MWGui
@@ -22,6 +28,8 @@ namespace MWGui
             const ItemStack& item, size_t count, ItemModel* otherModel, bool allowAutoEquip = true) override;
 
         void update() override;
+        void beginSyncBatch(mwmp::ContainerAction action);
+        void endSyncBatch();
 
         bool usesContainer(const MWWorld::Ptr& container) override;
 
@@ -33,7 +41,22 @@ namespace MWGui
         MWWorld::Ptr mActor;
 
     private:
+        struct SyncInfo
+        {
+            bool enabled = false;
+            std::string cellId;
+            std::string refId;
+            uint32_t refNum = 0;
+            uint32_t mpNum = 0;
+        };
+
+        void queueContainerDelta(mwmp::ContainerAction action, const MWWorld::Ptr& item, int count);
+        void flushSyncBatch();
+
         std::vector<ItemStack> mItems;
+        SyncInfo mSyncInfo;
+        std::optional<mwmp::ContainerAction> mBatchAction;
+        std::vector<mwmp::ContainerItem> mBatchItems;
     };
 
 }

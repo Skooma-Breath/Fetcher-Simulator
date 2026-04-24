@@ -282,7 +282,7 @@ local function sendSpawnAtUsage(player)
     player:sendMessage("Usage: /spawnat <refId|\"ref id\"> [distance] [direction] [refNum] [mpNum]")
     player:sendMessage("Quote refIds that contain spaces, for example /spawnat \"fargoth\"")
     player:sendMessage("direction: 0=front, 1=back, 2=left, 3=right")
-    player:sendMessage("refNum/mpNum default to 0 when omitted")
+    player:sendMessage("refNum defaults to 0; mpNum defaults to server-assigned")
 end
 
 local function resolveVerifiedTarget(object)
@@ -822,13 +822,14 @@ local function handleChat(player, data)
             return false
         end
 
+        local mpNumLabel = (mpNum == 0) and "auto" or tostring(mpNum)
         player:sendMessage(string.format(
-            "Spawned actor %s in %s at distance %.1f direction %d (refNum=%d mpNum=%d).",
-            refId, cellId, distance, direction, refNum, mpNum
+            "Spawned actor %s in %s at distance %.1f direction %d (refNum=%d mpNum=%s).",
+            refId, cellId, distance, direction, refNum, mpNumLabel
         ))
         mp.log(string.format(
-            "[core] /spawnat by %s refId=%s cell=%s distance=%.1f direction=%d refNum=%d mpNum=%d",
-            player.name, refId, cellId, distance, direction, refNum, mpNum
+            "[core] /spawnat by %s refId=%s cell=%s distance=%.1f direction=%d refNum=%d mpNum=%s",
+            player.name, refId, cellId, distance, direction, refNum, mpNumLabel
         ))
         return false
     end

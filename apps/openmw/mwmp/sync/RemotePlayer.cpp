@@ -52,6 +52,7 @@
 #include <components/sceneutil/positionattitudetransform.hpp>
 
 #include "../Main.hpp"
+#include "ActorSync.hpp"
 #include "PlayerSync.hpp"
 
 namespace mwmp
@@ -1541,7 +1542,8 @@ namespace mwmp
                          << " miss=" << atk.miss << " type=" << atk.type
                          << " anim='" << atk.attackAnimation << "'"
                          << " target='" << atk.target << "'"
-                         << " targetMpNum=" << atk.targetMpNum;
+                         << " targetMpNum=" << atk.targetMpNum
+                         << " targetKind=" << static_cast<int>(atk.targetKind);
 
         // Push the animation type onto the NPC's base node so the CC receive hook
         // in character.cpp (Flag_NetworkPlayerNpc branch) reads it when it enters
@@ -1571,24 +1573,32 @@ namespace mwmp
                 return;
 
             MWWorld::Ptr targetPtr;
-            if (atk.targetMpNum != 0)
+            bool targetIsNetworkPlayer = false;
+            bool targetIsActor = false;
+            if (atk.targetKind == Attack::TargetPlayer && atk.targetMpNum != 0)
             {
                 if (atk.targetMpNum == Main::get().getPlayerSync().localPlayer().guid)
-                    targetPtr = world->getPlayerPtr();
-                else if (auto* rp = Main::get().getPlayerList().getPlayer(atk.targetMpNum))
-                    targetPtr = rp->getNpcPtr();
-            }
-
-            if (targetPtr.isEmpty() && !atk.target.empty())
-            {
-                try
                 {
-                    targetPtr = world->getPtr(ESM::RefId::stringRefId(atk.target), false);
+                    targetPtr = world->getPlayerPtr();
+                    targetIsNetworkPlayer = true;
                 }
-                catch (...) {}
+                else if (auto* rp = Main::get().getPlayerList().getPlayer(atk.targetMpNum))
+                {
+                    targetPtr = rp->getNpcPtr();
+                    targetIsNetworkPlayer = true;
+                }
+            }
+            else if (atk.targetKind == Attack::TargetActor && atk.targetMpNum != 0 && Main::isInitialised())
+            {
+                targetPtr = Main::get().getActorSync().getActorByMpNum(atk.targetMpNum);
+                targetIsActor = !targetPtr.isEmpty();
             }
 
-            if (!targetPtr.isEmpty())
+            // Actor gameplay hits are authoritative through ActorCombatRequest.
+            // Replaying a second local onHit from the coarse PlayerAttack target
+            // string can hit an unrelated actor with the same refId (e.g. another
+            // spawned scrib) and synthesize duplicate deaths on the authority client.
+            if (targetIsNetworkPlayer && !targetPtr.isEmpty())
             {
                 const osg::Vec3f hitPos(atk.hitPos[0], atk.hitPos[1], atk.hitPos[2]);
                 const MWMechanics::DamageSourceType sourceType
@@ -1601,6 +1611,26 @@ namespace mwmp
                 if (atk.healthDamage && targetPtr == world->getPlayerPtr())
                     spawnReplicatedPlayerBloodEffect(targetPtr, hitPos);
                 playReplicatedImpactSound(mNpcPtr, targetPtr, atk);
+            }
+            else if (targetIsActor && !targetPtr.isEmpty())
+            {
+                const osg::Vec3f hitPos(atk.hitPos[0], atk.hitPos[1], atk.hitPos[2]);
+                const MWMechanics::DamageSourceType sourceType
+                    = (atk.type == 2 || atk.type == 3) ? MWMechanics::DamageSourceType::Ranged
+                                                       : MWMechanics::DamageSourceType::Melee;
+                MWWorld::Ptr weapon = getEquippedWeapon(mNpcPtr);
+                MWBase::Environment::get().getLuaManager()->onHit(
+                    mNpcPtr, targetPtr, weapon, MWWorld::Ptr(), atk.type, atk.strength, atk.damage, atk.healthDamage,
+                    hitPos, true, sourceType);
+                if (atk.healthDamage && atk.type != 1)
+                    spawnReplicatedPlayerBloodEffect(targetPtr, hitPos);
+                playReplicatedImpactSound(mNpcPtr, targetPtr, atk);
+            }
+            else if (!atk.target.empty())
+            {
+                Log(Debug::Info) << "[MP] RemotePlayer " << mName
+                                 << ": skipping generic actor hit replay for target='"
+                                 << atk.target << "'";
             }
 
             if (auto* bn = mNpcPtr.getRefData().getBaseNode())
