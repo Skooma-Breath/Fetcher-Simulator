@@ -27,6 +27,7 @@
 #include <vector>
 
 #include <components/openmw-mp/Base/BasePlayer.hpp>
+#include <components/openmw-mp/Base/BaseActor.hpp>
 #include <components/openmw-mp/Base/BaseObject.hpp>
 #include <components/openmw-mp/Base/DynamicRecord.hpp>
 #include <components/openmw-mp/Packets/Object/PacketDoorState.hpp>
@@ -99,6 +100,14 @@ namespace mwmp
         int64_t limit = 0;
         std::vector<std::string> columns;
         std::vector<std::vector<std::optional<std::string>>> rows;
+    };
+
+    struct PersistedSpawnedActor
+    {
+        BaseActor actor;
+        bool persistent = true;
+        int64_t createdAt = 0;
+        int64_t updatedAt = 0;
     };
 
     class PlayerDatabase
@@ -204,6 +213,15 @@ namespace mwmp
 
         /// Delete one multiplayer-placed world object by mpNum.
         void deleteWorldObject(uint32_t mpNum);
+
+        /// Load persistent server-spawned actors.
+        std::vector<PersistedSpawnedActor> loadSpawnedActors();
+
+        /// Insert or update one persistent server-spawned actor.
+        void upsertSpawnedActor(const PersistedSpawnedActor& record);
+
+        /// Delete one server-spawned actor by mpNum.
+        void deleteSpawnedActor(uint32_t mpNum);
 
         /// Load server-authoritative container inventories.
         std::vector<ContainerRecord> loadContainerRecords();

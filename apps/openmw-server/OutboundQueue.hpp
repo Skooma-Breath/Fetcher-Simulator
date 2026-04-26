@@ -38,6 +38,7 @@ enum class OutboundLuaActionType
     SendLuaStorage,
     GrantInventoryItem,
     RemovePlacedObject,
+    RemoveGameObject,
     UpsertDynamicRecord,
     RemoveDynamicRecord,
     SetDynamicRecordDependencies,
@@ -54,6 +55,7 @@ struct OutboundLuaAction
     float worldHour = 0.f;
     int itemCount = 0;
     bool recordPersistent = true;
+    bool actorPersistent = true;
     uint32_t actorRefNum = 0;
     uint32_t actorMpNum = 0;
     Position position;

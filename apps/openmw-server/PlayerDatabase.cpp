@@ -81,6 +81,37 @@ CREATE TABLE IF NOT EXISTS world_objects (
 
 CREATE INDEX IF NOT EXISTS idx_world_objects_cell ON world_objects(cell_id);
 
+CREATE TABLE IF NOT EXISTS world_spawned_actors (
+    mp_num            INTEGER PRIMARY KEY,
+    cell_id           TEXT    NOT NULL,
+    ref_id            TEXT    NOT NULL,
+    ref_num           INTEGER NOT NULL DEFAULT 0,
+    persistent        INTEGER NOT NULL DEFAULT 1,
+    pos_x             REAL    NOT NULL DEFAULT 0,
+    pos_y             REAL    NOT NULL DEFAULT 0,
+    pos_z             REAL    NOT NULL DEFAULT 0,
+    rot_x             REAL    NOT NULL DEFAULT 0,
+    rot_y             REAL    NOT NULL DEFAULT 0,
+    rot_z             REAL    NOT NULL DEFAULT 0,
+    health_base       REAL    NOT NULL DEFAULT 0,
+    health_current    REAL    NOT NULL DEFAULT 0,
+    health_mod        REAL    NOT NULL DEFAULT 0,
+    magicka_base      REAL    NOT NULL DEFAULT 0,
+    magicka_current   REAL    NOT NULL DEFAULT 0,
+    magicka_mod       REAL    NOT NULL DEFAULT 0,
+    fatigue_base      REAL    NOT NULL DEFAULT 0,
+    fatigue_current   REAL    NOT NULL DEFAULT 0,
+    fatigue_mod       REAL    NOT NULL DEFAULT 0,
+    is_dead           INTEGER NOT NULL DEFAULT 0,
+    death_state       INTEGER NOT NULL DEFAULT 0,
+    death_anim_group  TEXT    NOT NULL DEFAULT '',
+    created_at        INTEGER NOT NULL DEFAULT 0,
+    updated_at        INTEGER NOT NULL DEFAULT 0
+);
+
+CREATE INDEX IF NOT EXISTS idx_world_spawned_actors_cell
+    ON world_spawned_actors(cell_id);
+
 CREATE TABLE IF NOT EXISTS world_containers (
     cell_id        TEXT    NOT NULL,
     ref_id         TEXT    NOT NULL,
@@ -282,6 +313,33 @@ static const char* kMigrations[] = {
     "  PRIMARY KEY(record_id, link_kind, owner_a, owner_b, owner_c, owner_index))",
     "CREATE INDEX IF NOT EXISTS idx_world_dynamic_record_links_record"
     " ON world_dynamic_record_links(record_id)",
+    "CREATE TABLE IF NOT EXISTS world_spawned_actors ("
+    "  mp_num INTEGER PRIMARY KEY,"
+    "  cell_id TEXT NOT NULL,"
+    "  ref_id TEXT NOT NULL,"
+    "  ref_num INTEGER NOT NULL DEFAULT 0,"
+    "  persistent INTEGER NOT NULL DEFAULT 1,"
+    "  pos_x REAL NOT NULL DEFAULT 0,"
+    "  pos_y REAL NOT NULL DEFAULT 0,"
+    "  pos_z REAL NOT NULL DEFAULT 0,"
+    "  rot_x REAL NOT NULL DEFAULT 0,"
+    "  rot_y REAL NOT NULL DEFAULT 0,"
+    "  rot_z REAL NOT NULL DEFAULT 0,"
+    "  health_base REAL NOT NULL DEFAULT 0,"
+    "  health_current REAL NOT NULL DEFAULT 0,"
+    "  health_mod REAL NOT NULL DEFAULT 0,"
+    "  magicka_base REAL NOT NULL DEFAULT 0,"
+    "  magicka_current REAL NOT NULL DEFAULT 0,"
+    "  magicka_mod REAL NOT NULL DEFAULT 0,"
+    "  fatigue_base REAL NOT NULL DEFAULT 0,"
+    "  fatigue_current REAL NOT NULL DEFAULT 0,"
+    "  fatigue_mod REAL NOT NULL DEFAULT 0,"
+    "  is_dead INTEGER NOT NULL DEFAULT 0,"
+    "  death_state INTEGER NOT NULL DEFAULT 0,"
+    "  death_anim_group TEXT NOT NULL DEFAULT '',"
+    "  created_at INTEGER NOT NULL DEFAULT 0,"
+    "  updated_at INTEGER NOT NULL DEFAULT 0)",
+    "CREATE INDEX IF NOT EXISTS idx_world_spawned_actors_cell ON world_spawned_actors(cell_id)",
 };
 
 // ============================================================================
@@ -301,6 +359,7 @@ namespace
         { "characters", "id" },
         { "account_keypairs", "id" },
         { "world_objects", "mp_num" },
+        { "world_spawned_actors", "cell_id, mp_num" },
         { "world_containers", "cell_id, ref_id, ref_num" },
         { "world_container_items", "cell_id, ref_id, ref_num, item_index" },
         { "world_doors", "cell_id, ref_id, ref_num" },
@@ -1049,6 +1108,145 @@ void PlayerDatabase::deleteWorldObject(uint32_t mpNum)
         try { exec("ROLLBACK"); } catch (...) {}
         throw;
     }
+}
+
+std::vector<PersistedSpawnedActor> PlayerDatabase::loadSpawnedActors()
+{
+    sqlite3_stmt* s = prepare(
+        "SELECT mp_num, cell_id, ref_id, ref_num, persistent,"
+        " pos_x, pos_y, pos_z, rot_x, rot_y, rot_z,"
+        " health_base, health_current, health_mod,"
+        " magicka_base, magicka_current, magicka_mod,"
+        " fatigue_base, fatigue_current, fatigue_mod,"
+        " is_dead, death_state, death_anim_group, created_at, updated_at"
+        " FROM world_spawned_actors WHERE persistent != 0 ORDER BY cell_id, mp_num");
+
+    std::vector<PersistedSpawnedActor> records;
+    while (sqlite3_step(s) == SQLITE_ROW)
+    {
+        PersistedSpawnedActor record;
+        BaseActor& actor = record.actor;
+        actor.mpNum = static_cast<uint32_t>(sqlite3_column_int64(s, 0));
+
+        auto col = [&](int i) -> std::string {
+            const char* t = reinterpret_cast<const char*>(sqlite3_column_text(s, i));
+            return t ? t : "";
+        };
+
+        actor.cellId = col(1);
+        actor.refId = col(2);
+        actor.refNum = static_cast<uint32_t>(sqlite3_column_int64(s, 3));
+        record.persistent = sqlite3_column_int(s, 4) != 0;
+        actor.position.pos[0] = static_cast<float>(sqlite3_column_double(s, 5));
+        actor.position.pos[1] = static_cast<float>(sqlite3_column_double(s, 6));
+        actor.position.pos[2] = static_cast<float>(sqlite3_column_double(s, 7));
+        actor.position.rot[0] = static_cast<float>(sqlite3_column_double(s, 8));
+        actor.position.rot[1] = static_cast<float>(sqlite3_column_double(s, 9));
+        actor.position.rot[2] = static_cast<float>(sqlite3_column_double(s, 10));
+        actor.dynamicStats.health.base = static_cast<float>(sqlite3_column_double(s, 11));
+        actor.dynamicStats.health.current = static_cast<float>(sqlite3_column_double(s, 12));
+        actor.dynamicStats.health.mod = static_cast<float>(sqlite3_column_double(s, 13));
+        actor.dynamicStats.magicka.base = static_cast<float>(sqlite3_column_double(s, 14));
+        actor.dynamicStats.magicka.current = static_cast<float>(sqlite3_column_double(s, 15));
+        actor.dynamicStats.magicka.mod = static_cast<float>(sqlite3_column_double(s, 16));
+        actor.dynamicStats.fatigue.base = static_cast<float>(sqlite3_column_double(s, 17));
+        actor.dynamicStats.fatigue.current = static_cast<float>(sqlite3_column_double(s, 18));
+        actor.dynamicStats.fatigue.mod = static_cast<float>(sqlite3_column_double(s, 19));
+        actor.isDead = sqlite3_column_int(s, 20) != 0;
+        actor.deathState = static_cast<uint8_t>(sqlite3_column_int(s, 21));
+        actor.deathAnimGroup = col(22);
+        record.createdAt = sqlite3_column_int64(s, 23);
+        record.updatedAt = sqlite3_column_int64(s, 24);
+        actor.equipment.resize(BaseActor::NUM_EQUIPMENT_SLOTS);
+        records.push_back(std::move(record));
+    }
+
+    sqlite3_finalize(s);
+    return records;
+}
+
+void PlayerDatabase::upsertSpawnedActor(const PersistedSpawnedActor& record)
+{
+    const BaseActor& actor = record.actor;
+    if (actor.mpNum == 0 || actor.refId.empty() || actor.cellId.empty())
+        return;
+
+    const int64_t now = static_cast<int64_t>(std::time(nullptr));
+    const int64_t createdAt = record.createdAt != 0 ? record.createdAt : now;
+
+    sqlite3_stmt* s = prepare(
+        "INSERT INTO world_spawned_actors("
+        " mp_num, cell_id, ref_id, ref_num, persistent,"
+        " pos_x, pos_y, pos_z, rot_x, rot_y, rot_z,"
+        " health_base, health_current, health_mod,"
+        " magicka_base, magicka_current, magicka_mod,"
+        " fatigue_base, fatigue_current, fatigue_mod,"
+        " is_dead, death_state, death_anim_group, created_at, updated_at)"
+        " VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11,"
+        " ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25)"
+        " ON CONFLICT(mp_num) DO UPDATE SET"
+        " cell_id=excluded.cell_id,"
+        " ref_id=excluded.ref_id,"
+        " ref_num=excluded.ref_num,"
+        " persistent=excluded.persistent,"
+        " pos_x=excluded.pos_x,"
+        " pos_y=excluded.pos_y,"
+        " pos_z=excluded.pos_z,"
+        " rot_x=excluded.rot_x,"
+        " rot_y=excluded.rot_y,"
+        " rot_z=excluded.rot_z,"
+        " health_base=excluded.health_base,"
+        " health_current=excluded.health_current,"
+        " health_mod=excluded.health_mod,"
+        " magicka_base=excluded.magicka_base,"
+        " magicka_current=excluded.magicka_current,"
+        " magicka_mod=excluded.magicka_mod,"
+        " fatigue_base=excluded.fatigue_base,"
+        " fatigue_current=excluded.fatigue_current,"
+        " fatigue_mod=excluded.fatigue_mod,"
+        " is_dead=excluded.is_dead,"
+        " death_state=excluded.death_state,"
+        " death_anim_group=excluded.death_anim_group,"
+        " updated_at=excluded.updated_at");
+
+    sqlite3_bind_int64(s, 1, actor.mpNum);
+    sqlite3_bind_text(s, 2, actor.cellId.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(s, 3, actor.refId.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_int64(s, 4, actor.refNum);
+    sqlite3_bind_int(s, 5, record.persistent ? 1 : 0);
+    sqlite3_bind_double(s, 6, actor.position.pos[0]);
+    sqlite3_bind_double(s, 7, actor.position.pos[1]);
+    sqlite3_bind_double(s, 8, actor.position.pos[2]);
+    sqlite3_bind_double(s, 9, actor.position.rot[0]);
+    sqlite3_bind_double(s, 10, actor.position.rot[1]);
+    sqlite3_bind_double(s, 11, actor.position.rot[2]);
+    sqlite3_bind_double(s, 12, actor.dynamicStats.health.base);
+    sqlite3_bind_double(s, 13, actor.dynamicStats.health.current);
+    sqlite3_bind_double(s, 14, actor.dynamicStats.health.mod);
+    sqlite3_bind_double(s, 15, actor.dynamicStats.magicka.base);
+    sqlite3_bind_double(s, 16, actor.dynamicStats.magicka.current);
+    sqlite3_bind_double(s, 17, actor.dynamicStats.magicka.mod);
+    sqlite3_bind_double(s, 18, actor.dynamicStats.fatigue.base);
+    sqlite3_bind_double(s, 19, actor.dynamicStats.fatigue.current);
+    sqlite3_bind_double(s, 20, actor.dynamicStats.fatigue.mod);
+    sqlite3_bind_int(s, 21, actor.isDead ? 1 : 0);
+    sqlite3_bind_int(s, 22, actor.deathState);
+    sqlite3_bind_text(s, 23, actor.deathAnimGroup.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_int64(s, 24, createdAt);
+    sqlite3_bind_int64(s, 25, now);
+    checkSqlite(sqlite3_step(s), mDb, "upsertSpawnedActor");
+    sqlite3_finalize(s);
+}
+
+void PlayerDatabase::deleteSpawnedActor(uint32_t mpNum)
+{
+    if (mpNum == 0)
+        return;
+
+    sqlite3_stmt* s = prepare("DELETE FROM world_spawned_actors WHERE mp_num=?1");
+    sqlite3_bind_int64(s, 1, mpNum);
+    checkSqlite(sqlite3_step(s), mDb, "deleteSpawnedActor");
+    sqlite3_finalize(s);
 }
 
 std::vector<ContainerRecord> PlayerDatabase::loadContainerRecords()

@@ -160,10 +160,24 @@ local COMMANDS = {
         adminOnly = true,
     },
     {
+        id = "delete",
+        category = "Admin",
+        usage = "/delete <mpNum> [cell]",
+        summary = "Delete a server-authoritative placed object or spawned actor.",
+        adminOnly = true,
+    },
+    {
         id = "spawnat",
         category = "Admin",
-        usage = "/spawnat <refId|\"ref id\"> [distance] [direction] [refNum] [mpNum]",
+        usage = "/spawnat <refId|\"ref id\"> [distance] [direction] [refNum] [mpNum] [persistent|session]",
         summary = "Spawn a server-authoritative actor in your current cell.",
+        adminOnly = true,
+    },
+    {
+        id = "spawner",
+        category = "Admin",
+        usage = "/spawner create|count|move|list|info|reset|remove ...",
+        summary = "Manage destructible actor-backed spawners.",
         adminOnly = true,
     },
     {

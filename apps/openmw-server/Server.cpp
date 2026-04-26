@@ -1225,7 +1225,7 @@ void MPServer::refreshActorAuthorityForCell(const std::string& cellId, uint32_t 
         std::size_t removedRuntimeActors = 0;
         for (auto it = cellState.actors.begin(); it != cellState.actors.end();)
         {
-            if (it->second.actor.mpNum == 0)
+            if (it->second.actor.mpNum == 0 || it->second.persistent)
             {
                 ++it;
                 continue;
@@ -1359,6 +1359,33 @@ MPServer::ActorRegistryRecord* MPServer::findTrackedActor(CellActorState& cellSt
     return nullptr;
 }
 
+void MPServer::persistSpawnedActorIfNeeded(const ActorRegistryRecord& record)
+{
+    if (!mPlayerDb || !record.persistent || record.actor.mpNum == 0)
+        return;
+
+    PersistedSpawnedActor persisted;
+    persisted.actor = record.actor;
+    persisted.persistent = true;
+    mPlayerDb->upsertSpawnedActor(persisted);
+}
+
+void MPServer::deletePersistedSpawnedActor(uint32_t mpNum)
+{
+    if (!mPlayerDb || mpNum == 0)
+        return;
+
+    mPlayerDb->deleteSpawnedActor(mpNum);
+}
+
+void MPServer::sendActorLifecycleEvent(const char* eventName, const BaseActor& actor, bool persistent)
+{
+    if (std::string_view(eventName) == "spawned")
+        mLua.onActorSpawned(actor, persistent);
+    else if (std::string_view(eventName) == "death")
+        mLua.onActorDeath(actor, persistent);
+}
+
 // ---------------------------------------------------------------------------
 void MPServer::onClientMessage(ConnectedClient& client,
                                const uint8_t* data, size_t size)
@@ -1459,12 +1486,14 @@ void MPServer::loadPersistentWorldState()
 {
     if (!mPlayerDb) return;
 
-    // Spawned actors are runtime-only. Any leftover actor links from a previous
-    // process lifetime must not keep generated actor records alive after restart.
+    // Session-only spawned actor links from a previous process lifetime must not
+    // keep generated actor records alive. Persistent spawned actors recreate
+    // their links after dynamic records are loaded below.
     mPlayerDb->clearSpawnedActorDynamicRecordLinks();
 
     uint32_t maxMpNum = 0;
     std::size_t objectCount = 0;
+    std::size_t spawnedActorCount = 0;
     std::size_t dynamicRecordCount = 0;
     std::vector<DynamicRecordCatalogEntry> dynamicRecordCatalog;
 
@@ -1551,6 +1580,29 @@ void MPServer::loadPersistentWorldState()
         }
     }
 
+    for (const auto& record : mPlayerDb->loadSpawnedActors())
+    {
+        BaseActor actor = record.actor;
+        if (actor.mpNum == 0 || actor.refId.empty() || actor.cellId.empty())
+            continue;
+
+        normalizeActorIdentity(actor);
+        maxMpNum = std::max(maxMpNum, actor.mpNum);
+        auto& cellState = mWorld.actorCells[actor.cellId];
+        cellState.actors[makeActorKey(actor)] = { actor, currentServerTimeMs(), true };
+        ++spawnedActorCount;
+
+        for (const std::string_view recordType : { std::string_view("npc"), std::string_view("creature") })
+        {
+            const auto it = mWorld.dynamicRecords.find(makeDynamicRecordKey(recordType, actor.refId));
+            if (it != mWorld.dynamicRecords.end())
+            {
+                mPlayerDb->upsertSpawnedActorDynamicRecordLink(actor.refId, actor.cellId, actor.mpNum);
+                break;
+            }
+        }
+    }
+
     objectCount = 0;
     for (const auto& [cellId, objects] : mWorld.placedObjects)
         objectCount += objects.size();
@@ -1562,6 +1614,7 @@ void MPServer::loadPersistentWorldState()
 
     Log(Debug::Info) << "[Server] Loaded persistent world state: objects="
                      << objectCount
+                     << " spawnedActors=" << spawnedActorCount
                      << " containers=" << mWorld.containers.size()
                      << " doorCells=" << mWorld.doorStates.size()
                      << " dynamicRecords=" << dynamicRecordCount;
@@ -2794,10 +2847,14 @@ void MPServer::handleActorList(ConnectedClient& c, const uint8_t* data, size_t s
     incoming.serverTimestamp = currentServerTimeMs();
 
     std::unordered_set<uint32_t> previousSpawnedActorMpNums;
+    std::unordered_map<uint32_t, bool> previousSpawnedActorPersistence;
     for (const auto& [key, record] : cellState.actors)
     {
         if (record.actor.mpNum != 0)
+        {
             previousSpawnedActorMpNums.insert(record.actor.mpNum);
+            previousSpawnedActorPersistence[record.actor.mpNum] = record.persistent;
+        }
     }
 
     std::unordered_set<uint32_t> currentSpawnedActorMpNums;
@@ -2808,7 +2865,13 @@ void MPServer::handleActorList(ConnectedClient& c, const uint8_t* data, size_t s
         normalizeActorIdentity(actor);
         if (actor.mpNum != 0)
             currentSpawnedActorMpNums.insert(actor.mpNum);
-        cellState.actors[makeActorKey(actor)] = { actor, incoming.serverTimestamp };
+        const auto persistentIt = previousSpawnedActorPersistence.find(actor.mpNum);
+        const bool persistent = persistentIt != previousSpawnedActorPersistence.end() && persistentIt->second;
+        auto [it, inserted] = cellState.actors.emplace(makeActorKey(actor),
+            ActorRegistryRecord { actor, incoming.serverTimestamp, persistent });
+        if (!inserted)
+            it->second = { actor, incoming.serverTimestamp, persistent };
+        persistSpawnedActorIfNeeded(it->second);
     }
 
     if (mPlayerDb)
@@ -2820,6 +2883,8 @@ void MPServer::handleActorList(ConnectedClient& c, const uint8_t* data, size_t s
                 continue;
 
             mPlayerDb->deleteSpawnedActorDynamicRecordLink(previousMpNum, incoming.cellId);
+            if (previousSpawnedActorPersistence[previousMpNum])
+                deletePersistedSpawnedActor(previousMpNum);
             removedActorLink = true;
         }
 
@@ -2872,6 +2937,7 @@ void MPServer::handleActorPosition(ConnectedClient& c, const uint8_t* data, size
         stored->actor.position = actor.position;
         stored->actor.velocity = actor.velocity;
         stored->lastSnapshotTime = incoming.serverTimestamp;
+        persistSpawnedActorIfNeeded(*stored);
         filtered.actors.push_back(actor);
     }
 
@@ -2916,6 +2982,7 @@ void MPServer::handleActorAnimFlags(ConnectedClient& c, const uint8_t* data, siz
         stored->actor.cellId = incoming.cellId;
         stored->actor.animFlags = actor.animFlags;
         stored->lastSnapshotTime = incoming.serverTimestamp;
+        persistSpawnedActorIfNeeded(*stored);
         filtered.actors.push_back(actor);
     }
 
@@ -2960,6 +3027,7 @@ void MPServer::handleActorAnimPlay(ConnectedClient& c, const uint8_t* data, size
         stored->actor.cellId = incoming.cellId;
         stored->actor.animPlay = actor.animPlay;
         stored->lastSnapshotTime = incoming.serverTimestamp;
+        persistSpawnedActorIfNeeded(*stored);
         filtered.actors.push_back(actor);
     }
 
@@ -3006,6 +3074,7 @@ void MPServer::handleActorAttack(ConnectedClient& c, const uint8_t* data, size_t
         stored->actor.cellId = incoming.cellId;
         stored->actor.attack = actor.attack;
         stored->lastSnapshotTime = incoming.serverTimestamp;
+        persistSpawnedActorIfNeeded(*stored);
         filtered.actors.push_back(actor);
     }
 
@@ -3053,6 +3122,7 @@ void MPServer::handleActorCast(ConnectedClient& c, const uint8_t* data, size_t s
         stored->actor.cellId = incoming.cellId;
         stored->actor.cast = actor.cast;
         stored->lastSnapshotTime = incoming.serverTimestamp;
+        persistSpawnedActorIfNeeded(*stored);
         filtered.actors.push_back(actor);
     }
 
@@ -3094,6 +3164,7 @@ void MPServer::handleActorDeath(ConnectedClient& c, const uint8_t* data, size_t 
         ActorRegistryRecord* stored = findTrackedActor(cellState, actor, c, "ActorDeath");
         if (!stored)
             continue;
+        const bool wasDead = stored->actor.isDead;
         stored->actor.refId = actor.refId;
         stored->actor.refNum = actor.refNum;
         stored->actor.mpNum = actor.mpNum;
@@ -3104,6 +3175,9 @@ void MPServer::handleActorDeath(ConnectedClient& c, const uint8_t* data, size_t 
         stored->actor.deathAnimGroup = actor.deathAnimGroup;
         stored->actor.dynamicStats.health.current = actor.dynamicStats.health.current;
         stored->lastSnapshotTime = incoming.serverTimestamp;
+        persistSpawnedActorIfNeeded(*stored);
+        if (actor.isDead && !wasDead)
+            sendActorLifecycleEvent("death", stored->actor, stored->persistent);
         filtered.actors.push_back(actor);
     }
 
@@ -3149,6 +3223,7 @@ void MPServer::handleActorEquipment(ConnectedClient& c, const uint8_t* data, siz
         stored->actor.cellId = incoming.cellId;
         stored->actor.equipment = actor.equipment;
         stored->lastSnapshotTime = incoming.serverTimestamp;
+        persistSpawnedActorIfNeeded(*stored);
         filtered.actors.push_back(actor);
     }
 
@@ -3187,6 +3262,7 @@ void MPServer::handleActorStatsDynamic(ConnectedClient& c, const uint8_t* data, 
         ActorRegistryRecord* stored = findTrackedActor(cellState, actor, c, "ActorStatsDynamic");
         if (!stored)
             continue;
+        const bool wasDead = stored->actor.isDead;
         stored->actor.refId = actor.refId;
         stored->actor.refNum = actor.refNum;
         stored->actor.mpNum = actor.mpNum;
@@ -3194,6 +3270,9 @@ void MPServer::handleActorStatsDynamic(ConnectedClient& c, const uint8_t* data, 
         stored->actor.dynamicStats = actor.dynamicStats;
         stored->actor.isDead = actor.isDead;
         stored->lastSnapshotTime = incoming.serverTimestamp;
+        persistSpawnedActorIfNeeded(*stored);
+        if (actor.isDead && !wasDead)
+            sendActorLifecycleEvent("death", stored->actor, stored->persistent);
         filtered.actors.push_back(actor);
     }
 
@@ -3238,6 +3317,7 @@ void MPServer::handleActorAI(ConnectedClient& c, const uint8_t* data, size_t siz
         stored->actor.cellId = incoming.cellId;
         stored->actor.ai = actor.ai;
         stored->lastSnapshotTime = incoming.serverTimestamp;
+        persistSpawnedActorIfNeeded(*stored);
         filtered.actors.push_back(actor);
     }
 
@@ -3757,11 +3837,32 @@ bool MPServer::placeObject(const std::string& refId, int count, const std::strin
 
 bool MPServer::removePlacedObjectByMpNum(uint32_t mpNum, const std::string& cellId)
 {
-    return removePlacedObjectAuthoritative(mpNum, cellId);
+    return removePlacedObjectAuthoritativeAnyCell(mpNum, cellId);
+}
+
+bool MPServer::removeGameObject(uint32_t mpNum, const std::string& cellId)
+{
+    if (mpNum == 0)
+        return false;
+
+    for (const auto& [actorCellId, cellState] : mWorld.actorCells)
+    {
+        if (!cellId.empty() && actorCellId != cellId)
+            continue;
+
+        for (const auto& [actorKey, record] : cellState.actors)
+        {
+            if (record.actor.mpNum == mpNum)
+                return removeActor(mpNum, actorCellId);
+        }
+    }
+
+    return removePlacedObjectAuthoritativeAnyCell(mpNum, cellId);
 }
 
 bool MPServer::spawnActor(
-    const std::string& refId, uint32_t refNum, uint32_t mpNum, const std::string& cellId, const Position& position)
+    const std::string& refId, uint32_t refNum, uint32_t mpNum, const std::string& cellId, const Position& position,
+    bool persistent)
 {
     if (refId.empty() || cellId.empty())
         return false;
@@ -3843,7 +3944,8 @@ bool MPServer::spawnActor(
         refreshActorAuthorityForCell(cellId);
 
     const uint64_t timestamp = currentServerTimeMs();
-    cellState.actors[makeActorKey(actor)] = { actor, timestamp };
+    ActorRegistryRecord registryRecord { actor, timestamp, persistent };
+    cellState.actors[makeActorKey(actor)] = registryRecord;
 
     if (dynamicActorRecord != nullptr)
     {
@@ -3856,6 +3958,8 @@ bool MPServer::spawnActor(
         if (mPlayerDb)
             mPlayerDb->upsertSpawnedActorDynamicRecordLink(actor.refId, cellId, actor.mpNum);
     }
+
+    persistSpawnedActorIfNeeded(registryRecord);
 
     ActorList actorList;
     actorList.cellId = cellId;
@@ -3875,7 +3979,9 @@ bool MPServer::spawnActor(
     Log(Debug::Info) << "[Server] Script ActorSpawn accepted: refId=" << actor.refId
                      << " refNum=" << actor.refNum
                      << " mpNum=" << actor.mpNum
-                     << " cell=" << actor.cellId;
+                     << " cell=" << actor.cellId
+                     << " persistent=" << persistent;
+    sendActorLifecycleEvent("spawned", actor, persistent);
     return true;
 }
 
@@ -3951,6 +4057,7 @@ bool MPServer::removeActor(uint32_t mpNum, const std::string& cellId)
     if (mPlayerDb)
     {
         mPlayerDb->deleteSpawnedActorDynamicRecordLink(mpNum, resolvedCellId);
+        mPlayerDb->deleteSpawnedActor(mpNum);
         scheduleGeneratedDynamicRecordGc("remove_actor");
     }
 
@@ -4295,6 +4402,28 @@ bool MPServer::removePlacedObjectAuthoritative(uint32_t mpNum, const std::string
     pkt.cellId = cellId;
     broadcastToCell(cellId, pkt.encode());
     return true;
+}
+
+bool MPServer::removePlacedObjectAuthoritativeAnyCell(uint32_t mpNum, const std::string& preferredCellId)
+{
+    if (mpNum == 0)
+        return false;
+
+    if (!preferredCellId.empty() && removePlacedObjectAuthoritative(mpNum, preferredCellId))
+        return true;
+
+    for (const auto& [cellId, objects] : mWorld.placedObjects)
+    {
+        if (cellId == preferredCellId)
+            continue;
+
+        const auto it = std::find_if(objects.begin(), objects.end(),
+            [&](const PlacedObject& object) { return object.mpNum == mpNum; });
+        if (it != objects.end())
+            return removePlacedObjectAuthoritative(mpNum, cellId);
+    }
+
+    return false;
 }
 
 // ---------------------------------------------------------------------------

@@ -15,11 +15,18 @@ Current working-tree status in `openmw/`:
 - spawned actor identity is normalized around server runtime ownership (`0-mpNum` on the gameplay/debug side) instead of trusting client-local runtime `refNum`s
 - non-authority actor hits route through `ActorCombatRequest` to the current authority client, and the duplicate-death path from coarse `refId` hit replay has been removed
 - spawned actor corpse open/loot/dispose flow is now synced across clients, including vanilla-style corpse opening before `Dispose of Corpse`
+- spawned actors can now be persisted as durable world state; `mp.spawnActor(..., { persistent = false })` and `/spawnat ... session` keep the old session-only behavior
+- a generic server-side delete path now removes either a spawned actor or a placed object by `mpNum`
+- Lua-configured destructible spawners are available as actor-backed custom creature records using `meshes\i\active_port_Indo.NIF`
 
 Still intentionally incomplete:
-- dedicated buffered interpolation is still future work; current playback is functional but not the final smoothing model
-- spawned actors remain runtime-only and are not persisted across server restart
+- timestamped buffered interpolation is explicitly deferred future work; current playback remains functional but not the final smoothing model
+- cell-reset participation for spawned actors and spawner respawn policy is still future work
 - there is still no dedicated admin UI for spawned-actor despawn or actor-state inspection
+
+Known live-test actor bugs:
+- non-authority clients receive some `ActorCast` start events, but spell release/effect playback still needs retesting for spawned actors; the latest logs showed release-side `ActorCast` packets being ignored as unknown `refNum/mpNum=0` actor identities, and the first fix now maps `notifyNpcCast` through the server-spawned actor `mpNum`
+- late join or cell login with already-dead actors can show those actors standing, immortal, and combat-capable; the actor bootstrap path needs to apply authoritative death state strongly enough that late-bound actors stay dead before any local AI/combat resumes
 
 ## Starting Point from Phase 7
 Phase 7 marked the actor lane as the next major block and established the guardrail that still applies now:

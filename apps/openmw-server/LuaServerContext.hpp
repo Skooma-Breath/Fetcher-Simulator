@@ -14,6 +14,7 @@
 #include <vector>
 
 #include <components/openmw-mp/Base/BaseObject.hpp>
+#include <components/openmw-mp/Base/BaseActor.hpp>
 #include <components/openmw-mp/Base/SurfPhysicsSettings.hpp>
 #include <components/lua/configuration.hpp>
 #include <components/lua/luastate.hpp>
@@ -75,6 +76,8 @@ public:
     void onPlayerSendMessage(uint32_t guid, const std::string& name, const std::string& message);
     void onDoorState(const std::string& cellId, const std::string& refId, bool isOpen);
     void onWorldWeather(const std::string& region, int current, int next, float transitionFactor);
+    void onActorSpawned(const BaseActor& actor, bool persistent);
+    void onActorDeath(const BaseActor& actor, bool persistent);
     void onLuaEvent(uint32_t pid, const std::string& eventName, const LuaUtil::BinaryData& data);
     void requestGlobalStorageSnapshot(uint32_t guid);
     std::optional<LuaUtil::BinaryData> evaluateImmediateIntent(
@@ -117,8 +120,10 @@ public:
     void queueRelayPlayerChat(uint32_t guid, const std::string& text);
     void queuePlaceObject(const std::string& refId, int count, const std::string& cellId, const Position& position);
     void queueSpawnActor(
-        const std::string& refId, uint32_t refNum, uint32_t mpNum, const std::string& cellId, const Position& position);
+        const std::string& refId, uint32_t refNum, uint32_t mpNum, const std::string& cellId, const Position& position,
+        bool persistent = true);
     void queueRemoveActor(uint32_t mpNum, const std::string& cellId);
+    void queueRemoveGameObject(uint32_t mpNum, const std::string& cellId);
     void queueTeleportPlayer(uint32_t guid, const std::string& cellId, const Position& position);
     void queueUpsertPlayerMark(uint32_t guid, const PlayerMark& mark);
     void queueDeletePlayerMark(uint32_t guid, const std::string& name);

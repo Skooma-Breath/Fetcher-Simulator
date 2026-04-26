@@ -7,6 +7,7 @@ local intentPolicy = require("intent_policy")
 local markRecallCommands = require("mark_recall")
 local recordDynamicTest = require("recorddynamic_test")
 local recordStore = require("recordstore")
+local destructibleSpawners = require("destructible_spawners")
 local surfCommands = require("surf_commands")
 
 ------------------------------------------------------------------------
@@ -21,6 +22,7 @@ local LOG_CHAT = Config.LOG_CHAT == true
 local ALLOW_UNVERIFIED_ACTIVATE = Config.ALLOW_UNVERIFIED_ACTIVATE == true
 local LOGIN_PREFIX = COMMAND_PREFIX .. "login "
 local KICK_PREFIX = COMMAND_PREFIX .. "kick "
+local DELETE_PREFIX = COMMAND_PREFIX .. "delete "
 local PLACEAT_PREFIX = COMMAND_PREFIX .. "placeat "
 local SPAWNAT_PREFIX = COMMAND_PREFIX .. "spawnat "
 local SETTIME_PREFIX = COMMAND_PREFIX .. "settime "
@@ -83,6 +85,14 @@ local function trim(text)
     end
 
     return (text:gsub("^%s+", ""):gsub("%s+$", ""))
+end
+
+local function lower(text)
+    if not text then
+        return ""
+    end
+
+    return string.lower(trim(text))
 end
 
 local function parseCommandArgs(text)
@@ -279,7 +289,7 @@ local function sendPlaceAtUsage(player)
 end
 
 local function sendSpawnAtUsage(player)
-    player:sendMessage("Usage: /spawnat <refId|\"ref id\"> [distance] [direction] [refNum] [mpNum]")
+    player:sendMessage("Usage: /spawnat <refId|\"ref id\"> [distance] [direction] [refNum] [mpNum] [persistent|session]")
     player:sendMessage("Quote refIds that contain spaces, for example /spawnat \"fargoth\"")
     player:sendMessage("direction: 0=front, 1=back, 2=left, 3=right")
     player:sendMessage("refNum defaults to 0; mpNum defaults to server-assigned")
@@ -662,6 +672,35 @@ local function handleChat(player, data)
         return false
     end
 
+    if msg == COMMAND_PREFIX .. "delete" or msg:sub(1, #DELETE_PREFIX) == DELETE_PREFIX then
+        if not requireAdmin(player) then
+            return false
+        end
+
+        local args, parseError = parseCommandArgs(msg:sub(#DELETE_PREFIX + 1))
+        if not args then
+            player:sendMessage(parseError or "Invalid arguments.")
+            player:sendMessage("Usage: /delete <mpNum> [cell]")
+            return false
+        end
+
+        local mpNum = toPositiveInteger(args[1])
+        if not mpNum then
+            player:sendMessage("Usage: /delete <mpNum> [cell]")
+            return false
+        end
+
+        local cellId = args[2] and normalizeCellId(args[2]) or ""
+        if not mp.removeGameObject(mpNum, cellId or "") then
+            player:sendMessage("Failed to queue delete for mpNum=" .. tostring(mpNum) .. ".")
+            return false
+        end
+
+        player:sendMessage(string.format("Queued delete for mpNum=%d.", mpNum))
+        mp.log(string.format("[core] /delete by %s mpNum=%d cell=%s", player.name, mpNum, tostring(cellId)))
+        return false
+    end
+
     if msg == COMMAND_PREFIX .. "placeat" or msg:sub(1, #PLACEAT_PREFIX) == PLACEAT_PREFIX then
         if not requireAdmin(player) then
             return false
@@ -760,7 +799,7 @@ local function handleChat(player, data)
             return false
         end
 
-        if #args > 5 then
+        if #args > 6 then
             sendSpawnAtUsage(player)
             return false
         end
@@ -769,6 +808,7 @@ local function handleChat(player, data)
         local directionText = args[3]
         local refNumText = args[4]
         local mpNumText = args[5]
+        local persistenceText = lower(args[6])
 
         local distance = 128
         if distanceText and distanceText ~= "" then
@@ -810,6 +850,18 @@ local function handleChat(player, data)
             mpNum = math.floor(parsedMpNum)
         end
 
+        local persistent = Config.SPAWNED_ACTOR_DEFAULT_PERSISTENT ~= false
+        if persistenceText and persistenceText ~= "" then
+            if persistenceText == "persistent" or persistenceText == "persist" then
+                persistent = true
+            elseif persistenceText == "session" or persistenceText == "temporary" or persistenceText == "temp" then
+                persistent = false
+            else
+                player:sendMessage("persistence must be persistent or session.")
+                return false
+            end
+        end
+
         local cellId = normalizeCellId(player.cell)
         if not cellId or cellId == "" then
             player:sendMessage("Unable to determine your current cell.")
@@ -817,19 +869,19 @@ local function handleChat(player, data)
         end
 
         local position = placeAtPosition(player, distance, direction)
-        if not mp.spawnActor(refId, refNum, mpNum, cellId, position) then
+        if not mp.spawnActor(refId, refNum, mpNum, cellId, position, { persistent = persistent }) then
             player:sendMessage("Failed to queue /spawnat for " .. refId .. ".")
             return false
         end
 
         local mpNumLabel = (mpNum == 0) and "auto" or tostring(mpNum)
         player:sendMessage(string.format(
-            "Spawned actor %s in %s at distance %.1f direction %d (refNum=%d mpNum=%s).",
-            refId, cellId, distance, direction, refNum, mpNumLabel
+            "Spawned actor %s in %s at distance %.1f direction %d (refNum=%d mpNum=%s %s).",
+            refId, cellId, distance, direction, refNum, mpNumLabel, persistent and "persistent" or "session"
         ))
         mp.log(string.format(
-            "[core] /spawnat by %s refId=%s cell=%s distance=%.1f direction=%d refNum=%d mpNum=%s",
-            player.name, refId, cellId, distance, direction, refNum, mpNumLabel
+            "[core] /spawnat by %s refId=%s cell=%s distance=%.1f direction=%d refNum=%d mpNum=%s persistent=%s",
+            player.name, refId, cellId, distance, direction, refNum, mpNumLabel, tostring(persistent)
         ))
         return false
     end
@@ -1088,6 +1140,17 @@ local function handleChat(player, data)
             return recordStoreHandled
         end
 
+        local spawnerHandled = destructibleSpawners.handleChat(player, data, {
+            commandPrefix = COMMAND_PREFIX,
+            parseCommandArgs = parseCommandArgs,
+            requireAdmin = requireAdmin,
+            normalizeCellId = normalizeCellId,
+            placeAtPosition = placeAtPosition,
+        })
+        if spawnerHandled ~= nil then
+            return spawnerHandled
+        end
+
         local adminUiHandled = adminUiService.handleChat(player, data, {
             commandPrefix = COMMAND_PREFIX,
             requireAdmin = requireAdmin,
@@ -1125,6 +1188,7 @@ return {
             markRecallCommands.onServerInit()
             recordStore.onServerInit()
             recordDynamicTest.onServerInit()
+            destructibleSpawners.onServerInit()
             mp.log("[core] Server ready — " .. mp.getPlayerCount() .. " player(s) connected.")
         end,
 
@@ -1180,6 +1244,8 @@ return {
             adminUiService.handleRequest(data, {
                 commandPrefix = COMMAND_PREFIX,
                 isAdmin = isAdmin,
+                normalizeCellId = normalizeCellId,
+                placeAtPosition = placeAtPosition,
             })
         end,
 
@@ -1198,7 +1264,16 @@ return {
             end
         end,
 
+        OnActorSpawned = function(data)
+            destructibleSpawners.onActorSpawned(data)
+        end,
+
+        OnActorDeath = function(data)
+            destructibleSpawners.onActorDeath(data)
+        end,
+
         OnServerTick = function(data)
+            destructibleSpawners.onServerTick(data)
             tickAccum = tickAccum + (data.dt or 0)
             if tickAccum >= 300 then
                 tickAccum = 0

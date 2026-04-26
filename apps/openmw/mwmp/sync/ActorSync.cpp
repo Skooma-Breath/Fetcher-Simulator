@@ -1002,6 +1002,12 @@ namespace mwmp
         castActor.refId = npc.getCellRef().getRefId().serializeText();
         castActor.refNum = npc.getCellRef().getRefNum().mIndex;
         castActor.cellId = cellId;
+        const uint32_t mappedMpNum = mappedMpNumForPtr(cellId, npc);
+        if (mappedMpNum != 0)
+        {
+            castActor.mpNum = mappedMpNum;
+            castActor.refNum = 0;
+        }
         castActor.cast.spellId = spellId;
         castActor.cast.castAnimation = castAnim;
         castActor.cast.release = release;
@@ -1973,38 +1979,46 @@ namespace mwmp
             stats.setDeathAnimationFinished(true);
 
         const DynamicStats& dyn = actor.state.dynamicStats;
-        MWMechanics::DynamicStat<float> health = stats.getHealth();
-        health.setBase(dyn.health.base);
-        health.setModifier(dyn.health.mod);
-        const float syncedHealthCurrent = waitingForRealtimeDeathPacket
-            ? std::max(health.getCurrent(), 1.f)
-            : dyn.health.current;
-        health.setCurrent(syncedHealthCurrent, true, true);
-        stats.setHealth(health);
+        const bool hasDynamicStats = actor.state.isDead || dyn.health.base != 0.f || dyn.health.current != 0.f
+            || dyn.health.mod != 0.f || dyn.magicka.base != 0.f || dyn.magicka.current != 0.f
+            || dyn.magicka.mod != 0.f || dyn.fatigue.base != 0.f || dyn.fatigue.current != 0.f
+            || dyn.fatigue.mod != 0.f;
 
-        MWMechanics::DynamicStat<float> magicka = stats.getMagicka();
-        magicka.setBase(dyn.magicka.base);
-        magicka.setModifier(dyn.magicka.mod);
-        magicka.setCurrent(dyn.magicka.current, true, true);
-        stats.setMagicka(magicka);
+        if (hasDynamicStats)
+        {
+            MWMechanics::DynamicStat<float> health = stats.getHealth();
+            health.setBase(dyn.health.base);
+            health.setModifier(dyn.health.mod);
+            const float syncedHealthCurrent = waitingForRealtimeDeathPacket
+                ? std::max(health.getCurrent(), 1.f)
+                : dyn.health.current;
+            health.setCurrent(syncedHealthCurrent, true, true);
+            stats.setHealth(health);
 
-        MWMechanics::DynamicStat<float> fatigue = stats.getFatigue();
-        fatigue.setBase(dyn.fatigue.base);
-        fatigue.setModifier(dyn.fatigue.mod);
-        // Only apply the cached authority fatigue if:
-        //  (a) the NPC is not in KO state right now, AND
-        //  (b) the cached value is non-negative.
-        // Condition (b) is required because dyn.fatigue.current is set from the
-        // last StatsDynamic packet, which is only sent on *health* changes.
-        // If the NPC was knocked out and damaged in the same window, the cached
-        // value is a large negative number from the knockdown period. Without
-        // this guard, the hitFlagsChanged branch's fatigue restore (→1) is
-        // immediately overwritten with the stale negative value in the same
-        // applyBoundActorState call, keeping knockout = (fatigue<0) = true and
-        // pinning the CharacterController in the KO animation loop indefinitely.
-        if (!isKnockedOut && dyn.fatigue.current >= 0.f)
-            fatigue.setCurrent(dyn.fatigue.current, true, true);
-        stats.setFatigue(fatigue);
+            MWMechanics::DynamicStat<float> magicka = stats.getMagicka();
+            magicka.setBase(dyn.magicka.base);
+            magicka.setModifier(dyn.magicka.mod);
+            magicka.setCurrent(dyn.magicka.current, true, true);
+            stats.setMagicka(magicka);
+
+            MWMechanics::DynamicStat<float> fatigue = stats.getFatigue();
+            fatigue.setBase(dyn.fatigue.base);
+            fatigue.setModifier(dyn.fatigue.mod);
+            // Only apply the cached authority fatigue if:
+            //  (a) the NPC is not in KO state right now, AND
+            //  (b) the cached value is non-negative.
+            // Condition (b) is required because dyn.fatigue.current is set from the
+            // last StatsDynamic packet, which is only sent on *health* changes.
+            // If the NPC was knocked out and damaged in the same window, the cached
+            // value is a large negative number from the knockdown period. Without
+            // this guard, the hitFlagsChanged branch's fatigue restore (→1) is
+            // immediately overwritten with the stale negative value in the same
+            // applyBoundActorState call, keeping knockout = (fatigue<0) = true and
+            // pinning the CharacterController in the KO animation loop indefinitely.
+            if (!isKnockedOut && dyn.fatigue.current >= 0.f)
+                fatigue.setCurrent(dyn.fatigue.current, true, true);
+            stats.setFatigue(fatigue);
+        }
 
         // Apply equipment from actor state to bound actor's InventoryStore.
         // This makes NPC-held weapons visible on non-authority clients.

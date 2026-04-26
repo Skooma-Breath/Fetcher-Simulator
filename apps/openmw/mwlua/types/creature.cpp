@@ -41,6 +41,14 @@ namespace
             crea.mData.mSoul = rec["soulValue"].get<int>();
         if (rec["type"] != sol::nil)
             crea.mData.mType = rec["type"].get<int>();
+        if (rec["level"] != sol::nil)
+            crea.mData.mLevel = rec["level"].get<int>();
+        if (rec["health"] != sol::nil)
+            crea.mData.mHealth = rec["health"].get<int>();
+        if (rec["magicka"] != sol::nil)
+            crea.mData.mMana = rec["magicka"].get<int>();
+        if (rec["fatigue"] != sol::nil)
+            crea.mData.mFatigue = rec["fatigue"].get<int>();
         if (rec["baseGold"] != sol::nil)
             crea.mData.mGold = rec["baseGold"].get<int>();
         if (rec["combatSkill"] != sol::nil)
@@ -129,6 +137,10 @@ namespace MWLua
             [](const ESM::Creature& rec) -> std::string { return rec.mOriginal.serializeText(); });
         record["soulValue"] = sol::readonly_property([](const ESM::Creature& rec) -> int { return rec.mData.mSoul; });
         record["type"] = sol::readonly_property([](const ESM::Creature& rec) -> int { return rec.mData.mType; });
+        record["level"] = sol::readonly_property([](const ESM::Creature& rec) -> int { return rec.mData.mLevel; });
+        record["health"] = sol::readonly_property([](const ESM::Creature& rec) -> int { return rec.mData.mHealth; });
+        record["magicka"] = sol::readonly_property([](const ESM::Creature& rec) -> int { return rec.mData.mMana; });
+        record["fatigue"] = sol::readonly_property([](const ESM::Creature& rec) -> int { return rec.mData.mFatigue; });
         record["baseGold"] = sol::readonly_property([](const ESM::Creature& rec) -> int { return rec.mData.mGold; });
         record["combatSkill"]
             = sol::readonly_property([](const ESM::Creature& rec) -> int { return rec.mData.mCombat; });

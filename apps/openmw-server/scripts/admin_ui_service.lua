@@ -1,5 +1,6 @@
 local mp = require("mp")
 local commandRegistry = require("command_registry")
+local destructibleSpawners = require("destructible_spawners")
 local recordStore = require("recordstore")
 
 local M = {}
@@ -671,6 +672,10 @@ local function buildSnapshot(player, env)
         recordTypes = RECORD_TYPE_DEFS,
         recordFieldSchemas = RECORD_FIELD_SCHEMAS,
         records = records,
+        spawners = {
+            defaults = destructibleSpawners.defaultsForAdminUi(),
+            entries = destructibleSpawners.listForAdminUi(),
+        },
         database = buildDatabaseInfo(),
         players = buildPlayers(env),
         summary = buildSummary(records),
@@ -863,6 +868,41 @@ local function handleSync(player, env)
     sendSnapshot(player, "AdminUi_Snapshot", env)
 end
 
+local function handleSpawnerResult(player, ok, message, env)
+    sendToast(player, message or (ok and "Spawner action completed." or "Spawner action failed."), ok and "success" or "error")
+    sendSnapshot(player, "AdminUi_Snapshot", env)
+end
+
+local function handleSpawnerCreate(player, data, env)
+    if type(env.normalizeCellId) ~= "function" or type(env.placeAtPosition) ~= "function" then
+        handleSpawnerResult(player, false, "Spawner creation is unavailable from this admin UI context.", env)
+        return
+    end
+
+    local ok, message = destructibleSpawners.createFromAdminUi(player, data, env)
+    handleSpawnerResult(player, ok, message, env)
+end
+
+local function handleSpawnerSetCount(player, data, env)
+    local ok, message = destructibleSpawners.setCountFromAdminUi(data)
+    handleSpawnerResult(player, ok, message, env)
+end
+
+local function handleSpawnerPurge(player, data, env)
+    local ok, message = destructibleSpawners.purgeFromAdminUi(data)
+    handleSpawnerResult(player, ok, message, env)
+end
+
+local function handleSpawnerReset(player, data, env)
+    local ok, message = destructibleSpawners.resetFromAdminUi(data)
+    handleSpawnerResult(player, ok, message, env)
+end
+
+local function handleSpawnerRemove(player, data, env)
+    local ok, message = destructibleSpawners.removeFromAdminUi(data)
+    handleSpawnerResult(player, ok, message, env)
+end
+
 local function handleDatabaseBrowse(player, data)
     if not mp.browseDatabaseTable then
         sendToast(player, "Database browsing is unavailable on this server build.", "error")
@@ -929,6 +969,31 @@ function M.handleRequest(data, env)
 
     if action == "sync" then
         handleSync(player, env)
+        return
+    end
+
+    if action == "spawner_create" then
+        handleSpawnerCreate(player, data, env)
+        return
+    end
+
+    if action == "spawner_set_count" then
+        handleSpawnerSetCount(player, data, env)
+        return
+    end
+
+    if action == "spawner_purge" then
+        handleSpawnerPurge(player, data, env)
+        return
+    end
+
+    if action == "spawner_reset" then
+        handleSpawnerReset(player, data, env)
+        return
+    end
+
+    if action == "spawner_remove" then
+        handleSpawnerRemove(player, data, env)
         return
     end
 

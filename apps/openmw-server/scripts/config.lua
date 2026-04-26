@@ -47,6 +47,20 @@ Config.MAX_CHARS_PER_ACCOUNT = 5
 ------------------------------------------------------------------------
 
 Config.SPAWN_CELL = "mournhold"
+Config.SPAWNED_ACTOR_DEFAULT_PERSISTENT = true
+
+------------------------------------------------------------------------
+-- Destructible spawners
+------------------------------------------------------------------------
+
+Config.SPAWNER_BASE_CREATURE = "mudcrab"
+Config.SPAWNER_MODEL = "meshes\\i\\active_port_Indo.NIF"
+Config.SPAWNER_HEALTH = 50
+Config.SPAWNER_DEFAULT_COUNT = 1
+Config.SPAWNER_DEFAULT_RESPAWN_ON_CELL_RESET = false
+Config.SPAWNER_SPAWNED_ACTOR_PERSISTENT = true
+Config.SPAWNER_SPAWN_INTERVAL_SECONDS = 10
+Config.SPAWNER_SPAWN_CONFIRM_TIMEOUT_SECONDS = 8
 
 ------------------------------------------------------------------------
 -- Chat & commands

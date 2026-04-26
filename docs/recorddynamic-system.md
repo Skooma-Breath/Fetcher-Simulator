@@ -191,7 +191,7 @@ What this means in practice:
 Current limitation:
 
 - The link table currently tracks persisted references, but there is not yet a full higher-level GC policy deciding when an unreferenced generated record should be hard-deleted automatically
-- Spawned actor links are runtime-only and are cleared on server restart because spawned actors are not yet persisted as world state
+- Session-only spawned actor links are cleared on server restart; durable spawned actors reload from `world_spawned_actors` and recreate their dynamic-record links after dynamic records are loaded
 
 ## Lua API
 
@@ -437,10 +437,10 @@ What exists now:
 What is still missing for the full intended lifecycle:
 
 - automatic generated-record garbage collection when links disappear during normal gameplay
-- actor/runtime link tracking for spawned NPCs and creatures
+- deeper actor/runtime dependency extraction beyond the current dynamic-record actor links
 - richer dependency discovery beyond currently known fields such as `enchant`
 - validation rules for parent/child lifetime mismatches
-- actor spawning flows that consume synced dynamic actor records directly
+- future cell-reset participation for durable spawned actors and actor-backed spawners
 
 Compared to TES3MP:
 
@@ -460,7 +460,8 @@ Current flow:
 3. Spawn the actor instance using server authority
 4. Insert the actor into the authoritative server actor registry and broadcast it through `ActorList`
 5. Route non-authority hits through `ActorCombatRequest` using the exact spawned-actor `mpNum`
-6. Keep runtime link tracking so the actor instance keeps its generated dependencies alive until despawn, removal, or restart
+6. Keep runtime link tracking so the actor instance keeps its generated dependencies alive until despawn or removal
+7. Persist spawned actor rows in `world_spawned_actors` when the spawn is durable
 
 Current corpse behavior for spawned actors:
 
@@ -471,6 +472,32 @@ Current corpse behavior for spawned actors:
 - the server removes the corpse authoritatively only after the corpse container is empty
 
 This avoids relying on client-local `world.createRecord` IDs, which are not multiplayer-safe.
+
+Spawned actor persistence policy:
+
+- `Config.SPAWNED_ACTOR_DEFAULT_PERSISTENT = true` makes `/spawnat` and `mp.spawnActor` durable by default
+- `/spawnat ... session` or `mp.spawnActor(..., { persistent = false })` creates a session-only actor
+- durable spawned actors reload from `world_spawned_actors` on server restart and recreate dynamic-record actor links after `RecordDynamic` state loads
+- deleting or disposing a spawned actor removes its persisted actor row and the corresponding dynamic-record actor link
+- future cell-reset work still needs to decide when durable spawned actors should reset, respawn, or be removed
+
+Destructible spawners:
+
+- `destructible_spawners.lua` creates a script-owned custom `creature` record for each named spawner
+- the default spawner visual model is `meshes\i\active_port_Indo.NIF`; the Lua helper also accepts `i\active_port_Indo.NIF` and prefixes `meshes\`
+- the spawner is actor-backed so normal actor health, hit reactions, death handling, and combat routing can be reused instead of inventing destructible static behavior
+- `/spawner create <name> <spawnRefId> [count] [distance] [direction] [persistent|session] [reset|noreset]` controls the payload actor refId, maximum simultaneous live population, placement, spawner persistence, and future reset policy flag
+- payload actors now spawn on a server tick timer instead of bursting out when the spawner dies; `Config.SPAWNER_SPAWN_INTERVAL_SECONDS` controls the default interval
+- queued payload spawns remain in `pendingSpawns` until `OnActorSpawned` confirms the actual actor `mpNum`; only then are they moved into the `spawnedMpNums` ownership set
+- `liveCount`, `pendingCount`, and `remaining` are derived from those ownership tables so the spawner does not drift if a spawn is delayed, rejected, killed, purged, or removed
+- when one tracked payload actor dies, the spawner waits for the configured interval and then queues one replacement, keeping the configured simultaneous live cap rather than treating the count as a lifetime total
+- destroying the spawner halts future timed spawns immediately but does not despawn already-living payload actors
+- `/spawner count <name> <count>` changes an existing spawner's simultaneous live population cap without recreating the spawner actor
+- `/spawner purge` removes tracked payload actors without deleting the spawner; `/spawner remove` purges tracked payloads, removes the spawner actor, and removes the custom spawner record
+- `/spawner move`, `/spawner reset`, `/spawner info`, and `/spawner list` cover placement and maintenance; move/reset also purge existing payload actors so old placement tests do not leave linked actors behind
+- the in-game `/helpmenu` admin UI now has a Spawners tab for creating spawners, changing counts, purging payloads, resetting, and removing spawners
+- session spawners are removed from Lua spawner state on restart; persistent spawners keep their custom record, actor identity, and tracked durable payload actors when those payload actors were spawned as persistent
+- `respawnOnCellReset` is stored now but inert until cell resets exist
 
 ## Persistence Policy Decision
 
@@ -558,23 +585,28 @@ Recommended next slices, updated to reflect current progress:
      - expand effect authoring beyond the current preset-based workflow
 
 4. Extend actor spawning so `/spawnat` can use synced dynamic `npc` and `creature` records directly
-   - status: partial
+   - status: largely implemented
    - implemented in this session:
      - added a new authoritative server/Lua actor spawn path
      - added Lua bindings for spawning and removing authoritative actors
-     - added admin `/spawnat <refId> [distance] [direction] [refNum] [mpNum]`
+     - added admin `/spawnat <refId> [distance] [direction] [refNum] [mpNum] [persistent|session]`
+     - added generic admin `/delete <mpNum> [cell]` over spawned actors and placed objects
      - spawned actors are inserted into the existing server `actorCells` registry and broadcast through `ActorList`
      - clients now create missing server-spawned actors from `ActorList` when the actor has a server `mpNum`
      - `/spawnat` now server-assigns actor `mpNum` when omitted or passed as `0`
      - dynamic `npc` and `creature` records are re-sent to the cell immediately before the spawn `ActorList`
-     - spawned dynamic actors create `spawned_actor` links so generated actor records stay alive until despawn, disappearance from authoritative actor lists, or server restart
+     - spawned dynamic actors create `spawned_actor` links so generated actor records stay alive until despawn or disappearance from authoritative actor lists
      - non-authority combat now identifies spawned actors by exact `mpNum` and no longer relies on coarse `refId` hit replay
      - spawned actor corpse open/loot/dispose flow is now synced across clients through the server container/dispose path
-   - current limitation:
-     - spawned actors are still runtime-only; they are not persisted across server restart
+     - durable spawned actors persist to `world_spawned_actors` and reload across server restart
+     - session-only spawned actors remain available through the explicit session flag
+     - Lua-configured destructible spawners create actor-backed custom creature records using the configured model and maintain a timed payload population keyed by confirmed actor `mpNum`
+     - `/spawner count <name> <count>` and the admin UI Spawners tab now expose count configuration for existing spawners
    - remaining work:
-     - add an admin despawn command/UI flow around the existing remove binding
-     - persist spawned actors only if/when we decide they should become durable world state
+     - add dedicated admin UI controls for actor spawn/despawn
+     - wire spawner `respawnOnCellReset` into the future cell-reset implementation
+     - expand persisted actor state if future gameplay needs inventory, AI package, or script-local actor state continuity
+     - regression-test spawner replacement, purge, remove, and restart behavior in a two-client live session
 
 5. Keep the persistence policy aligned with implementation
    - status: decided and partially encoded
@@ -623,8 +655,8 @@ For now:
 - Use `/recordtest create ...` for chat-driven sync checks instead of hand-editing serialized Lua tables
 - Use `/recordtest enchant ...` when you want a generated enchantment-backed item pair without manually stitching the ids together
 - If a record creates successfully but `/placeat` does not show anything, check the client log first for `Unknown baseId` or `failed to create manual cell ref` messages
-- `setdelete1` is only a reliable GC test for placed refs that actually flow through multiplayer `ObjectDelete`
-- placed containers do not currently unlink through that route because local `World::deleteObject()` skips refs with container stores, so a deleted placed container can still keep a `container_parent` link until we add a dedicated admin/server delete path
+- `/delete <mpNum> [cell]` is the preferred admin cleanup command when you know the server `mpNum`; it routes to spawned actor removal first, then placed-object removal
+- `setdelete1` is still useful as a client-side `ObjectDelete` test for placed refs, but `/delete` gives us a server-owned cleanup path that does not depend on local deletion quirks
 - if a delete and `/recordstore gc` happen back-to-back in the same session, run `/recordstore info <type> <id>` once before GC when debugging; that confirms whether the server has already observed the unlink
 - if a generated persistent record shows `links=0`, treat it as a GC candidate or a warning condition, not as a permanently retained asset
 
@@ -707,25 +739,41 @@ Use this exact order in the next multiplayer test session.
 11. Verify `/spawnat` foundation behavior:
    - create or reuse a dynamic `npc` or `creature` record id if desired
    - run `/spawnat <recordId>` or `/spawnat <baseActorId>`
+   - run `/spawnat <recordId> 128 0 0 0 session` to verify the explicit session-only path
    - confirm the server logs the authoritative actor spawn
    - confirm clients in the cell receive and visibly create the actor through `ActorList`
    - for dynamic actor records, confirm `world_dynamic_record_links` shows a `spawned_actor` row while the actor exists
+   - for durable actors, confirm `world_spawned_actors` has the actor row
    - kill at least one spawned actor from the non-authority client and confirm:
      - one death event is accepted for the killed actor
      - the corpse container opens correctly
      - looting and `Dispose of Corpse` remove the corpse for both clients
-12. Verify forced-removal policy:
+12. Verify destructible spawners:
+   - run `/spawner create testspawner <creatureRefId> 3`
+   - confirm the spawner actor appears with the configured `meshes\i\active_port_Indo.NIF` model
+   - wait through several spawn intervals and confirm the spawner stops at exactly 3 simultaneous live payload actors
+   - run `/spawner info testspawner` and confirm it reports the actor `mpNum`, target refId, live count, pending count, remaining capacity, cell, and persistence
+   - run `/spawner count testspawner 5` and confirm the spawner begins filling to the new live cap on the normal timer
+   - open `/helpmenu`, switch to the Spawners tab, set the same spawner back to count 3, and confirm `/spawner info testspawner` reports the new cap
+   - kill one tracked payload actor and confirm exactly one replacement is queued after the interval
+   - run `/spawner purge testspawner` and confirm all tracked payload actors disappear while the spawner remains and begins refilling on the normal timer
+   - run `/spawner remove testspawner` on a fresh test spawner and confirm both the spawner actor and its tracked payload actors are removed
+   - damage/kill the spawner and confirm future timed spawns stop while already-living payload actors remain in the world
+   - run `/spawner move testspawner` and `/spawner reset testspawner` to verify maintenance commands
+13. Verify forced-removal policy:
    - create or keep one generated record that still has links
    - run the normal remove path and confirm it soft-fails while links remain
    - run the forced remove path and confirm the server scrubs matching references before broadcasting removal
-13. Restart the server again.
-14. Reconnect and verify restart behavior:
+14. Restart the server again.
+15. Reconnect and verify restart behavior:
    - session-only records should be gone
    - persistent records should still exist
+   - durable spawned actors should reload from `world_spawned_actors`
+   - session-only spawned actors should not reload
    - placed objects or saved inventory referencing persistent records should still resolve
    - generated persistent records with no surviving links should be treated as GC candidates, not permanent keep-forever records
    - `/recordstore list` should not show the wiped session-only ids
-15. If anything fails, collect:
+16. If anything fails, collect:
    - `openmw-server.log`
    - client `openmw.log`
    - the output of `/recordstore list`
@@ -752,21 +800,24 @@ Implemented or effectively present in the current working tree:
 - authoritative `/spawnat` support backed by the server actor registry, client-side actor creation from `ActorList`, dynamic actor record replay, server-assigned actor mpNums, and runtime `spawned_actor` links
 - exact spawned-actor combat routing via `ActorCombatRequest` and actor `mpNum`
 - synced corpse open/loot/dispose handling for spawned actors, including vanilla-style `Dispose of Corpse` gating on an empty container
+- durable spawned actor persistence through `world_spawned_actors`, with explicit session-only spawn support
+- generic `/delete <mpNum> [cell]` cleanup for spawned actors and placed objects
+- Lua-configured destructible spawners backed by custom creature records and the configured `meshes\i\active_port_Indo.NIF` model, with timed population control keyed by tracked payload actor `mpNum`s so the configured live-count cap is enforced correctly
 - `openmw-server` and `openmw` now build successfully in the existing `MSVC2022_64` build tree for the `RelWithDebInfo` configuration after these changes
 - test/admin commands for record creation, inspection, sync, and GC
 
 Still remaining after this session:
 
-1. admin despawn command/UI flow around spawned actor removal
+1. dedicated admin UI flow around spawned actor spawn/removal
 2. future actor inventory/spell dependency extraction and validation
 3. validation that container-related automatic GC behavior is safe in all live multiplayer cases
 4. any batching/rate-limiting or observability polish needed for larger auto-GC waves
-5. deciding whether spawned actors should remain runtime-only or become persisted world state
-6. broader cleanup/reset participation for future despawn and cell-reset flows
+5. broader cleanup/reset participation for future despawn and cell-reset flows, including `respawnOnCellReset`
+6. timestamped buffered interpolation for dedicated actors; intentionally deferred from this slice
 7. broader full-project build/test coverage beyond the successfully built `openmw-server` and `openmw` targets
 
 Recommended next implementation order:
 
-1. admin despawn command/UI flow
+1. admin UI controls for spawned actors
 2. future actor inventory/spell dependency helpers and validation
 3. cell-reset/runtime unlink integration and auto-GC polish

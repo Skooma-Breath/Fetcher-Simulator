@@ -242,7 +242,8 @@ void LuaServerContext::drainOutbound()
                 mServer->placeObject(action.text, action.itemCount, action.cellId, action.position);
                 break;
             case OutboundLuaActionType::SpawnActor:
-                mServer->spawnActor(action.text, action.actorRefNum, action.actorMpNum, action.cellId, action.position);
+                mServer->spawnActor(action.text, action.actorRefNum, action.actorMpNum, action.cellId, action.position,
+                    action.actorPersistent);
                 break;
             case OutboundLuaActionType::RemoveActor:
                 mServer->removeActor(action.actorMpNum, action.cellId);
@@ -285,6 +286,9 @@ void LuaServerContext::drainOutbound()
                 break;
             case OutboundLuaActionType::RemovePlacedObject:
                 mServer->removePlacedObjectByMpNum(action.mpNum, action.cellId);
+                break;
+            case OutboundLuaActionType::RemoveGameObject:
+                mServer->removeGameObject(action.mpNum, action.cellId);
                 break;
             case OutboundLuaActionType::UpsertDynamicRecord:
                 mServer->upsertDynamicRecord(
@@ -376,6 +380,55 @@ void LuaServerContext::onWorldWeather(const std::string& region, int current, in
         return;
 
     enqueueEvent(0, "OnWorldWeather", makeWeatherPayload(region, current, next, transitionFactor));
+}
+
+void LuaServerContext::onActorSpawned(const BaseActor& actor, bool persistent)
+{
+    if (!mLoaded)
+        return;
+
+    enqueueEvent(0, "OnActorSpawned", makeMainThreadSerializedTable([&](sol::table payload) {
+        payload["refId"] = actor.refId;
+        payload["refNum"] = actor.refNum;
+        payload["mpNum"] = actor.mpNum;
+        payload["cellId"] = actor.cellId;
+        payload["persistent"] = persistent;
+        sol::state_view lua(payload.lua_state());
+        sol::table position = lua.create_table();
+        position["x"] = actor.position.pos[0];
+        position["y"] = actor.position.pos[1];
+        position["z"] = actor.position.pos[2];
+        position["rx"] = actor.position.rot[0];
+        position["ry"] = actor.position.rot[1];
+        position["rz"] = actor.position.rot[2];
+        payload["position"] = position;
+    }));
+}
+
+void LuaServerContext::onActorDeath(const BaseActor& actor, bool persistent)
+{
+    if (!mLoaded)
+        return;
+
+    enqueueEvent(0, "OnActorDeath", makeMainThreadSerializedTable([&](sol::table payload) {
+        payload["refId"] = actor.refId;
+        payload["refNum"] = actor.refNum;
+        payload["mpNum"] = actor.mpNum;
+        payload["cellId"] = actor.cellId;
+        payload["persistent"] = persistent;
+        payload["deathState"] = actor.deathState;
+        payload["deathAnimGroup"] = actor.deathAnimGroup;
+        payload["health"] = actor.dynamicStats.health.current;
+        sol::state_view lua(payload.lua_state());
+        sol::table position = lua.create_table();
+        position["x"] = actor.position.pos[0];
+        position["y"] = actor.position.pos[1];
+        position["z"] = actor.position.pos[2];
+        position["rx"] = actor.position.rot[0];
+        position["ry"] = actor.position.rot[1];
+        position["rz"] = actor.position.rot[2];
+        payload["position"] = position;
+    }));
 }
 
 void LuaServerContext::onLuaEvent(uint32_t pid, const std::string& eventName, const LuaUtil::BinaryData& data)
@@ -828,7 +881,8 @@ void LuaServerContext::queuePlaceObject(
 }
 
 void LuaServerContext::queueSpawnActor(
-    const std::string& refId, uint32_t refNum, uint32_t mpNum, const std::string& cellId, const Position& position)
+    const std::string& refId, uint32_t refNum, uint32_t mpNum, const std::string& cellId, const Position& position,
+    bool persistent)
 {
     if (refId.empty() || cellId.empty())
         return;
@@ -840,6 +894,7 @@ void LuaServerContext::queueSpawnActor(
     action.actorMpNum = mpNum;
     action.cellId = cellId;
     action.position = position;
+    action.actorPersistent = persistent;
     mOutboundQueue.push(std::move(action));
 }
 
@@ -975,6 +1030,15 @@ void LuaServerContext::queueRemovePlacedObject(uint32_t mpNum, const std::string
 {
     OutboundLuaAction action;
     action.type = OutboundLuaActionType::RemovePlacedObject;
+    action.mpNum = mpNum;
+    action.cellId = cellId;
+    mOutboundQueue.push(std::move(action));
+}
+
+void LuaServerContext::queueRemoveGameObject(uint32_t mpNum, const std::string& cellId)
+{
+    OutboundLuaAction action;
+    action.type = OutboundLuaActionType::RemoveGameObject;
     action.mpNum = mpNum;
     action.cellId = cellId;
     mOutboundQueue.push(std::move(action));

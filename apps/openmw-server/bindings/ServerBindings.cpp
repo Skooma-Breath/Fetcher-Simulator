@@ -237,9 +237,37 @@ sol::table initMpPackage(LuaUtil::LuaView& view, LuaServerContext* context, LuaU
         return true;
     });
 
+    mp.set_function("removeGameObject", [context](uint32_t mpNum, const sol::optional<std::string>& cellId) -> bool
+    {
+        if (!context || mpNum == 0)
+            return false;
+
+        context->queueRemoveGameObject(mpNum, cellId.value_or(""));
+        return true;
+    });
+    mp.set_function("RemoveGameObject", [context](uint32_t mpNum, const sol::optional<std::string>& cellId) -> bool
+    {
+        if (!context || mpNum == 0)
+            return false;
+
+        context->queueRemoveGameObject(mpNum, cellId.value_or(""));
+        return true;
+    });
+
+    auto resolveActorPersistent = [context](const sol::optional<sol::table>& options) -> bool
+    {
+        bool persistent = context ? context->getBool("Config", "SPAWNED_ACTOR_DEFAULT_PERSISTENT", true) : true;
+        if (options)
+        {
+            if (auto maybePersistent = options->get<sol::optional<bool>>("persistent"))
+                persistent = *maybePersistent;
+        }
+        return persistent;
+    };
+
     mp.set_function("spawnActor",
-        [context](const std::string& refId, uint32_t refNum, uint32_t mpNum, const std::string& cellId,
-            const sol::table& positionTable) -> bool
+        [context, resolveActorPersistent](const std::string& refId, uint32_t refNum, uint32_t mpNum, const std::string& cellId,
+            const sol::table& positionTable, const sol::optional<sol::table>& options) -> bool
     {
         if (!context || refId.empty() || cellId.empty())
             return false;
@@ -248,12 +276,12 @@ sol::table initMpPackage(LuaUtil::LuaView& view, LuaServerContext* context, LuaU
         if (!position)
             return false;
 
-        context->queueSpawnActor(refId, refNum, mpNum, cellId, *position);
+        context->queueSpawnActor(refId, refNum, mpNum, cellId, *position, resolveActorPersistent(options));
         return true;
     });
     mp.set_function("SpawnActor",
-        [context](const std::string& refId, uint32_t refNum, uint32_t mpNum, const std::string& cellId,
-            const sol::table& positionTable) -> bool
+        [context, resolveActorPersistent](const std::string& refId, uint32_t refNum, uint32_t mpNum, const std::string& cellId,
+            const sol::table& positionTable, const sol::optional<sol::table>& options) -> bool
     {
         if (!context || refId.empty() || cellId.empty())
             return false;
@@ -262,7 +290,7 @@ sol::table initMpPackage(LuaUtil::LuaView& view, LuaServerContext* context, LuaU
         if (!position)
             return false;
 
-        context->queueSpawnActor(refId, refNum, mpNum, cellId, *position);
+        context->queueSpawnActor(refId, refNum, mpNum, cellId, *position, resolveActorPersistent(options));
         return true;
     });
 

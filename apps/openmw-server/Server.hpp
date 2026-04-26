@@ -126,8 +126,10 @@ public:
     bool placeObject(const std::string& refId, int count, const std::string& cellId, const Position& position);
     bool removePlacedObjectByMpNum(uint32_t mpNum, const std::string& cellId);
     bool spawnActor(
-        const std::string& refId, uint32_t refNum, uint32_t mpNum, const std::string& cellId, const Position& position);
+        const std::string& refId, uint32_t refNum, uint32_t mpNum, const std::string& cellId, const Position& position,
+        bool persistent = true);
     bool removeActor(uint32_t mpNum, const std::string& cellId);
+    bool removeGameObject(uint32_t mpNum, const std::string& cellId);
     bool upsertDynamicRecord(const std::string& recordType, const std::string& recordId, const std::string& data,
         const std::string& recordScope, bool persistent);
     bool removeDynamicRecord(const std::string& recordType, const std::string& recordId);
@@ -252,7 +254,12 @@ private:
         std::string_view action, const std::map<std::string, std::string>& query);
     bool acceptPlacedObject(PlacedObject& object);
     bool grantInventoryItem(ConnectedClient& c, const std::string& refId, int count);
+    struct ActorRegistryRecord;
     bool removePlacedObjectAuthoritative(uint32_t mpNum, const std::string& cellId);
+    bool removePlacedObjectAuthoritativeAnyCell(uint32_t mpNum, const std::string& preferredCellId);
+    void persistSpawnedActorIfNeeded(const ActorRegistryRecord& record);
+    void deletePersistedSpawnedActor(uint32_t mpNum);
+    void sendActorLifecycleEvent(const char* eventName, const BaseActor& actor, bool persistent);
     void sendDynamicRecordsToClient(HSteamNetConnection conn);
     std::unordered_map<std::string, uint64_t> buildGeneratedDynamicRecordCounters(const std::string& prefix) const;
     struct DynamicReferenceCleanupStats
@@ -283,6 +290,7 @@ private:
     {
         BaseActor actor;
         uint64_t lastSnapshotTime = 0;
+        bool persistent = false;
     };
 
     struct CellActorState
