@@ -64,6 +64,10 @@ namespace mwmp
             bool pendingAnimPlay = false;
             bool pendingAttack = false;
             bool pendingCast = false;
+            // Set to true when a cast-start (release=false) packet is consumed so
+            // the cast-release handler knows the wind-up animation is already playing
+            // and the bolt should fire immediately rather than after another countdown.
+            bool castStartReceived = false;
             bool lastAttackingOrCasting = false;
             bool lastWeaponVisible = false;
             // Track whether death has already been applied to this actor so that

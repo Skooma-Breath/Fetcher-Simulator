@@ -1447,19 +1447,16 @@ namespace mwmp
                 // Read the actual attack type from the CharacterController's
                 // mp_attack_type user value (set during updateWeaponState()).
                 atkActor.attack.attackAnimation = "slash"; // fallback
+                // Use the already-resolved boundActor rather than a fresh world
+                // lookup — getPtr(refId,false) silently fails for interior cells
+                // and multi-instance NPCs; boundActor is always the right ptr.
+                if (prevIt != cell.actors.end() && !prevIt->second.boundActor.isEmpty())
                 {
-                    // Find the actual actor ptr to read the base node user value
-                    MWWorld::Ptr atkPtr;
-                    try { atkPtr = world->getPtr(ESM::RefId::stringRefId(actor.refId), false); }
-                    catch (...) {}
-                    if (!atkPtr.isEmpty())
+                    if (auto* baseNode = prevIt->second.boundActor.getRefData().getBaseNode())
                     {
-                        if (auto* baseNode = atkPtr.getRefData().getBaseNode())
-                        {
-                            std::string atkType;
-                            if (baseNode->getUserValue("mp_attack_type", atkType) && !atkType.empty())
-                                atkActor.attack.attackAnimation = atkType;
-                        }
+                        std::string atkType;
+                        if (baseNode->getUserValue("mp_attack_type", atkType) && !atkType.empty())
+                            atkActor.attack.attackAnimation = atkType;
                     }
                 }
 
@@ -1467,12 +1464,12 @@ namespace mwmp
             }
 
             // --- Cast start edge detection ---
-            MWWorld::Ptr castPtr;
-            try { castPtr = world->getPtr(ESM::RefId::stringRefId(actor.refId), false); }
-            catch (...) {}
-            if (!castPtr.isEmpty())
+            // Use boundActor directly instead of a fresh world lookup.
+            // getPtr(refId,false) silently fails for interior cells and multi-
+            // instance NPCs; boundActor is always the correctly-resolved ptr.
+            if (prevIt != cell.actors.end() && !prevIt->second.boundActor.isEmpty())
             {
-                if (auto* baseNode = castPtr.getRefData().getBaseNode())
+                if (auto* baseNode = prevIt->second.boundActor.getRefData().getBaseNode())
                 {
                     bool castPending = false;
                     if (baseNode->getUserValue("mp_cast_pending", castPending) && castPending)
@@ -2150,7 +2147,7 @@ namespace mwmp
             actor.animGroupHoldTimer = 0.f;
         }
 
-        const bool suppressLowerBodyGroupSync = hitFlags != 0 || actor.animGroupHoldTimer > 0.f || actor.pendingAttack;
+        const bool suppressLowerBodyGroupSync = hitFlags != 0 || actor.animGroupHoldTimer > 0.f || actor.pendingAttack || actor.pendingCast;
 
         if (!actor.state.isDead && !suppressLowerBodyGroupSync)
         {
@@ -2216,7 +2213,7 @@ namespace mwmp
             }
         }
 
-        if (actor.pendingBoltTimer > 0.f)
+        if (actor.pendingBoltTimer >= 0.f)
         {
             actor.pendingBoltTimer -= MWBase::Environment::get().getFrameDuration();
             if (actor.pendingBoltTimer <= 0.f)
@@ -2320,6 +2317,10 @@ namespace mwmp
             const CastSpell& cs = actor.state.cast;
             if (!cs.release && !cs.castAnimation.empty())
             {
+                // Suppress lower-body anim group sync so the spellcast animation
+                // isn't overwritten by incoming position-packet idle/locomotion groups.
+                actor.animGroupHoldTimer = std::max(actor.animGroupHoldTimer, 1.0f);
+                actor.castStartReceived = true;
                 Log(Debug::Info) << "[MP] ActorSync: cast start playback actor=" << actor.state.refId
                                  << " spell='" << cs.spellId << "' castAnim='" << cs.castAnimation << "'";
                 if (MWRender::Animation* animation = world->getAnimation(actor.boundActor))
@@ -2352,10 +2353,18 @@ namespace mwmp
             }
             else if (cs.release && !cs.spellId.empty())
             {
+                // Also protect the release animation from being stomped by anim group sync.
+                actor.animGroupHoldTimer = std::max(actor.animGroupHoldTimer, 0.8f);
                 Log(Debug::Info) << "[MP] ActorSync: cast release playback actor=" << actor.state.refId
                                  << " spell='" << cs.spellId << "' castAnim='" << cs.castAnimation
-                                 << "' target='" << cs.targetRefId << "'";
-                if (!cs.castAnimation.empty())
+                                 << "' target='" << cs.targetRefId << "'"
+                                 << " castStartReceived=" << actor.castStartReceived;
+                // Only replay the wind-up animation if we never received the cast-start
+                // packet (e.g. the client was loading or the packet was dropped).
+                // When the start packet was received the animation is already mid-play at
+                // the release point, so restarting it would look wrong and push the bolt
+                // timer forward by a full extra wind-up duration.
+                if (!cs.castAnimation.empty() && !actor.castStartReceived)
                 {
                     if (MWRender::Animation* animation = world->getAnimation(actor.boundActor))
                     {
@@ -2497,12 +2506,25 @@ namespace mwmp
 
                     if (hasNonSelfEffect)
                     {
-                        actor.pendingBoltTimer = 0.6f;
+                        // If the cast-start packet was received the animation is already
+                        // at the release point — the auth sends this packet from the
+                        // "release" text-key callback, which is the exact moment the bolt
+                        // launches there.  Fire on the next frame (0.0f, enabled by the
+                        // >= 0.f guard in the timer countdown).
+                        // If the start packet was missed, allow the full wind-up animation
+                        // to play before the bolt appears (~0.9s for Morrowind cast anims).
+                        actor.pendingBoltTimer = actor.castStartReceived ? 0.0f : 0.9f;
                         actor.pendingBoltSpellId = cs.spellId;
                     }
                 }
             }
 
+            // Only clear castStartReceived when the sequence ends (release=true).
+            // Clearing it unconditionally here would reset the flag in the same
+            // pendingCast cycle it was just set, so the release handler would
+            // always see castStartReceived=false and use the wrong bolt timer.
+            if (cs.release)
+                actor.castStartReceived = false;
             actor.pendingCast = false;
         }
     }
