@@ -290,6 +290,11 @@ private:
     {
         BaseActor actor;
         uint64_t lastSnapshotTime = 0;
+        // Set once by spawnActor(); never updated by client reports.
+        // Used to protect freshly Lua-spawned actors from being evicted by
+        // the authority's first ActorList, which can arrive before the client
+        // has processed the spawn notification (timing race).
+        uint64_t serverSpawnTime = 0;
         bool persistent = false;
     };
 

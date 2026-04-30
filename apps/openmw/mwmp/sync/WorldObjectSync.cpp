@@ -26,6 +26,8 @@
 #include "../../mwworld/worldimp.hpp"
 #include "../../mwworld/inventorystore.hpp"
 #include "../../mwworld/containerstore.hpp"
+#include "../../mwmechanics/creaturestats.hpp"
+#include "../../mwrender/npcanimation.hpp"
 
 #include "../network/Client.hpp"
 #include "../Main.hpp"
@@ -54,6 +56,29 @@ namespace
                 return false;
         }
         return true;
+    }
+
+    bool containerStoreEmpty(const MWWorld::ContainerStore& store)
+    {
+        return store.begin() == store.end();
+    }
+
+    void clearDeadActorEquipmentVisuals(MWBase::World& world, const MWWorld::Ptr& target)
+    {
+        if (target.isEmpty() || !target.getClass().isActor() || !target.getClass().hasInventoryStore(target))
+            return;
+        if (!target.getClass().getCreatureStats(target).isDead())
+            return;
+
+        MWWorld::InventoryStore& inv = target.getClass().getInventoryStore(target);
+        for (int slot = 0; slot < MWWorld::InventoryStore::Slots; ++slot)
+        {
+            if (inv.getSlot(slot) != inv.end())
+                inv.unequipSlot(slot);
+        }
+
+        if (auto* anim = dynamic_cast<MWRender::NpcAnimation*>(world.getAnimation(target)))
+            anim->equipmentChanged();
     }
 
     MWWorld::CellStore* findActiveCellById(MWWorld::World& world, const std::string& cellId)
@@ -610,6 +635,8 @@ bool WorldObjectSync::tryApplyContainer(const ContainerRecord& record, Container
 
     if (action == ContainerAction::Set)
     {
+        if (record.items.empty())
+            clearDeadActorEquipmentVisuals(*world, target);
         cstore.clear();
         for (const auto& ci : record.items)
         {
@@ -617,6 +644,8 @@ bool WorldObjectSync::tryApplyContainer(const ContainerRecord& record, Container
             if (!ref.getPtr().isEmpty())
                 cstore.add(ref.getPtr(), ci.count);
         }
+        if (record.items.empty())
+            clearDeadActorEquipmentVisuals(*world, target);
     }
     else if (action == ContainerAction::Add)
     {
@@ -631,6 +660,8 @@ bool WorldObjectSync::tryApplyContainer(const ContainerRecord& record, Container
     {
         for (const auto& ci : record.items)
             cstore.remove(ESM::RefId::stringRefId(ci.refId), ci.count);
+        if (containerStoreEmpty(cstore))
+            clearDeadActorEquipmentVisuals(*world, target);
     }
 
     Log(Debug::Info) << "[MP] WorldObjectSync: applied Container action="

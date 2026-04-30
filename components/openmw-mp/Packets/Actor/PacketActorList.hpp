@@ -35,6 +35,7 @@ namespace mwmp
                 ws.write(actor.deathState);
                 ws.write(actor.isDead);
                 ws.write(actor.isInstantDeath);
+                ws.writeString(actor.deathAnimGroup);
                 ws.write(actor.isFollowerCellChange);
             }
         }
@@ -61,6 +62,7 @@ namespace mwmp
                 rs.read(actor.deathState);
                 rs.read(actor.isDead);
                 rs.read(actor.isInstantDeath);
+                actor.deathAnimGroup = rs.readString();
                 rs.read(actor.isFollowerCellChange);
             }
         }

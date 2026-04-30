@@ -1315,7 +1315,7 @@ bool MPServer::validateActorUpdate(const ConnectedClient& c, const ActorList& ac
 
     if (!cellMatches(c.player.cell, actorList.cellId))
     {
-        Log(Debug::Warning) << "[Server] Rejecting " << packetName << " from " << c.name
+        Log(Debug::Verbose) << "[Server] Rejecting " << packetName << " from " << c.name
                             << " due to cell mismatch: player=" << makeCellKey(c.player.cell)
                             << " packet=" << actorList.cellId;
         return false;
@@ -1589,7 +1589,8 @@ void MPServer::loadPersistentWorldState()
         normalizeActorIdentity(actor);
         maxMpNum = std::max(maxMpNum, actor.mpNum);
         auto& cellState = mWorld.actorCells[actor.cellId];
-        cellState.actors[makeActorKey(actor)] = { actor, currentServerTimeMs(), true };
+        // serverSpawnTime = 0: loaded actors are "old"; no spawn-grace needed.
+        cellState.actors[makeActorKey(actor)] = { actor, currentServerTimeMs(), /*serverSpawnTime=*/0, /*persistent=*/true };
         ++spawnedActorCount;
 
         for (const std::string_view recordType : { std::string_view("npc"), std::string_view("creature") })
@@ -2848,12 +2849,19 @@ void MPServer::handleActorList(ConnectedClient& c, const uint8_t* data, size_t s
 
     std::unordered_set<uint32_t> previousSpawnedActorMpNums;
     std::unordered_map<uint32_t, bool> previousSpawnedActorPersistence;
+    // Snapshot serverSpawnTime so we can protect recently server-spawned actors
+    // from being evicted by an authority ActorList that arrived before the client
+    // processed the spawn notification (timing race with the Lua tick thread).
+    std::unordered_map<uint32_t, uint64_t> previousSpawnedActorSpawnTime;
+    std::unordered_map<uint32_t, ActorRegistryRecord> previousActorRecords;
     for (const auto& [key, record] : cellState.actors)
     {
         if (record.actor.mpNum != 0)
         {
             previousSpawnedActorMpNums.insert(record.actor.mpNum);
             previousSpawnedActorPersistence[record.actor.mpNum] = record.persistent;
+            previousSpawnedActorSpawnTime[record.actor.mpNum] = record.serverSpawnTime;
+            previousActorRecords[record.actor.mpNum] = record;
         }
     }
 
@@ -2865,13 +2873,62 @@ void MPServer::handleActorList(ConnectedClient& c, const uint8_t* data, size_t s
         normalizeActorIdentity(actor);
         if (actor.mpNum != 0)
             currentSpawnedActorMpNums.insert(actor.mpNum);
+        const auto previousRecordIt = previousActorRecords.find(actor.mpNum);
+        const bool hadPreviousRecord = previousRecordIt != previousActorRecords.end();
+        const bool wasDead = hadPreviousRecord && previousRecordIt->second.actor.isDead;
         const auto persistentIt = previousSpawnedActorPersistence.find(actor.mpNum);
         const bool persistent = persistentIt != previousSpawnedActorPersistence.end() && persistentIt->second;
         auto [it, inserted] = cellState.actors.emplace(makeActorKey(actor),
-            ActorRegistryRecord { actor, incoming.serverTimestamp, persistent });
+            ActorRegistryRecord { actor, incoming.serverTimestamp, 0, persistent });
         if (!inserted)
-            it->second = { actor, incoming.serverTimestamp, persistent };
+            it->second = { actor, incoming.serverTimestamp, 0, persistent };
+        // Preserve the original serverSpawnTime so the grace-period logic
+        // remains accurate even after later client updates.
+        const auto spawnTimeIt = previousSpawnedActorSpawnTime.find(actor.mpNum);
+        if (spawnTimeIt != previousSpawnedActorSpawnTime.end())
+            it->second.serverSpawnTime = spawnTimeIt->second;
         persistSpawnedActorIfNeeded(it->second);
+
+        if (actor.mpNum != 0 && hadPreviousRecord && actor.isDead && !wasDead)
+        {
+            Log(Debug::Info) << "[Server] ActorList observed death transition"
+                             << " refId=" << it->second.actor.refId
+                             << " mpNum=" << it->second.actor.mpNum
+                             << " cell=" << incoming.cellId;
+            sendActorLifecycleEvent("death", it->second.actor, it->second.persistent);
+        }
+    }
+
+    // Grace period for freshly server-spawned actors: the authority's
+    // first ActorList can arrive before the client has processed the spawn
+    // notification sent by spawnActor() (Lua tick vs. incoming packet race).
+    // If the actor was spawned within the last 10 seconds and the authority
+    // didn't include it, re-inject it rather than deleting it.  The authority
+    // will acknowledge it once it processes the pending spawn notification.
+    // Note: actors removed via mp.removeActor() are already gone from
+    // cellState.actors before handleActorList runs, so they won't appear in
+    // previousSpawnedActorMpNums and are unaffected by this guard.
+    constexpr uint64_t kSpawnGraceMs = 10000; // 10 s
+    for (uint32_t previousMpNum : previousSpawnedActorMpNums)
+    {
+        if (currentSpawnedActorMpNums.count(previousMpNum) != 0)
+            continue; // acknowledged by client
+
+        const uint64_t spawnTime = previousSpawnedActorSpawnTime[previousMpNum];
+        const uint64_t age = (incoming.serverTimestamp > spawnTime)
+            ? (incoming.serverTimestamp - spawnTime) : 0;
+        if (age > kSpawnGraceMs)
+            continue; // old enough that the authority has definitely seen it
+
+        // Re-inject: the actor is too new to have been intentionally removed.
+        const auto& prev = previousActorRecords[previousMpNum];
+        const std::string actorKey = makeActorKey(prev.actor);
+        cellState.actors[actorKey] = prev;
+        currentSpawnedActorMpNums.insert(previousMpNum);
+        Log(Debug::Info) << "[Server] handleActorList re-injected recent actor"
+                         << " mpNum=" << previousMpNum
+                         << " age=" << age << "ms"
+                         << " cell=" << incoming.cellId;
     }
 
     if (mPlayerDb)
@@ -3065,9 +3122,29 @@ void MPServer::handleActorAttack(ConnectedClient& c, const uint8_t* data, size_t
     {
         actor.cellId = incoming.cellId;
         normalizeActorIdentity(actor);
+        Log(Debug::Info) << "[Server] ActorAttack candidate from " << c.name
+                         << " refId=" << actor.refId
+                         << " refNum=" << actor.refNum
+                         << " mpNum=" << actor.mpNum
+                         << " targetMpNum=" << actor.attack.targetMpNum
+                         << " damage=" << actor.attack.damage
+                         << " healthDamage=" << actor.attack.healthDamage;
         ActorRegistryRecord* stored = findTrackedActor(cellState, actor, c, "ActorAttack");
         if (!stored)
+        {
+            Log(Debug::Warning) << "[Server] ActorAttack dropped for untracked actor"
+                                << " refId=" << actor.refId
+                                << " refNum=" << actor.refNum
+                                << " mpNum=" << actor.mpNum
+                                << " cell=" << incoming.cellId;
             continue;
+        }
+        Log(Debug::Info) << "[Server] ActorAttack matched tracked actor"
+                         << " refId=" << stored->actor.refId
+                         << " refNum=" << stored->actor.refNum
+                         << " mpNum=" << stored->actor.mpNum
+                         << " persistent=" << stored->persistent
+                         << " wasDead=" << stored->actor.isDead;
         stored->actor.refId = actor.refId;
         stored->actor.refNum = actor.refNum;
         stored->actor.mpNum = actor.mpNum;
@@ -3161,10 +3238,31 @@ void MPServer::handleActorDeath(ConnectedClient& c, const uint8_t* data, size_t 
     {
         actor.cellId = incoming.cellId;
         normalizeActorIdentity(actor);
+        Log(Debug::Info) << "[Server] ActorDeath candidate from " << c.name
+                         << " refId=" << actor.refId
+                         << " refNum=" << actor.refNum
+                         << " mpNum=" << actor.mpNum
+                         << " isDead=" << actor.isDead
+                         << " hp=" << actor.dynamicStats.health.current
+                         << " deathAnim='" << actor.deathAnimGroup << "'";
         ActorRegistryRecord* stored = findTrackedActor(cellState, actor, c, "ActorDeath");
         if (!stored)
+        {
+            Log(Debug::Warning) << "[Server] ActorDeath dropped for untracked actor"
+                                << " refId=" << actor.refId
+                                << " refNum=" << actor.refNum
+                                << " mpNum=" << actor.mpNum
+                                << " cell=" << incoming.cellId;
             continue;
+        }
         const bool wasDead = stored->actor.isDead;
+        Log(Debug::Info) << "[Server] ActorDeath matched tracked actor"
+                         << " refId=" << stored->actor.refId
+                         << " refNum=" << stored->actor.refNum
+                         << " mpNum=" << stored->actor.mpNum
+                         << " persistent=" << stored->persistent
+                         << " wasDead=" << wasDead
+                         << " prevHp=" << stored->actor.dynamicStats.health.current;
         stored->actor.refId = actor.refId;
         stored->actor.refNum = actor.refNum;
         stored->actor.mpNum = actor.mpNum;
@@ -3939,12 +4037,37 @@ bool MPServer::spawnActor(
     actor.position = position;
     actor.equipment.resize(BaseActor::NUM_EQUIPMENT_SLOTS);
 
+    std::size_t staleContainerCount = 0;
+    for (auto it = mWorld.containers.begin(); it != mWorld.containers.end();)
+    {
+        const ContainerRecord& record = it->second;
+        if (record.mpNum != assignedMpNum)
+        {
+            ++it;
+            continue;
+        }
+
+        if (mPlayerDb)
+            mPlayerDb->deleteContainerRecord(record.cellId, record.refId, record.refNum);
+        it = mWorld.containers.erase(it);
+        ++staleContainerCount;
+    }
+
+    if (staleContainerCount != 0)
+        Log(Debug::Info) << "[Server] Script ActorSpawn cleared stale container authority"
+                         << " mpNum=" << assignedMpNum
+                         << " count=" << staleContainerCount;
+
     auto& cellState = mWorld.actorCells[cellId];
     if (cellState.authorityGuid == 0)
         refreshActorAuthorityForCell(cellId);
 
     const uint64_t timestamp = currentServerTimeMs();
-    ActorRegistryRecord registryRecord { actor, timestamp, persistent };
+    ActorRegistryRecord registryRecord;
+    registryRecord.actor           = actor;
+    registryRecord.lastSnapshotTime = timestamp;
+    registryRecord.serverSpawnTime  = timestamp;   // never updated by client
+    registryRecord.persistent       = persistent;
     cellState.actors[makeActorKey(actor)] = registryRecord;
 
     if (dynamicActorRecord != nullptr)

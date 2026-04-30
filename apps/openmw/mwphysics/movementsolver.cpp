@@ -150,16 +150,16 @@ namespace MWPhysics
             if (!shouldLogSurfDebug())
                 return;
 
-            Log(Debug::Info) << "[surf-debug] " << phase << " pos=(" << position.x() << "," << position.y() << ","
-                             << position.z() << ") vel=(" << velocity.x() << "," << velocity.y() << ","
-                             << velocity.z() << ") normal=(" << normal.x() << "," << normal.y() << ","
-                             << normal.z() << ") rampAngle=" << settings.rampAngle << " walkable=" << walkable
-                             << " seenGround=" << seenGround << " onGround=" << onGround
-                             << " onSlope=" << onSlope << " frac=" << fraction
-                             << " into=" << velocityIntoSurface << " overbounce=" << effectiveOverbounce
-                             << " seam=" << usedSeamLogic << " push=" << usedNormalPush
-                             << " clipped=" << clipped << " inDot=" << inputPlaneDot
-                             << " outDot=" << outputPlaneDot;
+            // Log(Debug::Info) << "[surf-debug] " << phase << " pos=(" << position.x() << "," << position.y() << ","
+            //                  << position.z() << ") vel=(" << velocity.x() << "," << velocity.y() << ","
+            //                  << velocity.z() << ") normal=(" << normal.x() << "," << normal.y() << ","
+            //                  << normal.z() << ") rampAngle=" << settings.rampAngle << " walkable=" << walkable
+            //                  << " seenGround=" << seenGround << " onGround=" << onGround
+            //                  << " onSlope=" << onSlope << " frac=" << fraction
+            //                  << " into=" << velocityIntoSurface << " overbounce=" << effectiveOverbounce
+            //                  << " seam=" << usedSeamLogic << " push=" << usedNormalPush
+            //                  << " clipped=" << clipped << " inDot=" << inputPlaneDot
+            //                  << " outDot=" << outputPlaneDot;
         }
 
         osg::Vec3f clipVelocity(const osg::Vec3f& input, const osg::Vec3f& normal, float overbounce)

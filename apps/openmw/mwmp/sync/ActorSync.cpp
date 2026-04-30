@@ -70,6 +70,12 @@ namespace
         return actor.refId + "|" + std::to_string(actor.refNum) + "|" + std::to_string(actor.mpNum);
     }
 
+    std::string fallbackDeathAnimGroup(const mwmp::BaseActor& actor)
+    {
+        const uint32_t seed = actor.mpNum != 0 ? actor.mpNum : actor.refNum;
+        return "death" + std::to_string((seed % 5) + 1);
+    }
+
     std::string makeLocalActorKey(const std::string& cellId, const MWWorld::Ptr& ptr)
     {
         return cellId + "|" + ptr.getCellRef().getRefId().serializeText() + "|"
@@ -283,6 +289,20 @@ namespace mwmp
     ActorSync::ActorSync(NetworkClient& client)
         : mClient(client)
     {
+    }
+
+    void ActorSync::resetSessionState()
+    {
+        // Wipe all per-session state.  Called when the player disconnects so
+        // that dangling MWWorld::Ptr references to CellStores from the old
+        // game session are never touched again.  The engine destroys all cells
+        // and their actors when returning to the main menu, so we must not
+        // attempt to call world->deleteObject() here - just drop the maps.
+        Log(Debug::Info) << "[MP] ActorSync: resetSessionState - clearing all cell/actor tracking";
+        mCells.clear();
+        mAuthority.clear();
+        mMpNumsByLocalActor.clear();
+        mServerSpawnedActorsByMpNum.clear();
     }
 
     void ActorSync::update(float dt)
@@ -1161,6 +1181,59 @@ namespace mwmp
         return 0;
     }
 
+    void ActorSync::applyBootstrapDeathState(ActorRuntime& actor)
+    {
+        if (!actor.state.isDead || actor.deathFromRealtimePacket || actor.boundActor.isEmpty()
+            || !actor.boundActor.getClass().isActor())
+            return;
+
+        MWBase::World* world = MWBase::Environment::get().getWorld();
+        if (!world)
+            return;
+
+        MWMechanics::CreatureStats& stats = actor.boundActor.getClass().getCreatureStats(actor.boundActor);
+
+        if (!actor.state.deathAnimGroup.empty())
+        {
+            if (actor.appliedDeathAnimGroup.empty())
+                actor.appliedDeathAnimGroup = actor.state.deathAnimGroup;
+            if (auto* baseNode = actor.boundActor.getRefData().getBaseNode())
+                baseNode->setUserValue("mp_death_anim_group", actor.appliedDeathAnimGroup);
+        }
+
+        const bool wasAlive = !stats.isDead();
+        if (wasAlive)
+        {
+            MWMechanics::DynamicStat<float> deadHealth = stats.getHealth();
+            deadHealth.setCurrent(0.f);
+            stats.setDeathAnimationFinished(true);
+            stats.setHealth(deadHealth);
+            Log(Debug::Info) << "[MP] ActorSync: bootstrap dead actor state"
+                             << " refId=" << actor.state.refId
+                             << " mpNum=" << actor.state.mpNum
+                             << " deathAnim='" << actor.appliedDeathAnimGroup << "'";
+        }
+        else
+        {
+            stats.setDeathAnimationFinished(true);
+        }
+
+        stats.setAttackingOrSpell(false);
+        stats.setDrawState(MWMechanics::DrawState::Nothing);
+        stats.getAiSequence().clear();
+        world->enableActorCollision(actor.boundActor, false);
+        if (MWRender::Animation* anim = world->getAnimation(actor.boundActor))
+            anim->removeEffects();
+
+        actor.lastAppliedAnimGroup.clear();
+        actor.lastAppliedHitFlags = 0;
+        actor.lastAttackPressed = false;
+        actor.pendingAttack = false;
+        actor.animGroupHoldTimer = 0.f;
+        actor.deathAlreadyApplied = true;
+        actor.deathFromRealtimePacket = false;
+    }
+
     void ActorSync::sendAuthoritativeActorUpdates(const std::string& cellId, CellRuntime& cell, float dt)
     {
         MWBase::World* world = MWBase::Environment::get().getWorld();
@@ -1175,6 +1248,7 @@ namespace mwmp
             cell.initialListSent = false;
             cell.positionSendTimer = 0.f;
             cell.actors.clear();
+            cell.authorityLoggedMpNums.clear();
         }
 
         MWWorld::World& worldImp = static_cast<MWWorld::World&>(*world);
@@ -1206,24 +1280,57 @@ namespace mwmp
             if (!ptr.getRefData().isEnabled())
                 return true;
 
+            // As authority, clear any residual mp_remote_actor flag so onHit
+            // applies health damage normally.  The flag is stamped by
+            // applyBoundActorState() during the brief pre-authority window
+            // (between server sending initial actor state and the authority
+            // grant packet arriving) and MUST be cleared once we own the cell.
+            // Without this, every server-spawned actor in the cell is immune to
+            // the authority player's attacks (onHit bails early for puppet NPCs).
+            if (auto* baseNode = ptr.getRefData().getBaseNode())
+                baseNode->setUserValue("mp_remote_actor", false);
+
             BaseActor actor;
             actor.refId = ptr.getCellRef().getRefId().serializeText();
             actor.refNum = ptr.getCellRef().getRefNum().mIndex;
             actor.cellId = cell.outboundCellId;
-            const uint32_t mappedMpNum = mappedMpNumForPtr(cell.outboundCellId, ptr);
-            if (mappedMpNum != 0)
-            {
-                if (!sentServerSpawnedMpNums.insert(mappedMpNum).second)
-                    return true;
-                actor.mpNum = mappedMpNum;
-                actor.refNum = 0;
-            }
-
             const auto& pos = ptr.getRefData().getPosition();
             for (int i = 0; i < 3; ++i)
             {
                 actor.position.pos[i] = pos.pos[i];
                 actor.position.rot[i] = pos.rot[i];
+            }
+
+            const uint32_t mappedMpNum = mappedMpNumForPtr(cell.outboundCellId, ptr);
+            if (mappedMpNum != 0)
+            {
+                if (!sentServerSpawnedMpNums.insert(mappedMpNum).second)
+                {
+                    Log(Debug::Info) << "[MP] ActorSync: authority duplicate mapped actor skipped"
+                                     << " cell=" << cell.outboundCellId
+                                     << " refId=" << actor.refId
+                                     << " localRefNum=" << actor.refNum
+                                     << " mappedMpNum=" << mappedMpNum;
+                    return true;
+                }
+                actor.mpNum = mappedMpNum;
+                actor.refNum = 0;
+                if (cell.authorityLoggedMpNums.insert(mappedMpNum).second)
+                {
+                    Log(Debug::Info) << "[MP] ActorSync: authority mapped actor"
+                                     << " cell=" << cell.outboundCellId
+                                     << " refId=" << actor.refId
+                                     << " mappedMpNum=" << mappedMpNum
+                                     << " pos=(" << actor.position.pos[0] << "," << actor.position.pos[1] << "," << actor.position.pos[2] << ")";
+                }
+            }
+            else if (actor.refId == "fargoth" || actor.refId.find("spawner_") != std::string::npos)
+            {
+                Log(Debug::Info) << "[MP] ActorSync: authority actor has no mapped mpNum"
+                                 << " cell=" << cell.outboundCellId
+                                 << " refId=" << actor.refId
+                                 << " localRefNum=" << actor.refNum
+                                 << " pos=(" << actor.position.pos[0] << "," << actor.position.pos[1] << "," << actor.position.pos[2] << ")";
             }
 
             MWMechanics::CreatureStats& stats = ptr.getClass().getCreatureStats(ptr);
@@ -1271,7 +1378,7 @@ namespace mwmp
             actor.dynamicStats.fatigue.current = stats.getFatigue().getCurrent();
             actor.dynamicStats.fatigue.mod = stats.getFatigue().getModifier();
             // Capture equipped items for visual sync (weapon in hand etc.)
-            if (ptr.getClass().hasInventoryStore(ptr))
+            if (!actor.isDead && ptr.getClass().hasInventoryStore(ptr))
             {
                 const MWWorld::InventoryStore& inv = ptr.getClass().getInventoryStore(ptr);
                 actor.equipment.clear();
@@ -1395,9 +1502,11 @@ namespace mwmp
             if (healthDelta > 0.5f || prevIt == cell.actors.end())
             {
                 Log(Debug::Info) << "[MP] ActorSync: health update for " << actor.refId
+                                 << " mpNum=" << actor.mpNum
                                  << " prev=" << prevHealth
                                  << " cur=" << actor.dynamicStats.health.current
-                                 << " dead=" << actor.isDead;
+                                 << " dead=" << actor.isDead
+                                 << " firstSeen=" << (prevIt == cell.actors.end());
                 statsUpdate.actors.push_back(actor);
             }
 
@@ -1407,7 +1516,9 @@ namespace mwmp
             // actor is dead, playRandomDeath() hasn't run yet so mp_death_anim_group
             // is empty. We defer until the anim group is available.
             {
-                const bool alreadySent = (prevIt != cell.actors.end()) && prevIt->second.deathPacketSent;
+                const bool alreadySent = (prevIt != cell.actors.end())
+                    && (prevIt->second.deathPacketSent
+                        || (prevIt->second.state.isDead && prevIt->second.deathAlreadyApplied));
                 if (actor.isDead && !alreadySent)
                 {
                     // Read the death anim group from the base node.
@@ -1417,10 +1528,29 @@ namespace mwmp
                         if (auto* baseNode = prevIt->second.boundActor.getRefData().getBaseNode())
                             baseNode->getUserValue("mp_death_anim_group", deathGroup);
                     }
+                    if (deathGroup.empty())
+                    {
+                        // Remote CombatRequest damage can kill the authority's
+                        // local actor without the CharacterController choosing
+                        // a death group before our send window. Pick a stable
+                        // group so non-authority clients still get a realtime
+                        // ActorDeath packet and can play a death animation.
+                        deathGroup = fallbackDeathAnimGroup(actor);
+                        if (prevIt != cell.actors.end() && !prevIt->second.boundActor.isEmpty())
+                        {
+                            if (auto* baseNode = prevIt->second.boundActor.getRefData().getBaseNode())
+                                baseNode->setUserValue("mp_death_anim_group", deathGroup);
+                        }
+                        Log(Debug::Info) << "[MP] ActorSync: synthesized death group for " << actor.refId
+                                         << " mpNum=" << actor.mpNum
+                                         << " anim='" << deathGroup << "'";
+                    }
 
                     if (!deathGroup.empty())
                     {
                         Log(Debug::Info) << "[MP] ActorSync: death send for " << actor.refId
+                                         << " mpNum=" << actor.mpNum
+                                         << " hp=" << actor.dynamicStats.health.current
                                          << " anim='" << deathGroup << "'";
                         BaseActor deathActor = actor;
                         deathActor.deathAnimGroup = deathGroup;
@@ -1620,6 +1750,8 @@ namespace mwmp
             return false;
 
         const bool expectsServerSpawn = actor.state.mpNum != 0;
+        const bool logTrackedActor = actor.state.refId == "fargoth"
+            || actor.state.refId.find("spawner_") != std::string::npos;
 
         if (!actor.boundActor.isEmpty() && matchesActor(actor.boundActor, actor.state))
         {
@@ -1627,7 +1759,19 @@ namespace mwmp
                 && actor.boundActor.getCell() != nullptr)
             {
                 if (cellIdForPtr(actor.boundActor) == cellId)
+                {
+                    if (logTrackedActor && !actor.bindingLogged)
+                    {
+                        Log(Debug::Info) << "[MP] ActorSync: resolveActorBinding reused bound actor"
+                                         << " cell=" << cellId
+                                         << " refId=" << actor.state.refId
+                                         << " mpNum=" << actor.state.mpNum
+                                         << " localRefNum=" << actor.boundActor.getCellRef().getRefNum().mIndex;
+                        actor.bindingLogged = true;
+                    }
+                    applyBootstrapDeathState(actor);
                     return true;
+                }
             }
         }
 
@@ -1642,9 +1786,26 @@ namespace mwmp
                 {
                     actor.boundActor = mappedIt->second;
                     rememberServerSpawnedActor(cellId, actor.boundActor, actor.state.mpNum);
+                    if (logTrackedActor && !actor.bindingLogged)
+                    {
+                        Log(Debug::Info) << "[MP] ActorSync: resolveActorBinding reused mpNum map"
+                                         << " cell=" << cellId
+                                         << " refId=" << actor.state.refId
+                                         << " mpNum=" << actor.state.mpNum
+                                         << " localRefNum=" << actor.boundActor.getCellRef().getRefNum().mIndex;
+                        actor.bindingLogged = true;
+                    }
+                    applyBootstrapDeathState(actor);
                     return true;
                 }
 
+                if (logTrackedActor)
+                {
+                    Log(Debug::Info) << "[MP] ActorSync: resolveActorBinding dropped stale mpNum map"
+                                     << " cell=" << cellId
+                                     << " refId=" << actor.state.refId
+                                     << " mpNum=" << actor.state.mpNum;
+                }
                 mServerSpawnedActorsByMpNum.erase(mappedIt);
             }
         }
@@ -1681,6 +1842,16 @@ namespace mwmp
         {
             try
             {
+                const float spawnX = actor.state.position.pos[0];
+                const float spawnY = actor.state.position.pos[1];
+                const float spawnZ = actor.state.position.pos[2];
+                const bool suspectPos = (spawnX == 0.f && spawnY == 0.f && spawnZ == 0.f);
+                Log(Debug::Info) << "[MP] ActorSync: resolveActorBinding spawning missing actor"
+                                 << " cell=" << cellId
+                                 << " refId=" << actor.state.refId
+                                 << " mpNum=" << actor.state.mpNum
+                                 << " pos=(" << spawnX << "," << spawnY << "," << spawnZ << ")"
+                                 << (suspectPos ? " WARN:pos-is-zero" : "");
                 MWWorld::ManualRef ref(world->getStore(), ESM::RefId::stringRefId(actor.state.refId), 1);
                 MWWorld::Ptr actorTemplate = ref.getPtr();
                 if (actorTemplate.isEmpty() || !actorTemplate.getClass().isActor())
@@ -1722,8 +1893,19 @@ namespace mwmp
         }
 
         actor.boundActor = found;
+        actor.bindingLogged = false;  // new binding - allow one fresh "reused" log next call
         if (expectsServerSpawn)
             rememberServerSpawnedActor(cellId, actor.boundActor, actor.state.mpNum);
+        applyBootstrapDeathState(actor);
+        if (logTrackedActor)
+        {
+            Log(Debug::Info) << "[MP] ActorSync: resolveActorBinding result"
+                             << " cell=" << cellId
+                             << " refId=" << actor.state.refId
+                             << " mpNum=" << actor.state.mpNum
+                             << " success=" << !actor.boundActor.isEmpty()
+                             << " localRefNum=" << (actor.boundActor.isEmpty() ? 0 : actor.boundActor.getCellRef().getRefNum().mIndex);
+        }
         return !actor.boundActor.isEmpty();
     }
 
@@ -2021,7 +2203,8 @@ namespace mwmp
         // This makes NPC-held weapons visible on non-authority clients.
         // Only notify the renderer when a slot actually changes to avoid rebuilding
         // the NPC mesh every frame.
-        if (!actor.state.equipment.empty() && actor.boundActor.getClass().hasInventoryStore(actor.boundActor))
+        if (!actor.state.isDead && !actor.state.equipment.empty()
+            && actor.boundActor.getClass().hasInventoryStore(actor.boundActor))
         {
             MWWorld::InventoryStore& inv = actor.boundActor.getClass().getInventoryStore(actor.boundActor);
             bool anyEquipmentChanged = false;
@@ -2122,6 +2305,8 @@ namespace mwmp
 
             if (actor.deathFromRealtimePacket)
                 stats.setDeathAnimationFinished(false);
+            else if (stats.isDeathAnimationFinished())
+                world->enableActorCollision(actor.boundActor, false);
             stats.setAttackingOrSpell(false);
             stats.setDrawState(MWMechanics::DrawState::Nothing);
             // Remove persistent spell VFX (Shield bubble, etc.) on death.

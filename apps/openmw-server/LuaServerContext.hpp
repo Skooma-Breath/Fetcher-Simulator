@@ -207,6 +207,9 @@ private:
     void initConfiguration();
     void initLua();
     void loadScripts();
+    std::filesystem::path globalStoragePath() const;
+    void loadGlobalStorage(LuaUtil::LuaView& view);
+    void saveGlobalStorage();
     std::size_t dispatchQueuedEvents();
     std::size_t processImmediateIntentRequests();
     std::size_t processSyncInterfaceRequests();

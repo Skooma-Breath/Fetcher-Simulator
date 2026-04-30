@@ -1881,6 +1881,13 @@ namespace MWMechanics
                     MWBase::Environment::get().getWorld()->enableActorCollision(actor.getPtr(), false);
                 }
             }
+            else if (killResult == CharacterController::Result_DeathAnimFinished && actor.getPtr() != getPlayer())
+            {
+                // Multiplayer can bootstrap corpses directly into their final death pose. In that case
+                // CharacterController::kill() does not pass through Result_DeathAnimJustFinished, so mirror
+                // the vanilla post-death collision cleanup here.
+                MWBase::Environment::get().getWorld()->enableActorCollision(actor.getPtr(), false);
+            }
         }
     }
 

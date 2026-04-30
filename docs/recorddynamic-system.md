@@ -496,7 +496,10 @@ Destructible spawners:
 - `/spawner purge` removes tracked payload actors without deleting the spawner; `/spawner remove` purges tracked payloads, removes the spawner actor, and removes the custom spawner record
 - `/spawner move`, `/spawner reset`, `/spawner info`, and `/spawner list` cover placement and maintenance; move/reset also purge existing payload actors so old placement tests do not leave linked actors behind
 - the in-game `/helpmenu` admin UI now has a Spawners tab for creating spawners, changing counts, purging payloads, resetting, and removing spawners
-- session spawners are removed from Lua spawner state on restart; persistent spawners keep their custom record, actor identity, and tracked durable payload actors when those payload actors were spawned as persistent
+- spawner configuration is stored in server Lua global storage, which is saved to `server-lua-storage.bin` on clean shutdown and loaded before server scripts start
+- session spawners are removed from Lua spawner state on restart; persistent spawners keep their custom record and configuration
+- runtime `mpNum` ownership does not survive a process restart: startup clears stale spawner actor ids, purges tracked payload ids from the previous process, and respawns a fresh spawner actor for each non-destroyed persistent spawner
+- permanent `spawner_*` creature records that no longer have Lua spawner state are surfaced as orphan rows in the admin UI so they can be removed explicitly instead of silently lingering outside the Spawners tab
 - `respawnOnCellReset` is stored now but inert until cell resets exist
 
 ## Persistence Policy Decision
@@ -601,12 +604,13 @@ Recommended next slices, updated to reflect current progress:
      - durable spawned actors persist to `world_spawned_actors` and reload across server restart
      - session-only spawned actors remain available through the explicit session flag
      - Lua-configured destructible spawners create actor-backed custom creature records using the configured model and maintain a timed payload population keyed by confirmed actor `mpNum`
+     - server Lua global storage now persists through `server-lua-storage.bin`; persistent spawners reload their configuration across clean restarts and respawn fresh runtime actors instead of reusing stale `mpNum`s
      - `/spawner count <name> <count>` and the admin UI Spawners tab now expose count configuration for existing spawners
    - remaining work:
      - add dedicated admin UI controls for actor spawn/despawn
      - wire spawner `respawnOnCellReset` into the future cell-reset implementation
      - expand persisted actor state if future gameplay needs inventory, AI package, or script-local actor state continuity
-     - regression-test spawner replacement, purge, remove, and restart behavior in a two-client live session
+     - keep regression-testing spawner replacement, purge, remove, and restart behavior in two-client live sessions as actor sync changes
 
 5. Keep the persistence policy aligned with implementation
    - status: decided and partially encoded
@@ -760,6 +764,8 @@ Use this exact order in the next multiplayer test session.
    - run `/spawner remove testspawner` on a fresh test spawner and confirm both the spawner actor and its tracked payload actors are removed
    - damage/kill the spawner and confirm future timed spawns stop while already-living payload actors remain in the world
    - run `/spawner move testspawner` and `/spawner reset testspawner` to verify maintenance commands
+   - restart the server cleanly and confirm `server-lua-storage.bin` is saved, the Spawners tab still lists the persistent spawner, stale runtime actor ids are cleared, and a fresh spawner actor is spawned
+   - remove an orphaned `spawner_*` dynamic creature record from the Spawners tab and confirm the row disappears after refresh
 13. Verify forced-removal policy:
    - create or keep one generated record that still has links
    - run the normal remove path and confirm it soft-fails while links remain

@@ -579,35 +579,6 @@ local function handleActivate(data)
     ))
 end
 
-intentPolicy.registerHandler("Activate", "demo_common_pants_gold_reward", function(context)
-    local object = context.object or {}
-    local result = context.result
-    if not result.accepted then
-        return nil
-    end
-    if tostring(object.recordId or ""):lower() ~= "common_pants_01" then
-        return nil
-    end
-    if not object.mpNum or not object.cell or object.cell == "" then
-        return {
-            accepted = false,
-            reason = "server_override_unverified_target",
-            mutation = "server-override-rejected",
-            applyStandardAction = false,
-        }
-    end
-
-    return {
-        applyStandardAction = false,
-        mutation = "server-inventory-grant",
-        ops = {
-            intentPolicy.ops.removePlacedObject(object.mpNum, object.cell),
-            intentPolicy.ops.grantInventory(context.player.guid, "gold_001", 50000),
-        },
-        stop = true,
-    }
-end)
-
 local function handleChat(player, data)
     local msg = data.message or ""
 

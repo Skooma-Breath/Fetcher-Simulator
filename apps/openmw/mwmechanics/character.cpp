@@ -3104,9 +3104,11 @@ namespace MWMechanics
     {
         if (mDeathState == CharState_None)
         {
+            MWMechanics::CreatureStats& cStats = mPtr.getClass().getCreatureStats(mPtr);
+            const bool deathAnimationAlreadyFinished = cStats.isDeathAnimationFinished();
             playRandomDeath();
             resetCurrentIdleState();
-            return Result_DeathAnimStarted;
+            return deathAnimationAlreadyFinished ? Result_DeathAnimFinished : Result_DeathAnimStarted;
         }
 
         MWMechanics::CreatureStats& cStats = mPtr.getClass().getCreatureStats(mPtr);

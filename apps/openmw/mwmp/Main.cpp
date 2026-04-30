@@ -350,6 +350,10 @@ void Main::onDisconnected()
     mIsLinked       = false;
     mLocalPublicKey.clear();
     MWPhysics::resetSurfPhysicsSettings();
+    // Clear all per-session actor/cell tracking so that stale MWWorld::Ptr
+    // references from the now-dying game world are never accessed on reconnect.
+    if (mActorSync)
+        mActorSync->resetSessionState();
 }
 
 // ---------------------------------------------------------------------------

@@ -58,6 +58,30 @@ local function recordIdForName(name)
     return "spawner_" .. safe
 end
 
+local function nameForRecordId(recordId)
+    recordId = trim(recordId)
+    if not recordId or recordId == "" then
+        return nil
+    end
+    if recordId:sub(1, #"spawner_") ~= "spawner_" then
+        return nil
+    end
+    return normalizeName(recordId:sub(#"spawner_" + 1):gsub("_", " "))
+end
+
+local function spawnerRecordExists(recordId)
+    recordId = trim(recordId)
+    if not recordId or recordId == "" then
+        return false
+    end
+    for _, entry in ipairs(recordStore.list("creature") or {}) do
+        if entry.recordId == recordId then
+            return true
+        end
+    end
+    return false
+end
+
 local function normalizeMeshPath(path)
     path = trim(path) or ""
     if path == "" then
@@ -218,6 +242,14 @@ end
 
 local function spawnSpawnerActor(spawner)
     if not spawner or not spawner.recordId or spawner.recordId == "" or not spawner.cellId or spawner.cellId == "" then
+        return false
+    end
+
+    normalizeSpawnerState(spawner)
+    if spawner.destroyed then
+        mp.log(string.format("[spawner] %s spawnSpawnerActor skipped because spawner is destroyed",
+            tostring(spawner.name)
+        ))
         return false
     end
 
@@ -504,6 +536,11 @@ local function removeSpawner(name)
     local state = loadState()
     local spawner = state[name]
     if not spawner then
+        local orphanRecordId = recordIdForName(name)
+        if spawnerRecordExists(orphanRecordId) then
+            recordStore.remove("creature", orphanRecordId, { force = true })
+            return true, "Removed orphaned spawner record " .. orphanRecordId .. "."
+        end
         return false, "Spawner not found: " .. name
     end
 
@@ -777,9 +814,11 @@ end
 
 function M.listForAdminUi()
     local entries = {}
+    local seenRecordIds = {}
     for name, spawner in pairs(loadState()) do
         if type(spawner) == "table" then
             normalizeSpawnerState(spawner)
+            seenRecordIds[spawner.recordId] = true
             entries[#entries + 1] = {
                 name = name,
                 recordId = spawner.recordId,
@@ -798,6 +837,34 @@ function M.listForAdminUi()
                 destroyed = spawner.destroyed == true,
                 active = spawner.active == true,
             }
+        end
+    end
+
+    for _, record in ipairs(recordStore.list("creature") or {}) do
+        local recordId = tostring(record.recordId or "")
+        if not seenRecordIds[recordId] then
+            local name = nameForRecordId(recordId)
+            if name then
+                entries[#entries + 1] = {
+                    name = name,
+                    recordId = recordId,
+                    spawnRefId = "",
+                    spawnCount = 0,
+                    liveCount = 0,
+                    pendingCount = 0,
+                    remaining = 0,
+                    spawnInterval = getSpawnInterval(),
+                    spawnTimer = 0,
+                    actorMpNum = 0,
+                    cellId = "",
+                    persistent = record.persistent == true,
+                    spawnedPersistent = false,
+                    respawnOnCellReset = false,
+                    destroyed = true,
+                    active = false,
+                    orphanedRecord = true,
+                }
+            end
         end
     end
 
@@ -894,8 +961,13 @@ function M.onActorDeath(data)
 
     for name, candidate in pairs(state) do
         normalizeSpawnerState(candidate)
+        -- Primary match: the server-side mpNum we explicitly track.
+        -- Fallback (actorMpNum == 0): match by recordId + cellId only when the
+        -- spawner actor hasn't been confirmed yet.  Requiring actorMpNum == 0
+        -- prevents a ghost actor from a previous server run (same recordId,
+        -- same cellId, different mpNum) from falsely destroying an active spawner.
         if (candidate.actorMpNum ~= 0 and candidate.actorMpNum == mpNum)
-            or (candidate.recordId == data.refId and candidate.cellId == data.cellId) then
+            or (candidate.actorMpNum == 0 and candidate.recordId == data.refId and candidate.cellId == data.cellId) then
             matchedName = name
             spawner = candidate
             isSpawnerActor = true
@@ -918,7 +990,7 @@ function M.onActorDeath(data)
         spawner.pendingSpawns = {}
         spawner.spawnTimer = spawner.spawnInterval
         refreshCounts(spawner)
-        mp.log(string.format("[spawner] %s destroyed; future timed spawns halted live=%d remaining=%d",
+        mp.log(string.format("[spawner] %s destroyed; future timed spawns halted live=%d remaining=%d actorMpNum reset to 0",
             matchedName,
             spawner.liveCount,
             spawner.remaining
@@ -971,6 +1043,27 @@ function M.onServerInit()
                 changed = true
             else
                 spawner.pendingSpawns = {}
+                local staleActorMpNum = tonumber(spawner.actorMpNum) or 0
+                if staleActorMpNum ~= 0 then
+                    mp.removeGameObject(staleActorMpNum, spawner.cellId or "")
+                    mp.log(string.format("[spawner] %s init removing stale spawner actor mpNum=%s",
+                        tostring(name),
+                        tostring(staleActorMpNum)
+                    ))
+                    spawner.actorMpNum = 0
+                    spawner.active = false
+                    changed = true
+                end
+
+                if tableCount(spawner.spawnedMpNums) > 0 then
+                    local removedPayloads = purgeSpawnedActors(spawner)
+                    mp.log(string.format("[spawner] %s init purged %d stale payload actor(s) from previous server run",
+                        tostring(name),
+                        removedPayloads
+                    ))
+                    changed = true
+                end
+
                 refreshCounts(spawner)
 
                 local stored = ensureSpawnerRecord(name, true)
@@ -979,7 +1072,17 @@ function M.onServerInit()
                     changed = true
                 end
 
-                if not spawner.destroyed and spawner.actorMpNum == 0 then
+                if spawner.destroyed then
+                    if spawner.actorMpNum ~= 0 then
+                        mp.log(string.format("[spawner] %s init clearing stale actorMpNum=%s on destroyed spawner",
+                            tostring(name),
+                            tostring(spawner.actorMpNum)
+                        ))
+                        spawner.actorMpNum = 0
+                        changed = true
+                    end
+                elseif spawner.actorMpNum == 0 then
+                    mp.log(string.format("[spawner] %s init respawning missing spawner actor", tostring(name)))
                     spawnSpawnerActor(spawner)
                     changed = true
                 end
@@ -1005,7 +1108,16 @@ function M.onServerTick(data)
         if type(spawner) == "table" then
             normalizeSpawnerState(spawner)
 
-            if not spawner.destroyed then
+            if spawner.destroyed then
+                if spawner.actorMpNum ~= 0 then
+                    mp.log(string.format("[spawner] %s tick clearing stale actorMpNum=%s on destroyed spawner",
+                        tostring(name),
+                        tostring(spawner.actorMpNum)
+                    ))
+                    spawner.actorMpNum = 0
+                    changed = true
+                end
+            else
                 if expirePendingSpawns(spawner, dt) then
                     changed = true
                 end

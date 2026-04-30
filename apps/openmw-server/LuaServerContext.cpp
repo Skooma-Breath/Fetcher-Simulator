@@ -215,6 +215,7 @@ void LuaServerContext::stop()
         mLuaThread.join();
 
     mThreadRunning = false;
+    saveGlobalStorage();
 }
 
 void LuaServerContext::drainOutbound()
@@ -1330,6 +1331,7 @@ void LuaServerContext::initLua()
     mLua->protectedCall([&](LuaUtil::LuaView& view) {
         LuaUtil::LuaStorage::initLuaBindings(view);
         mGlobalStorage.setActive(true);
+        loadGlobalStorage(view);
         mGlobalStorage.setListener(&mStorageSyncListener);
 
         mLua->addCommonPackage("mp", initMpPackage(view, this, &mGlobalStorage));
@@ -1359,6 +1361,30 @@ void LuaServerContext::loadScripts()
     Log(Debug::Info) << "[LuaServerContext] Loaded "
                      << mConfiguration.getGlobalConf().size()
                      << " global server Lua script(s) from " << mScriptsDir;
+}
+
+std::filesystem::path LuaServerContext::globalStoragePath() const
+{
+    return std::filesystem::current_path() / "server-lua-storage.bin";
+}
+
+void LuaServerContext::loadGlobalStorage(LuaUtil::LuaView& view)
+{
+    const std::filesystem::path path = globalStoragePath();
+    if (!std::filesystem::exists(path))
+        return;
+
+    mGlobalStorage.load(view.sol().lua_state(), path);
+}
+
+void LuaServerContext::saveGlobalStorage()
+{
+    if (!mLoaded || !mLua)
+        return;
+
+    mLua->protectedCall([&](LuaUtil::LuaView& view) {
+        mGlobalStorage.save(view.sol().lua_state(), globalStoragePath());
+    });
 }
 
 std::size_t LuaServerContext::dispatchQueuedEvents()

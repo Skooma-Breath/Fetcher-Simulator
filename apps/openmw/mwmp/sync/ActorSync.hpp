@@ -4,10 +4,16 @@
 #include <string>
 #include <deque>
 #include <unordered_map>
+#include <unordered_set>
 #include <osg/Vec3f>
 #include <components/openmw-mp/Base/BaseActor.hpp>
 
 #include "../../mwworld/ptr.hpp"
+
+namespace MWBase
+{
+    class World;
+}
 
 namespace mwmp
 {
@@ -21,6 +27,12 @@ namespace mwmp
         explicit ActorSync(NetworkClient& client);
 
         void update(float dt);
+
+        // Must be called when the local player fully disconnects from a server
+        // (e.g. returns to main menu).  Clears all per-session cell/actor
+        // tracking so stale Ptr references from the previous game session are
+        // never dereferenced after the world has been torn down.
+        void resetSessionState();
 
         void onAuthorityUpdate(const ActorList& list);
 
@@ -101,6 +113,10 @@ namespace mwmp
             // Briefly suppress authoritative lower-body group sync so local hit/attack
             // transitions can finish without being immediately overwritten.
             float animGroupHoldTimer = 0.f;
+            // Log-dedup: true once the steady-state "reused binding" message has
+            // been emitted for the current boundActor.  Reset whenever a new
+            // binding is established so the first confirmation is always logged.
+            bool bindingLogged = false;
         };
 
         struct CellRuntime
@@ -110,6 +126,9 @@ namespace mwmp
             float positionSendTimer = 0.f;
             bool initialListSent = false;
             std::string outboundCellId;
+            // Log-dedup: mpNums already reported via "authority mapped actor".
+            // Cleared whenever outboundCellId changes so re-mappings are logged.
+            std::unordered_set<uint32_t> authorityLoggedMpNums;
         };
 
         void queueSnapshot(ActorRuntime& actor, const BaseActor& state, const ActorList& list);
@@ -118,6 +137,7 @@ namespace mwmp
         void sendAuthoritativeActorUpdates(const std::string& cellId, CellRuntime& cell, float dt);
         bool shouldAcceptSnapshot(CellRuntime& cell, const ActorList& list, const char* packetName);
         bool resolveActorBinding(const std::string& cellId, ActorRuntime& actor);
+        void applyBootstrapDeathState(ActorRuntime& actor);
         void applyBoundActorState(ActorRuntime& actor);
         void rememberServerSpawnedActor(const std::string& cellId, const MWWorld::Ptr& ptr, uint32_t mpNum);
         void forgetServerSpawnedActor(const std::string& cellId, const MWWorld::Ptr& ptr, uint32_t mpNum);
