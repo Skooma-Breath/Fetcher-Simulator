@@ -462,14 +462,29 @@ Current flow:
 5. Route non-authority hits through `ActorCombatRequest` using the exact spawned-actor `mpNum`
 6. Keep runtime link tracking so the actor instance keeps its generated dependencies alive until despawn or removal
 7. Persist spawned actor rows in `world_spawned_actors` when the spawn is durable
+8. Protect freshly spawned actors from authority race conditions: the server tracks `serverSpawnTime` and gives newly spawned actors a 10-second grace period in `handleActorList` so the authority's first actor list cannot evict an actor before the client has processed the spawn notification
+9. Clean up stale container authority records when reusing an `mpNum` via `spawnActor()`, so previous-session container ownership does not leak into the new actor
+10. Detect death transitions in `handleActorList` when a previously alive tracked actor reports `isDead`; fire `sendActorLifecycleEvent("death", ...)` to Lua, which drives spawner `onActorDeath` callbacks
 
-Current corpse behavior for spawned actors:
+Current corpse and death synchronization behavior:
 
 - dead spawned actors can be activated by non-authority players
 - first activate opens the corpse container, even when it is empty
 - corpse inventory snapshots and container deltas flow through the server-owned container sync path
 - `Dispose of Corpse` sends an explicit multiplayer dispose request instead of relying on local object deletion side effects
 - the server removes the corpse authoritatively only after the corpse container is empty
+- `deathAnimGroup` is now serialized in `PacketActorList` so corpse death poses persist across cell loads and client joins
+- non-authority clients joining mid-session receive dead actors with `isDead` and `deathAnimGroup` already set; `applyBootstrapDeathState()` immediately sets health to zero, marks the death animation as finished, disables collision, clears AI, and applies the death pose without playing the full animation sequence
+- if `deathAnimGroup` is missing for a bootstrapped corpse, a deterministic fallback (`death1`–`death5` seeded by `mpNum`) is used so every client shows a consistent pose
+- equipment is not applied to dead actors (`applyBoundActorState` skips the equipment path when `isDead` is true) to avoid visual artifacts on corpses
+- when a container Set or Remove action empties a dead actor's inventory, `clearDeadActorEquipmentVisuals()` also strips equipment rendering so looted corpses do not continue displaying held weapons or armor
+- the engine's `CharacterController::kill()` now returns `Result_DeathAnimFinished` (instead of `Result_DeathAnimStarted`) when the death animation was already marked as finished, and `Actors::kill()` immediately disables collision for non-player actors in that case
+
+Actor sync session lifecycle:
+
+- `ActorSync::resetSessionState()` is called from `Main::onDisconnected()` when the player returns to the main menu
+- this clears all per-session cell/actor tracking (cell runtimes, authority maps, mpNum maps, server-spawned actor maps) so stale `MWWorld::Ptr` references from the now-destroyed game world are never dereferenced on reconnect
+- the engine destroys all cells when returning to the main menu, so `resetSessionState()` does not attempt to call `world->deleteObject()` — it simply drops the tracking maps
 
 This avoids relying on client-local `world.createRecord` IDs, which are not multiplayer-safe.
 
@@ -766,12 +781,22 @@ Use this exact order in the next multiplayer test session.
    - run `/spawner move testspawner` and `/spawner reset testspawner` to verify maintenance commands
    - restart the server cleanly and confirm `server-lua-storage.bin` is saved, the Spawners tab still lists the persistent spawner, stale runtime actor ids are cleared, and a fresh spawner actor is spawned
    - remove an orphaned `spawner_*` dynamic creature record from the Spawners tab and confirm the row disappears after refresh
-13. Verify forced-removal policy:
+13. Verify actor death synchronization:
+    - spawn or find an NPC/creature actor, kill it from the authority client, and confirm the non-authority client shows the correct death pose with collision disabled
+    - have a second client join mid-session and confirm bootstrapped corpses appear in consistent death poses (not T-pose or alive-looking) with collision already disabled
+    - loot a dead actor's corpse completely and confirm equipment visuals are cleared on the corpse after the container is emptied
+    - confirm that dead actors do not have equipment re-applied on subsequent `ActorList` updates
+14. Verify session teardown:
+    - disconnect the client (return to main menu) and reconnect to the same server
+    - confirm no crashes from stale actor references and that actor tracking rebuilds cleanly from fresh `ActorList` packets
+15. Verify spawn grace period:
+    - spawn a new actor via `/spawnat` and confirm it is not evicted by the authority's next `ActorList` update within the first 10 seconds
+16. Verify forced-removal policy:
    - create or keep one generated record that still has links
    - run the normal remove path and confirm it soft-fails while links remain
    - run the forced remove path and confirm the server scrubs matching references before broadcasting removal
-14. Restart the server again.
-15. Reconnect and verify restart behavior:
+17. Restart the server again.
+18. Reconnect and verify restart behavior:
    - session-only records should be gone
    - persistent records should still exist
    - durable spawned actors should reload from `world_spawned_actors`
@@ -779,7 +804,7 @@ Use this exact order in the next multiplayer test session.
    - placed objects or saved inventory referencing persistent records should still resolve
    - generated persistent records with no surviving links should be treated as GC candidates, not permanent keep-forever records
    - `/recordstore list` should not show the wiped session-only ids
-16. If anything fails, collect:
+19. If anything fails, collect:
    - `openmw-server.log`
    - client `openmw.log`
    - the output of `/recordstore list`
@@ -809,21 +834,28 @@ Implemented or effectively present in the current working tree:
 - durable spawned actor persistence through `world_spawned_actors`, with explicit session-only spawn support
 - generic `/delete <mpNum> [cell]` cleanup for spawned actors and placed objects
 - Lua-configured destructible spawners backed by custom creature records and the configured `meshes\i\active_port_Indo.NIF` model, with timed population control keyed by tracked payload actor `mpNum`s so the configured live-count cap is enforced correctly
+- actor death synchronization: `deathAnimGroup` serialized in `PacketActorList`, `applyBootstrapDeathState()` for mid-session join corpse pose, deterministic fallback death poses, collision disabled on bootstrapped corpses, equipment skipped for dead actors, and `clearDeadActorEquipmentVisuals()` on container empty
+- session teardown via `ActorSync::resetSessionState()` on disconnect to prevent stale `Ptr` dereferences after returning to main menu
+- server-side spawn race protection: 10-second grace period for freshly spawned actors in `handleActorList`, stale container authority cleanup on `mpNum` reuse
+- server-side death transition detection in `handleActorList` with `sendActorLifecycleEvent("death", ...)` driving spawner `onActorDeath` callbacks
+- spawner lifecycle hardening: stale `mpNum` cleanup on restart, orphaned `spawner_*` record surfacing in admin UI, tighter death-matching requiring `actorMpNum == 0` for `recordId` fallback
 - `openmw-server` and `openmw` now build successfully in the existing `MSVC2022_64` build tree for the `RelWithDebInfo` configuration after these changes
 - test/admin commands for record creation, inspection, sync, and GC
 
 Still remaining after this session:
 
-1. dedicated admin UI flow around spawned actor spawn/removal
+1. dedicated admin UI flow around spawned actor spawn/despawn
 2. future actor inventory/spell dependency extraction and validation
 3. validation that container-related automatic GC behavior is safe in all live multiplayer cases
 4. any batching/rate-limiting or observability polish needed for larger auto-GC waves
 5. broader cleanup/reset participation for future despawn and cell-reset flows, including `respawnOnCellReset`
 6. timestamped buffered interpolation for dedicated actors; intentionally deferred from this slice
 7. broader full-project build/test coverage beyond the successfully built `openmw-server` and `openmw` targets
+8. regression-test death sync bootstrap in two-client sessions: verify corpse poses are consistent, collision is disabled, and equipment visuals clear after looting
 
 Recommended next implementation order:
 
 1. admin UI controls for spawned actors
-2. future actor inventory/spell dependency helpers and validation
-3. cell-reset/runtime unlink integration and auto-GC polish
+2. death sync regression testing across multi-client sessions
+3. future actor inventory/spell dependency helpers and validation
+4. cell-reset/runtime unlink integration and auto-GC polish
