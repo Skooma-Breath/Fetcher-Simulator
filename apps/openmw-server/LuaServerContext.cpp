@@ -611,6 +611,15 @@ float LuaServerContext::getWorldHour() const
     return mSnapshot.worldHour;
 }
 
+std::optional<LuaActorSnapshot> LuaServerContext::getActor(uint32_t mpNum) const
+{
+    std::lock_guard<std::mutex> lock(mActorsMutex);
+    auto it = mActorsByMpNum.find(mpNum);
+    if (it == mActorsByMpNum.end())
+        return std::nullopt;
+    return it->second;
+}
+
 std::optional<PlacedObject> LuaServerContext::getPlacedObject(uint32_t mpNum) const
 {
     std::lock_guard<std::mutex> lock(mPlacedObjectsMutex);
@@ -1220,6 +1229,18 @@ void LuaServerContext::clearPlayerData(uint32_t guid)
 {
     std::lock_guard<std::mutex> lock(mPlayerDataMutex);
     mPlayerScriptData.erase(guid);
+}
+
+void LuaServerContext::syncActors(std::vector<LuaActorSnapshot> actors)
+{
+    std::lock_guard<std::mutex> lock(mActorsMutex);
+    mActorsByMpNum.clear();
+    for (auto& actor : actors)
+    {
+        if (actor.actor.mpNum == 0)
+            continue;
+        mActorsByMpNum[actor.actor.mpNum] = std::move(actor);
+    }
 }
 
 void LuaServerContext::syncPlacedObjects(std::vector<PlacedObject> objects)

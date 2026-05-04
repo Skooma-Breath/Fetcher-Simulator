@@ -223,6 +223,15 @@ namespace mwmp
         /// Delete one server-spawned actor by mpNum.
         void deleteSpawnedActor(uint32_t mpNum);
 
+        /// Load persisted dead vanilla actors.
+        std::vector<BaseActor> loadDeadVanillaActors();
+
+        /// Insert or update one persisted dead vanilla actor.
+        void upsertDeadVanillaActor(const BaseActor& actor);
+
+        /// Delete one persisted dead vanilla actor by identity.
+        void deleteDeadVanillaActor(std::string_view refId, uint32_t refNum);
+
         /// Load server-authoritative container inventories.
         std::vector<ContainerRecord> loadContainerRecords();
 
@@ -240,6 +249,12 @@ namespace mwmp
 
         /// Delete one persisted door state entry.
         void deleteDoorState(std::string_view cellId, std::string_view refId, uint32_t refNum);
+
+        /// Load or initialize the durable increment-only multiplayer object id allocator.
+        uint64_t loadNextMpNum(uint64_t minimumNext);
+
+        /// Persist the next multiplayer object id. Values are never lowered by this call's normal users.
+        void saveNextMpNum(uint64_t nextMpNum);
 
         /// Load persisted dynamic records shared by all players.
         std::vector<PersistedDynamicRecord> loadDynamicRecords();

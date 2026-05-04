@@ -51,6 +51,12 @@ struct LuaPlayerSnapshot
     std::vector<Item> inventory;
 };
 
+struct LuaActorSnapshot
+{
+    BaseActor actor;
+    bool persistent = false;
+};
+
 class LuaServerContext
 {
 public:
@@ -98,6 +104,7 @@ public:
     int getPlayerCount() const;
     double getUptime() const;
     float getWorldHour() const;
+    std::optional<LuaActorSnapshot> getActor(uint32_t mpNum) const;
     std::optional<PlacedObject> getPlacedObject(uint32_t mpNum) const;
     SurfPhysicsSettings getGlobalSurfPhysicsSettings() const;
     SurfPhysicsSettings getCellSurfPhysicsSettings(const std::string& cellId) const;
@@ -166,6 +173,7 @@ public:
     void setPlayerData(uint32_t guid, const std::string& key, const std::string& value);
     std::optional<std::string> getPlayerData(uint32_t guid, const std::string& key) const;
     void clearPlayerData(uint32_t guid);
+    void syncActors(std::vector<LuaActorSnapshot> actors);
     void syncPlacedObjects(std::vector<PlacedObject> objects);
     void upsertPlacedObject(PlacedObject object);
     void removePlacedObject(uint32_t mpNum);
@@ -273,6 +281,8 @@ private:
     std::unordered_map<uint32_t, std::unordered_map<std::string, PlayerMark>> mPlayerMarks;
     mutable std::mutex                         mPlacedObjectsMutex;
     std::unordered_map<uint32_t, PlacedObject> mPlacedObjectsByMpNum;
+    mutable std::mutex                         mActorsMutex;
+    std::unordered_map<uint32_t, LuaActorSnapshot> mActorsByMpNum;
     mutable std::mutex                         mGeneratedRecordIdMutex;
     std::string                                mGeneratedRecordIdPrefix = "$custom";
     std::unordered_map<std::string, uint64_t>  mNextGeneratedRecordNumByType;

@@ -36,6 +36,7 @@
 #include <components/openmw-mp/Packets/Actor/PacketActorAttack.hpp>
 #include <components/openmw-mp/Packets/Actor/PacketActorAuthority.hpp>
 #include <components/openmw-mp/Packets/Actor/PacketActorCast.hpp>
+#include <components/openmw-mp/Packets/Actor/PacketActorCellChange.hpp>
 #include <components/openmw-mp/Packets/Actor/PacketActorCombatRequest.hpp>
 #include <components/openmw-mp/Packets/Actor/PacketActorDeath.hpp>
 #include <components/openmw-mp/Packets/Actor/PacketActorEquipment.hpp>
@@ -924,6 +925,16 @@ void Main::registerProtocolHandlers()
             pkt.setActorList(&tmp);
             if (!pkt.decode(data, size)) return;
             mActorSync->onActorCast(tmp);
+        });
+
+    proto.registerHandler(PacketType::ActorCellChange,
+        [this](const uint8_t* data, size_t size)
+        {
+            ActorList tmp;
+            PacketActorCellChange pkt;
+            pkt.setActorList(&tmp);
+            if (!pkt.decode(data, size)) return;
+            mActorSync->onActorCellChange(tmp);
         });
 
     proto.registerHandler(PacketType::ActorDeath,

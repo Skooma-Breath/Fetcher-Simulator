@@ -11,6 +11,7 @@
 #include <components/misc/rng.hpp>
 #include <components/openmw-mp/Packets/Player/PacketPlayerPosition.hpp>
 #include <components/openmw-mp/Packets/Player/PacketPlayerCellChange.hpp>
+#include <components/openmw-mp/Packets/Player/PacketPlayerLoadedCells.hpp>
 #include <components/openmw-mp/Packets/Player/PacketPlayerStatsDynamic.hpp>
 #include <components/openmw-mp/Packets/Player/PacketPlayerBaseInfo.hpp>
 #include <components/openmw-mp/Packets/Player/PacketPlayerEquipment.hpp>
@@ -40,6 +41,8 @@
 #include "../../mwworld/class.hpp"
 #include "../../mwworld/cellstore.hpp"
 #include "../../mwworld/cell.hpp"
+#include "../../mwworld/scene.hpp"
+#include "../../mwworld/worldimp.hpp"
 #include "../../mwworld/esmstore.hpp"
 #include "../../mwworld/globals.hpp"
 #include "../../mwworld/inventorystore.hpp"
@@ -78,6 +81,26 @@ namespace
     bool sameEquipment(const EquipmentItem& left, const EquipmentItem& right)
     {
         return left.slot == right.slot && sameItem(left.item, right.item);
+    }
+
+    std::string cellIdFromCell(const CellId& cell)
+    {
+        if (!cell.isExterior)
+            return cell.cellName;
+
+        return std::string("EXT:") + std::to_string(cell.gridX) + "," + std::to_string(cell.gridY);
+    }
+
+    std::string cellIdForStore(const MWWorld::CellStore* store)
+    {
+        if (store == nullptr || store->getCell() == nullptr)
+            return {};
+
+        const MWWorld::Cell* cell = store->getCell();
+        if (cell->isExterior())
+            return std::string("EXT:") + std::to_string(cell->getGridX()) + "," + std::to_string(cell->getGridY());
+
+        return std::string(cell->getNameId());
     }
 
     bool hasRecordId(const MWWorld::ESMStore& store, const std::string& refId)
@@ -255,6 +278,7 @@ void PlayerSync::forceFullSync(bool includeInventoryAndEquipment)
 
     sendBaseInfo();
     sendCellChange();
+    sendLoadedActorCells(true);
     if (includeInventoryAndEquipment)
     {
         sendEquipment();
@@ -522,7 +546,10 @@ void PlayerSync::update(float dt)
     {
         snapshotCell();
         sendCellChange();
+        sendLoadedActorCells(true);
     }
+    else
+        sendLoadedActorCells();
     if (equipmentChanged())
     {
         snapshotEquipment();
@@ -594,6 +621,53 @@ void PlayerSync::sendCellChange()
     mClient.sendReliable(pkt.encode(mSeqCounter++));
     Log(Debug::Verbose) << "[MP] PlayerSync: cell change sent -> "
                         << mLocal.cell.cellName;
+}
+
+std::vector<std::string> PlayerSync::collectLoadedActorCellIds() const
+{
+    std::vector<std::string> cells;
+
+    MWBase::World* world = MWBase::Environment::get().getWorld();
+    if (world)
+    {
+        MWWorld::World& worldImp = static_cast<MWWorld::World&>(*world);
+        for (MWWorld::CellStore* store : worldImp.getWorldScene().getActiveCells())
+        {
+            const std::string cellId = cellIdForStore(store);
+            if (!cellId.empty())
+                cells.push_back(cellId);
+        }
+    }
+
+    const std::string activeCellId = cellIdFromCell(mLocal.cell);
+    if (!activeCellId.empty())
+        cells.push_back(activeCellId);
+
+    std::sort(cells.begin(), cells.end());
+    cells.erase(std::unique(cells.begin(), cells.end()), cells.end());
+    return cells;
+}
+
+void PlayerSync::sendLoadedActorCells(bool force)
+{
+    const std::vector<std::string> loadedCellIds = collectLoadedActorCellIds();
+    if (loadedCellIds.empty())
+        return;
+
+    if (!force && loadedCellIds == mLastLoadedActorCells)
+        return;
+
+    mLastLoadedActorCells = loadedCellIds;
+
+    PacketPlayerLoadedCells pkt;
+    pkt.sequence = ++mLoadedActorCellsSequence;
+    pkt.activeCellId = cellIdFromCell(mLocal.cell);
+    pkt.loadedCellIds = loadedCellIds;
+
+    mClient.sendReliable(pkt.encode(mSeqCounter++));
+    Log(Debug::Verbose) << "[MP] PlayerSync: loaded actor cells sent active="
+                        << pkt.activeCellId << " count=" << pkt.loadedCellIds.size()
+                        << " seq=" << pkt.sequence;
 }
 
 void PlayerSync::sendDynamicStats()
@@ -697,8 +771,6 @@ void PlayerSync::sendAnimFlags(float dt)
     MWWorld::Ptr player = world->getPlayerPtr();
     if (player.isEmpty()) return;
 
-    const MWMechanics::Movement& mov
-        = player.getClass().getMovementSettings(player);
     const MWMechanics::CreatureStats& stats
         = player.getClass().getCreatureStats(player);
 

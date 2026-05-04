@@ -87,6 +87,22 @@ namespace
         return sol::make_object(thisState, LuaUtil::makeReadOnly(table));
     }
 
+    sol::object makeActorValue(sol::this_state thisState, const LuaActorSnapshot& actorSnapshot)
+    {
+        sol::state_view lua(thisState);
+        const BaseActor& actor = actorSnapshot.actor;
+        sol::table table(lua, sol::create);
+        table["mpNum"] = actor.mpNum;
+        table["refNum"] = actor.refNum;
+        table["refId"] = actor.refId;
+        table["cell"] = actor.cellId;
+        table["cellId"] = actor.cellId;
+        table["isDead"] = actor.isDead;
+        table["persistent"] = actorSnapshot.persistent;
+        table["position"] = makePositionTable(lua, actor.position);
+        return sol::make_object(thisState, LuaUtil::makeReadOnly(table));
+    }
+
     sol::object makeDatabaseTableInfoValue(sol::this_state thisState, const DatabaseTableInfo& info)
     {
         sol::state_view lua(thisState);
@@ -217,6 +233,18 @@ sol::table initMpPackage(LuaUtil::LuaView& view, LuaServerContext* context, LuaU
             return sol::make_object(ts, sol::nil);
 
         return makePlacedObjectValue(ts, *object);
+    });
+
+    mp.set_function("getActorByMpNum", [context](uint32_t mpNum, sol::this_state ts) -> sol::object
+    {
+        if (!context)
+            return sol::make_object(ts, sol::nil);
+
+        auto actor = context->getActor(mpNum);
+        if (!actor)
+            return sol::make_object(ts, sol::nil);
+
+        return makeActorValue(ts, *actor);
     });
 
     mp.set_function("grantInventoryItem", [context](uint32_t guid, const std::string& refId, int count) -> bool

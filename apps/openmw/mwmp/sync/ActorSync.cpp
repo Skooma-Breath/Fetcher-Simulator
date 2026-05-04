@@ -445,6 +445,40 @@ namespace mwmp
         cell.actors = std::move(updatedActors);
     }
 
+    void ActorSync::onActorCellChange(const ActorList& list)
+    {
+        // list.cellId  = source cell (where the actor was)
+        // actor.cellId = destination cell (where the actor is going)
+        // Move each actor's runtime from the source cell to the destination cell.
+        auto srcIt = mCells.find(list.cellId);
+        if (srcIt == mCells.end())
+            return;
+
+        for (const auto& actorState : list.actors)
+        {
+            const std::string actorKey = makeActorKey(actorState);
+            auto runtimeIt = srcIt->second.actors.find(actorKey);
+            if (runtimeIt == srcIt->second.actors.end())
+                continue;
+
+            ActorRuntime runtime = std::move(runtimeIt->second);
+            srcIt->second.actors.erase(runtimeIt);
+
+            const std::string& destCellId = actorState.cellId;
+            auto& destCell = mCells[destCellId];
+            runtime.state = actorState;
+            runtime.snapshots.clear();
+            runtime.hasSmoothedPosition = false;
+            queueSnapshot(runtime, actorState, list);
+            destCell.actors[actorKey] = std::move(runtime);
+
+            Log(Debug::Info) << "[MP] ActorSync: cell change " << actorState.refId
+                             << " mpNum=" << actorState.mpNum
+                             << " from=" << list.cellId
+                             << " to=" << destCellId;
+        }
+    }
+
     void ActorSync::onActorPositionUpdate(const ActorList& list)
     {
         auto& cell = mCells[list.cellId];
@@ -1121,7 +1155,7 @@ namespace mwmp
             ? actor.snapshots[1].position
             : actor.snapshots.front().position;
 
-        const float alpha = std::clamp(dt * 10.f, 0.f, 1.f);
+        const float alpha = std::clamp(dt * 15.f, 0.f, 1.f);
         for (int i = 0; i < 3; ++i)
         {
             actor.smoothedPosition.pos[i] = lerpFloat(actor.smoothedPosition.pos[i], target.pos[i], alpha);
@@ -1459,9 +1493,25 @@ namespace mwmp
         {
             cell.positionSendTimer = 0.f;
 
-            PacketActorPosition positionPacket;
-            positionPacket.setActorList(&outgoing);
-            mClient.sendUnreliable(positionPacket.encode());
+            // Cap the number of actors per position packet to avoid flooding the
+            // server when a cell has many actors (e.g. spawner stress test).
+            // The full ActorList (used for keyset changes) is unaffected.
+            static constexpr int kMaxActorsPerPositionPacket = 12;
+            if (static_cast<int>(outgoing.actors.size()) > kMaxActorsPerPositionPacket)
+            {
+                ActorList chunk = outgoing;
+                chunk.actors.assign(outgoing.actors.begin(),
+                    outgoing.actors.begin() + kMaxActorsPerPositionPacket);
+                PacketActorPosition positionPacket;
+                positionPacket.setActorList(&chunk);
+                mClient.sendUnreliable(positionPacket.encode());
+            }
+            else
+            {
+                PacketActorPosition positionPacket;
+                positionPacket.setActorList(&outgoing);
+                mClient.sendUnreliable(positionPacket.encode());
+            }
         }
 
         // Detect health changes and deaths, send reliable packets when they occur.

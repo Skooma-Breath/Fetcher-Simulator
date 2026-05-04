@@ -167,6 +167,27 @@ local COMMANDS = {
         adminOnly = true,
     },
     {
+        id = "mpwhere",
+        category = "Admin",
+        usage = "/mpwhere <mpNum>",
+        summary = "Show the current server-tracked location for an actor or object mpNum.",
+        adminOnly = true,
+    },
+    {
+        id = "tomp",
+        category = "Admin",
+        usage = "/tomp <mpNum>",
+        summary = "Teleport to a server-tracked actor or object mpNum.",
+        adminOnly = true,
+    },
+    {
+        id = "bringmp",
+        category = "Admin",
+        usage = "/bringmp <mpNum> [distance] [direction]",
+        summary = "Respawn a live server-spawned actor near you with the same mpNum.",
+        adminOnly = true,
+    },
+    {
         id = "spawnat",
         category = "Admin",
         usage = "/spawnat <refId|\"ref id\"> [distance] [direction] [refNum] [mpNum] [persistent|session]",

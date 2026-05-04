@@ -8,6 +8,7 @@
 #include <map>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <memory>
 #include <vector>
 #include <atomic>
@@ -56,6 +57,9 @@ struct ConnectedClient
 
     // Per-player key/value store — set/get from Lua scripts via player:setData/getData().
     std::unordered_map<std::string, std::string> scriptData;
+
+    std::unordered_set<std::string> loadedActorCells; ///< empty falls back to player.cell
+    uint32_t loadedActorCellsSequence = 0;
 };
 
 // ---------------------------------------------------------------------------
@@ -196,6 +200,7 @@ private:
     void handlePlayerBaseInfo   (ConnectedClient& c, const uint8_t* data, size_t size);
     void handlePlayerPosition   (ConnectedClient& c, const uint8_t* data, size_t size);
     void handlePlayerCellChange (ConnectedClient& c, const uint8_t* data, size_t size);
+    void handlePlayerLoadedCells(ConnectedClient& c, const uint8_t* data, size_t size);
     void handlePlayerEquipment  (ConnectedClient& c, const uint8_t* data, size_t size);
     void handlePlayerAnimFlags  (ConnectedClient& c, const uint8_t* data, size_t size);
     void handlePlayerAnimPlay   (ConnectedClient& c, const uint8_t* data, size_t size);
@@ -219,6 +224,7 @@ private:
     void handleActorAnimPlay    (ConnectedClient& c, const uint8_t* data, size_t size);
     void handleActorAttack      (ConnectedClient& c, const uint8_t* data, size_t size);
     void handleActorCast        (ConnectedClient& c, const uint8_t* data, size_t size);
+    void handleActorCellChange  (ConnectedClient& c, const uint8_t* data, size_t size);
     void handleActorDeath       (ConnectedClient& c, const uint8_t* data, size_t size);
     void handleActorEquipment   (ConnectedClient& c, const uint8_t* data, size_t size);
     void handleActorStatsDynamic(ConnectedClient& c, const uint8_t* data, size_t size);
@@ -237,6 +243,10 @@ private:
                          const std::vector<uint8_t>& data,
                          HSteamNetConnection except = k_HSteamNetConnection_Invalid,
                          bool reliable = true);
+    void broadcastActorToCell(const std::string& cellId,
+                              const std::vector<uint8_t>& data,
+                              HSteamNetConnection except = k_HSteamNetConnection_Invalid,
+                              bool reliable = true);
 
     // ── Validation ────────────────────────────────────────────────────────
     bool validateMovement(const ConnectedClient& c, const BasePlayer& proposed) const;
@@ -255,6 +265,10 @@ private:
     bool acceptPlacedObject(PlacedObject& object);
     bool grantInventoryItem(ConnectedClient& c, const std::string& refId, int count);
     struct ActorRegistryRecord;
+    bool worldMpNumInUse(uint32_t mpNum) const;
+    std::optional<uint32_t> reserveWorldMpNum();
+    void advanceWorldMpNumPast(uint32_t mpNum);
+    void setNextWorldMpNum(uint64_t nextMpNum);
     bool removePlacedObjectAuthoritative(uint32_t mpNum, const std::string& cellId);
     bool removePlacedObjectAuthoritativeAnyCell(uint32_t mpNum, const std::string& preferredCellId);
     void persistSpawnedActorIfNeeded(const ActorRegistryRecord& record);
@@ -283,8 +297,11 @@ private:
     void refreshActorAuthorityForCell(const std::string& cellId, uint32_t preferredGuid = 0);
     void sendActorAuthorityToClient(HSteamNetConnection conn, const std::string& cellId);
     void sendActorStateToClient(HSteamNetConnection conn, const std::string& cellId);
+    void sendActorStateToInterestedClients(const std::string& cellId);
     void sendGameSettingsToClient(HSteamNetConnection conn, const std::string& cellId);
     bool validateActorUpdate(const ConnectedClient& c, const ActorList& actorList, const char* packetName);
+    bool clientHasActorCellLoaded(const ConnectedClient& client, const std::string& cellId) const;
+    std::unordered_set<std::string> actorInterestCellsForClient(const ConnectedClient& client) const;
 
     struct ActorRegistryRecord
     {
@@ -311,6 +328,26 @@ private:
         const BaseActor& actor,
         const ConnectedClient& sender,
         const char* packetName);
+    std::optional<ActorRegistryRecord> removeActorFromOtherCells(
+        const BaseActor& actor,
+        const std::string& destinationCellId,
+        std::unordered_set<std::string>& changedCellIds);
+    void broadcastActorListForCell(const std::string& cellId, CellActorState& cellState);
+    void upsertSpawnedActorDynamicRecordLinkIfNeeded(const BaseActor& actor);
+    void rememberActorLocation(const BaseActor& actor, const std::string& cellId);
+    void forgetActorLocation(const BaseActor& actor, const std::string& cellId = {});
+    void rememberDeadVanillaActor(const ActorRegistryRecord& record);
+    void forgetDeadVanillaActor(const BaseActor& actor, const std::string& cellId = {});
+    const ActorRegistryRecord* findDeadVanillaActor(
+        const BaseActor& actor, std::string* cellId = nullptr) const;
+    bool rejectStaleAliveVanillaActor(
+        const BaseActor& actor,
+        const std::string& incomingCellId,
+        const ConnectedClient& sender,
+        const char* packetName) const;
+    std::size_t mergeDeadVanillaActorsForCell(
+        const std::string& cellId,
+        std::unordered_map<std::string, ActorRegistryRecord>& actors) const;
 
     ISteamNetworkingSockets* mInterface    = nullptr;
     HSteamListenSocket       mListenSocket = k_HSteamListenSocket_Invalid;
@@ -363,8 +400,10 @@ private:
         std::unordered_map<std::string, mwmp::ContainerRecord> containers;
         std::unordered_map<std::string, StoredDynamicRecord> dynamicRecords;
         std::unordered_map<std::string, CellActorState> actorCells;
-        uint32_t nextObjectMpNum = 1;
-        uint32_t nextActorMpNum = 1;
+        std::unordered_map<std::string, std::string> actorLocations;
+        std::unordered_map<std::string, std::unordered_map<std::string, ActorRegistryRecord>> deadVanillaActorCells;
+        uint64_t nextObjectMpNum = 1;
+        uint64_t nextActorMpNum = 1;
         uint64_t nextDynamicRecordSequence = 1;
 
         // Weather — reported by the host (guid 1) and relayed to others.

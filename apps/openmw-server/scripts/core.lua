@@ -23,6 +23,9 @@ local ALLOW_UNVERIFIED_ACTIVATE = Config.ALLOW_UNVERIFIED_ACTIVATE == true
 local LOGIN_PREFIX = COMMAND_PREFIX .. "login "
 local KICK_PREFIX = COMMAND_PREFIX .. "kick "
 local DELETE_PREFIX = COMMAND_PREFIX .. "delete "
+local MPWHERE_PREFIX = COMMAND_PREFIX .. "mpwhere "
+local TOMP_PREFIX = COMMAND_PREFIX .. "tomp "
+local BRINGMP_PREFIX = COMMAND_PREFIX .. "bringmp "
 local PLACEAT_PREFIX = COMMAND_PREFIX .. "placeat "
 local SPAWNAT_PREFIX = COMMAND_PREFIX .. "spawnat "
 local SETTIME_PREFIX = COMMAND_PREFIX .. "settime "
@@ -293,6 +296,42 @@ local function sendSpawnAtUsage(player)
     player:sendMessage("Quote refIds that contain spaces, for example /spawnat \"fargoth\"")
     player:sendMessage("direction: 0=front, 1=back, 2=left, 3=right")
     player:sendMessage("refNum defaults to 0; mpNum defaults to server-assigned")
+end
+
+local function sendBringMpUsage(player)
+    player:sendMessage("Usage: /bringmp <mpNum> [distance] [direction]")
+    player:sendMessage("direction: 0=front, 1=back, 2=left, 3=right")
+end
+
+local function resolveMpTarget(mpNum)
+    local actor = mp.getActorByMpNum and mp.getActorByMpNum(mpNum) or nil
+    if actor then
+        return "actor", actor
+    end
+
+    local object = mp.getObjectByMpNum(mpNum)
+    if object then
+        return "object", object
+    end
+
+    return nil, nil
+end
+
+local function positionSummary(position)
+    position = plainPosition(position)
+    return string.format("%.1f, %.1f, %.1f", position.x, position.y, position.z)
+end
+
+local function sendMpTargetSummary(player, kind, target)
+    player:sendMessage(string.format(
+        "mpNum=%d %s refId=%s cell=%s pos=(%s)%s",
+        target.mpNum,
+        kind,
+        tostring(target.refId),
+        tostring(target.cell or target.cellId or ""),
+        positionSummary(target.position),
+        target.isDead and " dead" or ""
+    ))
 end
 
 local function resolveVerifiedTarget(object)
@@ -669,6 +708,164 @@ local function handleChat(player, data)
 
         player:sendMessage(string.format("Queued delete for mpNum=%d.", mpNum))
         mp.log(string.format("[core] /delete by %s mpNum=%d cell=%s", player.name, mpNum, tostring(cellId)))
+        return false
+    end
+
+    if msg == COMMAND_PREFIX .. "mpwhere" or msg:sub(1, #MPWHERE_PREFIX) == MPWHERE_PREFIX then
+        if not requireAdmin(player) then
+            return false
+        end
+
+        local args, parseError = parseCommandArgs(msg:sub(#MPWHERE_PREFIX + 1))
+        if not args then
+            player:sendMessage(parseError or "Invalid arguments.")
+            player:sendMessage("Usage: /mpwhere <mpNum>")
+            return false
+        end
+
+        local mpNum = toPositiveInteger(args[1])
+        if not mpNum then
+            player:sendMessage("Usage: /mpwhere <mpNum>")
+            return false
+        end
+
+        local kind, target = resolveMpTarget(mpNum)
+        if not target then
+            player:sendMessage("No server-tracked actor or object found for mpNum=" .. tostring(mpNum) .. ".")
+            return false
+        end
+
+        sendMpTargetSummary(player, kind, target)
+        return false
+    end
+
+    if msg == COMMAND_PREFIX .. "tomp" or msg:sub(1, #TOMP_PREFIX) == TOMP_PREFIX then
+        if not requireAdmin(player) then
+            return false
+        end
+
+        local args, parseError = parseCommandArgs(msg:sub(#TOMP_PREFIX + 1))
+        if not args then
+            player:sendMessage(parseError or "Invalid arguments.")
+            player:sendMessage("Usage: /tomp <mpNum>")
+            return false
+        end
+
+        local mpNum = toPositiveInteger(args[1])
+        if not mpNum then
+            player:sendMessage("Usage: /tomp <mpNum>")
+            return false
+        end
+
+        local kind, target = resolveMpTarget(mpNum)
+        if not target then
+            player:sendMessage("No server-tracked actor or object found for mpNum=" .. tostring(mpNum) .. ".")
+            return false
+        end
+
+        local cellId = normalizeCellId(target.cell or target.cellId)
+        if not cellId or cellId == "" then
+            player:sendMessage("Target has no valid cell.")
+            return false
+        end
+
+        local position = plainPosition(target.position)
+        position.isTeleporting = true
+        if not mp.teleportPlayer(player.guid, cellId, position) then
+            player:sendMessage("Failed to queue teleport to mpNum=" .. tostring(mpNum) .. ".")
+            return false
+        end
+
+        player:sendMessage(string.format("Teleporting to %s mpNum=%d in %s.", kind, mpNum, cellId))
+        mp.log(string.format("[core] /tomp by %s mpNum=%d kind=%s cell=%s", player.name, mpNum, kind, cellId))
+        return false
+    end
+
+    if msg == COMMAND_PREFIX .. "bringmp" or msg:sub(1, #BRINGMP_PREFIX) == BRINGMP_PREFIX then
+        if not requireAdmin(player) then
+            return false
+        end
+
+        local args, parseError = parseCommandArgs(msg:sub(#BRINGMP_PREFIX + 1))
+        if not args then
+            player:sendMessage(parseError or "Invalid arguments.")
+            sendBringMpUsage(player)
+            return false
+        end
+
+        local mpNum = toPositiveInteger(args[1])
+        if not mpNum then
+            sendBringMpUsage(player)
+            return false
+        end
+
+        local actor = mp.getActorByMpNum and mp.getActorByMpNum(mpNum) or nil
+        if not actor then
+            local object = mp.getObjectByMpNum(mpNum)
+            if object then
+                player:sendMessage("/bringmp currently supports server-spawned actors; use /tomp for objects.")
+            else
+                player:sendMessage("No server-tracked actor found for mpNum=" .. tostring(mpNum) .. ".")
+            end
+            return false
+        end
+
+        if actor.isDead then
+            player:sendMessage("/bringmp only moves live server-spawned actors.")
+            return false
+        end
+
+        if #args > 3 then
+            sendBringMpUsage(player)
+            return false
+        end
+
+        local distance = 128
+        if args[2] and args[2] ~= "" then
+            local parsedDistance = toNonNegativeNumber(args[2])
+            if not parsedDistance then
+                player:sendMessage("distance must be a non-negative number.")
+                return false
+            end
+            distance = parsedDistance
+        end
+
+        local direction = 0
+        if args[3] and args[3] ~= "" then
+            local parsedDirection = toPlaceDirection(args[3])
+            if parsedDirection == nil then
+                player:sendMessage("direction must be 0, 1, 2, or 3.")
+                return false
+            end
+            direction = parsedDirection
+        end
+
+        local cellId = normalizeCellId(player.cell)
+        if not cellId or cellId == "" then
+            player:sendMessage("Unable to determine your current cell.")
+            return false
+        end
+
+        local sourceCellId = normalizeCellId(actor.cell or actor.cellId) or ""
+        local position = placeAtPosition(player, distance, direction)
+        if not mp.removeGameObject(mpNum, sourceCellId) then
+            player:sendMessage("Failed to queue removal for mpNum=" .. tostring(mpNum) .. ".")
+            return false
+        end
+        if not mp.spawnActor(actor.refId, actor.refNum or 0, mpNum, cellId, position,
+            { persistent = actor.persistent ~= false }) then
+            player:sendMessage("Failed to queue respawn for mpNum=" .. tostring(mpNum) .. ".")
+            return false
+        end
+
+        player:sendMessage(string.format(
+            "Queued bring for actor mpNum=%d refId=%s to %s.",
+            mpNum, tostring(actor.refId), cellId
+        ))
+        mp.log(string.format(
+            "[core] /bringmp by %s mpNum=%d refId=%s from=%s to=%s distance=%.1f direction=%d",
+            player.name, mpNum, tostring(actor.refId), tostring(sourceCellId), cellId, distance, direction
+        ))
         return false
     end
 

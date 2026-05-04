@@ -43,7 +43,8 @@ namespace mwmp
         PlayerPosition      = 12,
         PlayerMomentum      = 13,
         PlayerCellChange    = 14,
-        PlayerCellState     = 15,  // Batch notify of loaded/unloaded cells
+        PlayerLoadedCells   = 15,  // Client reports active + loaded actor cells
+        PlayerCellState     = 15,  // Legacy name for the loaded-cell state packet
         PlayerAnimFlags     = 16,  // Unreliable, per-frame movement/action state
         PlayerAnimPlay      = 17,  // Reliable one-shot animation trigger
         PlayerAttack        = 18,  // Reliable attack event

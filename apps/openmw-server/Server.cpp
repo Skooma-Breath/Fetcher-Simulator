@@ -21,6 +21,7 @@
 #include <cstring>
 #include <fstream>
 #include <iostream>
+#include <limits>
 #include <sstream>
 #include <stdexcept>
 #include <string_view>
@@ -36,6 +37,7 @@
 #include <components/openmw-mp/Packets/Player/PacketPlayerCharGen.hpp>
 #include <components/openmw-mp/Packets/Player/PacketPlayerPosition.hpp>
 #include <components/openmw-mp/Packets/Player/PacketPlayerCellChange.hpp>
+#include <components/openmw-mp/Packets/Player/PacketPlayerLoadedCells.hpp>
 #include <components/openmw-mp/Packets/Player/PacketPlayerEquipment.hpp>
 #include <components/openmw-mp/Packets/Player/PacketPlayerAnimFlags.hpp>
 #include <components/openmw-mp/Packets/Player/PacketPlayerAnimPlay.hpp>
@@ -60,6 +62,7 @@
 #include <components/openmw-mp/Packets/Actor/PacketActorAttack.hpp>
 #include <components/openmw-mp/Packets/Actor/PacketActorAuthority.hpp>
 #include <components/openmw-mp/Packets/Actor/PacketActorCast.hpp>
+#include <components/openmw-mp/Packets/Actor/PacketActorCellChange.hpp>
 #include <components/openmw-mp/Packets/Actor/PacketActorDeath.hpp>
 #include <components/openmw-mp/Packets/Actor/PacketActorEquipment.hpp>
 #include <components/openmw-mp/Packets/Actor/PacketActorList.hpp>
@@ -584,6 +587,8 @@ namespace
         return !playerCell.isExterior && playerCell.cellName == cellId;
     }
 
+    constexpr std::size_t MaxLoadedActorCells = 25;
+
     std::string makeActorKey(const mwmp::BaseActor& actor)
     {
         if (actor.mpNum != 0)
@@ -595,6 +600,37 @@ namespace
     {
         if (actor.mpNum != 0)
             actor.refNum = 0;
+    }
+
+    bool sameDynamicStat(const mwmp::DynamicStat& a, const mwmp::DynamicStat& b)
+    {
+        return a.base == b.base && a.current == b.current && a.mod == b.mod;
+    }
+
+    bool sameDynamicStats(const mwmp::DynamicStats& a, const mwmp::DynamicStats& b)
+    {
+        return sameDynamicStat(a.health, b.health)
+            && sameDynamicStat(a.magicka, b.magicka)
+            && sameDynamicStat(a.fatigue, b.fatigue);
+    }
+
+    bool sameDeadVanillaActorState(const mwmp::BaseActor& a, const mwmp::BaseActor& b)
+    {
+        return a.refId == b.refId
+            && a.refNum == b.refNum
+            && a.mpNum == b.mpNum
+            && a.cellId == b.cellId
+            && a.position.pos[0] == b.position.pos[0]
+            && a.position.pos[1] == b.position.pos[1]
+            && a.position.pos[2] == b.position.pos[2]
+            && a.position.rot[0] == b.position.rot[0]
+            && a.position.rot[1] == b.position.rot[1]
+            && a.position.rot[2] == b.position.rot[2]
+            && sameDynamicStats(a.dynamicStats, b.dynamicStats)
+            && a.deathState == b.deathState
+            && a.isDead == b.isDead
+            && a.isInstantDeath == b.isInstantDeath
+            && a.deathAnimGroup == b.deathAnimGroup;
     }
 
     uint64_t currentServerTimeMs()
@@ -690,16 +726,22 @@ bool MPServer::teleportPlayer(uint32_t guid, const std::string& cellId, const Po
         return false;
 
     const std::string oldCell = makeCellKey(client->player.cell);
+    const std::unordered_set<std::string> oldActorInterestCells = actorInterestCellsForClient(*client);
     client->player.cell = *parsedCell;
     client->player.position = position;
     client->player.position.isTeleporting = true;
     client->player.velocity = {};
+    client->loadedActorCells.clear();
+    client->loadedActorCellsSequence = 0;
 
     const std::string newCell = makeCellKey(client->player.cell);
     syncLuaSnapshot();
 
-    if (!oldCell.empty() && oldCell != newCell)
-        refreshActorAuthorityForCell(oldCell);
+    for (const std::string& oldActorCellId : oldActorInterestCells)
+    {
+        if (oldActorCellId != newCell)
+            refreshActorAuthorityForCell(oldActorCellId);
+    }
     if (!newCell.empty())
         refreshActorAuthorityForCell(newCell, client->guid);
 
@@ -1113,6 +1155,7 @@ void MPServer::onClientDisconnected(HSteamNetConnection conn, const std::string&
 
     const auto& client = it->second;
     const std::string actorCell = makeCellKey(client.player.cell);
+    const std::unordered_set<std::string> actorInterestCells = actorInterestCellsForClient(client);
     Log(Debug::Info) << "[Server] Client disconnected: "
                      << client.name << " (" << reason << ")";
 
@@ -1151,7 +1194,12 @@ void MPServer::onClientDisconnected(HSteamNetConnection conn, const std::string&
     mLua.clearPlayerMarks(client.guid);
     mLua.clearPlayerData(client.guid);
     mClients.erase(it);
-    if (!actorCell.empty())
+    if (!actorInterestCells.empty())
+    {
+        for (const std::string& cellId : actorInterestCells)
+            refreshActorAuthorityForCell(cellId);
+    }
+    else if (!actorCell.empty())
         refreshActorAuthorityForCell(actorCell);
     syncLuaSnapshot();
 }
@@ -1167,12 +1215,10 @@ void MPServer::refreshActorAuthorityForCell(const std::string& cellId, uint32_t 
 
     auto isEligible = [&](const ConnectedClient& client)
     {
-        return client.charSelectComplete && cellMatches(client.player.cell, cellId);
+        return clientHasActorCellLoaded(client, cellId);
     };
 
     // Stability: keep the current authority owner as long as they are still in the cell.
-    // A newly entering player must not steal authority from whoever already holds it.
-    // The preferredGuid hint only takes effect when the cell has no active owner.
     if (cellState.authorityGuid != 0)
     {
         for (const auto& [conn, client] : mClients)
@@ -1185,7 +1231,44 @@ void MPServer::refreshActorAuthorityForCell(const std::string& cellId, uint32_t 
         }
     }
 
-    // Current authority is gone — try the preferred GUID first.
+    // Prefer a client whose canonical active cell exactly matches the actor cell.
+    if (newAuthorityGuid == 0)
+    {
+        for (const auto& [conn, client] : mClients)
+        {
+            if (!isEligible(client) || !cellMatches(client.player.cell, cellId))
+                continue;
+
+            if (newAuthorityGuid == 0 || client.guid < newAuthorityGuid)
+                newAuthorityGuid = client.guid;
+        }
+    }
+
+    // For exterior cells visible to several players, prefer the closest active exterior grid.
+    if (newAuthorityGuid == 0)
+    {
+        const auto parsedActorCell = parseCellKey(cellId);
+        if (parsedActorCell && parsedActorCell->isExterior)
+        {
+            int bestDistance = -1;
+            for (const auto& [conn, client] : mClients)
+            {
+                if (!isEligible(client) || !client.player.cell.isExterior)
+                    continue;
+
+                const int distance = std::abs(client.player.cell.gridX - parsedActorCell->gridX)
+                    + std::abs(client.player.cell.gridY - parsedActorCell->gridY);
+                if (bestDistance == -1 || distance < bestDistance
+                    || (distance == bestDistance && client.guid < newAuthorityGuid))
+                {
+                    bestDistance = distance;
+                    newAuthorityGuid = client.guid;
+                }
+            }
+        }
+    }
+
+    // Current authority is gone — try the preferred GUID after active/closest choices.
     if (newAuthorityGuid == 0 && preferredGuid != 0)
     {
         for (const auto& [conn, client] : mClients)
@@ -1198,7 +1281,7 @@ void MPServer::refreshActorAuthorityForCell(const std::string& cellId, uint32_t 
         }
     }
 
-    // No preferred or preferred not eligible — lowest GUID wins.
+    // No stronger preference — lowest GUID wins.
     if (newAuthorityGuid == 0)
     {
         for (const auto& [conn, client] : mClients)
@@ -1233,6 +1316,7 @@ void MPServer::refreshActorAuthorityForCell(const std::string& cellId, uint32_t 
 
             if (mPlayerDb)
                 mPlayerDb->deleteSpawnedActorDynamicRecordLink(it->second.actor.mpNum, cellId);
+            forgetActorLocation(it->second.actor, cellId);
             it = cellState.actors.erase(it);
             ++removedRuntimeActors;
         }
@@ -1247,14 +1331,7 @@ void MPServer::refreshActorAuthorityForCell(const std::string& cellId, uint32_t 
         }
     }
 
-    for (const auto& [conn, client] : mClients)
-    {
-        if (!isEligible(client))
-            continue;
-
-        sendActorAuthorityToClient(conn, cellId);
-        sendActorStateToClient(conn, cellId);
-    }
+    sendActorStateToInterestedClients(cellId);
 }
 
 // ---------------------------------------------------------------------------
@@ -1281,10 +1358,13 @@ void MPServer::sendActorAuthorityToClient(HSteamNetConnection conn, const std::s
 void MPServer::sendActorStateToClient(HSteamNetConnection conn, const std::string& cellId)
 {
     auto it = mWorld.actorCells.find(cellId);
-    if (it == mWorld.actorCells.end() || it->second.actors.empty())
-        return;
+    CellActorState emptyState;
+    const CellActorState& state = (it != mWorld.actorCells.end()) ? it->second : emptyState;
 
-    const CellActorState& state = it->second;
+    std::unordered_map<std::string, ActorRegistryRecord> actors = state.actors;
+    mergeDeadVanillaActorsForCell(cellId, actors);
+    if (actors.empty())
+        return;
 
     ActorList actorList;
     actorList.cellId = cellId;
@@ -1294,13 +1374,102 @@ void MPServer::sendActorStateToClient(HSteamNetConnection conn, const std::strin
     actorList.snapshotSequence = state.nextSnapshotSequence;
     actorList.serverTimestamp = currentServerTimeMs();
 
-    actorList.actors.reserve(state.actors.size());
-    for (const auto& [key, record] : state.actors)
+    std::size_t deadVanillaCount = 0;
+    bool includesHul = false;
+    std::vector<BaseActor> deadBootstrapActors;
+    actorList.actors.reserve(actors.size());
+    for (const auto& [key, record] : actors)
+    {
+        if (record.actor.mpNum == 0 && record.actor.isDead)
+        {
+            ++deadVanillaCount;
+            if (record.actor.refId == "hul")
+                includesHul = true;
+        }
+        if (record.actor.isDead)
+        {
+            BaseActor deadActor = record.actor;
+            deadActor.isInstantDeath = true;
+            if (deadActor.dynamicStats.health.current > 0.f)
+                deadActor.dynamicStats.health.current = 0.f;
+            deadBootstrapActors.push_back(std::move(deadActor));
+        }
         actorList.actors.push_back(record.actor);
+    }
+
+    if (deadVanillaCount != 0)
+    {
+        auto clientIt = mClients.find(conn);
+        Log(Debug::Verbose) << "[Server] sendActorStateToClient dead vanilla snapshot"
+                            << " to=" << (clientIt != mClients.end() ? clientIt->second.name : std::string("<unknown>"))
+                            << " cell=" << cellId
+                            << " actors=" << actorList.actors.size()
+                            << " deadVanilla=" << deadVanillaCount
+                            << " includesHul=" << includesHul;
+    }
 
     PacketActorList pkt;
     pkt.setActorList(&actorList);
     sendTo(conn, pkt.encode());
+
+    if (!deadBootstrapActors.empty())
+    {
+        ActorList statsList = actorList;
+        statsList.actors = deadBootstrapActors;
+        PacketActorStatsDynamic statsPkt;
+        statsPkt.setActorList(&statsList);
+        sendTo(conn, statsPkt.encode());
+
+        ActorList deathList = actorList;
+        deathList.actors = std::move(deadBootstrapActors);
+        PacketActorDeath deathPkt;
+        deathPkt.setActorList(&deathList);
+        sendTo(conn, deathPkt.encode());
+    }
+}
+
+// ---------------------------------------------------------------------------
+bool MPServer::clientHasActorCellLoaded(const ConnectedClient& client, const std::string& cellId) const
+{
+    if (cellId.empty() || !client.charSelectComplete)
+        return false;
+
+    if (cellMatches(client.player.cell, cellId))
+        return true;
+
+    if (client.loadedActorCells.empty())
+        return false;
+
+    return client.loadedActorCells.find(cellId) != client.loadedActorCells.end();
+}
+
+std::unordered_set<std::string> MPServer::actorInterestCellsForClient(const ConnectedClient& client) const
+{
+    const std::string currentCell = makeCellKey(client.player.cell);
+    if (!client.loadedActorCells.empty())
+    {
+        std::unordered_set<std::string> cells = client.loadedActorCells;
+        if (!currentCell.empty())
+            cells.insert(currentCell);
+        return cells;
+    }
+
+    std::unordered_set<std::string> cells;
+    if (!currentCell.empty())
+        cells.insert(currentCell);
+    return cells;
+}
+
+void MPServer::sendActorStateToInterestedClients(const std::string& cellId)
+{
+    for (const auto& [conn, client] : mClients)
+    {
+        if (!clientHasActorCellLoaded(client, cellId))
+            continue;
+
+        sendActorAuthorityToClient(conn, cellId);
+        sendActorStateToClient(conn, cellId);
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1313,10 +1482,10 @@ bool MPServer::validateActorUpdate(const ConnectedClient& c, const ActorList& ac
         return false;
     }
 
-    if (!cellMatches(c.player.cell, actorList.cellId))
+    if (std::strcmp(packetName, "ActorPosition") != 0 && !clientHasActorCellLoaded(c, actorList.cellId))
     {
         Log(Debug::Verbose) << "[Server] Rejecting " << packetName << " from " << c.name
-                            << " due to cell mismatch: player=" << makeCellKey(c.player.cell)
+                            << " because the actor cell is not loaded: player=" << makeCellKey(c.player.cell)
                             << " packet=" << actorList.cellId;
         return false;
     }
@@ -1350,13 +1519,313 @@ MPServer::ActorRegistryRecord* MPServer::findTrackedActor(CellActorState& cellSt
     if (it != cellState.actors.end())
         return &it->second;
 
-    Log(Debug::Info) << "[Server] Ignoring late " << packetName
-                     << " from " << sender.name
-                     << " for unknown actor refId=" << actor.refId
-                     << " refNum=" << actor.refNum
-                     << " mpNum=" << actor.mpNum
-                     << " cell=" << actor.cellId;
+    std::ostringstream message;
+    message << "[Server] Ignoring late " << packetName
+            << " from " << sender.name
+            << " for unknown actor refId=" << actor.refId
+            << " refNum=" << actor.refNum
+            << " mpNum=" << actor.mpNum
+            << " cell=" << actor.cellId;
+    const bool noisyPacket = std::strcmp(packetName, "ActorPosition") == 0
+        || std::strcmp(packetName, "ActorAttack") == 0;
+    Log(noisyPacket ? Debug::Verbose : Debug::Info) << message.str();
     return nullptr;
+}
+
+void MPServer::rememberActorLocation(const BaseActor& actor, const std::string& cellId)
+{
+    if (cellId.empty() || (actor.mpNum == 0 && actor.refId.empty()))
+        return;
+
+    mWorld.actorLocations[makeActorKey(actor)] = cellId;
+}
+
+void MPServer::forgetActorLocation(const BaseActor& actor, const std::string& cellId)
+{
+    if (actor.mpNum == 0 && actor.refId.empty())
+        return;
+
+    const std::string actorKey = makeActorKey(actor);
+    auto locationIt = mWorld.actorLocations.find(actorKey);
+    if (locationIt == mWorld.actorLocations.end())
+        return;
+
+    if (!cellId.empty() && locationIt->second != cellId)
+        return;
+
+    mWorld.actorLocations.erase(locationIt);
+}
+
+void MPServer::rememberDeadVanillaActor(const ActorRegistryRecord& record)
+{
+    if (record.actor.mpNum != 0 || !record.actor.isDead || record.actor.refId.empty() || record.actor.cellId.empty())
+        return;
+
+    ActorRegistryRecord remembered = record;
+    remembered.actor.cellId = record.actor.cellId;
+    const std::string actorKey = makeActorKey(remembered.actor);
+    bool changed = false;
+    for (auto cellIt = mWorld.deadVanillaActorCells.begin(); cellIt != mWorld.deadVanillaActorCells.end();)
+    {
+        if (cellIt->first == remembered.actor.cellId)
+        {
+            ++cellIt;
+            continue;
+        }
+
+        if (cellIt->second.erase(actorKey) != 0)
+            changed = true;
+        if (cellIt->second.empty())
+            cellIt = mWorld.deadVanillaActorCells.erase(cellIt);
+        else
+            ++cellIt;
+    }
+
+    auto& deadActors = mWorld.deadVanillaActorCells[remembered.actor.cellId];
+    const auto previousIt = deadActors.find(actorKey);
+    if (previousIt == deadActors.end()
+        || !sameDeadVanillaActorState(previousIt->second.actor, remembered.actor))
+        changed = true;
+
+    deadActors[actorKey] = remembered;
+    rememberActorLocation(remembered.actor, remembered.actor.cellId);
+
+    if (changed && mPlayerDb)
+        mPlayerDb->upsertDeadVanillaActor(remembered.actor);
+}
+
+void MPServer::forgetDeadVanillaActor(const BaseActor& actor, const std::string& cellId)
+{
+    if (actor.mpNum != 0 || actor.refId.empty())
+        return;
+
+    const std::string actorKey = makeActorKey(actor);
+    if (mPlayerDb)
+        mPlayerDb->deleteDeadVanillaActor(actor.refId, actor.refNum);
+
+    auto eraseFromCell = [&](const std::string& targetCellId) -> bool
+    {
+        auto cellIt = mWorld.deadVanillaActorCells.find(targetCellId);
+        if (cellIt == mWorld.deadVanillaActorCells.end())
+            return false;
+
+        const bool erased = cellIt->second.erase(actorKey) != 0;
+        if (cellIt->second.empty())
+            mWorld.deadVanillaActorCells.erase(cellIt);
+        return erased;
+    };
+
+    if (!cellId.empty())
+    {
+        eraseFromCell(cellId);
+        return;
+    }
+
+    if (!actor.cellId.empty() && eraseFromCell(actor.cellId))
+        return;
+
+    for (auto cellIt = mWorld.deadVanillaActorCells.begin(); cellIt != mWorld.deadVanillaActorCells.end();)
+    {
+        cellIt->second.erase(actorKey);
+        if (cellIt->second.empty())
+            cellIt = mWorld.deadVanillaActorCells.erase(cellIt);
+        else
+            ++cellIt;
+    }
+}
+
+const MPServer::ActorRegistryRecord* MPServer::findDeadVanillaActor(
+    const BaseActor& actor, std::string* cellId) const
+{
+    if (actor.mpNum != 0 || actor.refId.empty())
+        return nullptr;
+
+    const std::string actorKey = makeActorKey(actor);
+    auto findInCell = [&](const std::string& targetCellId) -> const ActorRegistryRecord*
+    {
+        const auto cellIt = mWorld.deadVanillaActorCells.find(targetCellId);
+        if (cellIt == mWorld.deadVanillaActorCells.end())
+            return nullptr;
+
+        const auto actorIt = cellIt->second.find(actorKey);
+        if (actorIt == cellIt->second.end() || !actorIt->second.actor.isDead)
+            return nullptr;
+
+        if (cellId)
+            *cellId = targetCellId;
+        return &actorIt->second;
+    };
+
+    if (!actor.cellId.empty())
+    {
+        if (const ActorRegistryRecord* record = findInCell(actor.cellId))
+            return record;
+    }
+
+    for (const auto& [targetCellId, actors] : mWorld.deadVanillaActorCells)
+    {
+        const auto actorIt = actors.find(actorKey);
+        if (actorIt == actors.end() || !actorIt->second.actor.isDead)
+            continue;
+
+        if (cellId)
+            *cellId = targetCellId;
+        return &actorIt->second;
+    }
+
+    return nullptr;
+}
+
+bool MPServer::rejectStaleAliveVanillaActor(
+    const BaseActor& actor,
+    const std::string& incomingCellId,
+    const ConnectedClient& sender,
+    const char* packetName) const
+{
+    if (actor.mpNum != 0 || actor.refId.empty() || actor.isDead)
+        return false;
+
+    std::string deadCellId;
+    const ActorRegistryRecord* deadRecord = findDeadVanillaActor(actor, &deadCellId);
+    if (!deadRecord)
+        return false;
+
+    Log(Debug::Verbose) << "[Server] " << packetName
+                        << " ignored stale alive vanilla actor from " << sender.name
+                        << " refId=" << actor.refId
+                        << " refNum=" << actor.refNum
+                        << " incomingCell=" << incomingCellId
+                        << " deadCell=" << deadCellId
+                        << " deadHp=" << deadRecord->actor.dynamicStats.health.current;
+    return true;
+}
+
+std::size_t MPServer::mergeDeadVanillaActorsForCell(
+    const std::string& cellId,
+    std::unordered_map<std::string, ActorRegistryRecord>& actors) const
+{
+    const auto cellIt = mWorld.deadVanillaActorCells.find(cellId);
+    if (cellIt == mWorld.deadVanillaActorCells.end())
+        return 0;
+
+    std::size_t merged = 0;
+    for (const auto& [actorKey, record] : cellIt->second)
+    {
+        auto actorIt = actors.find(actorKey);
+        if (actorIt == actors.end() || !actorIt->second.actor.isDead)
+            ++merged;
+
+        ActorRegistryRecord remembered = record;
+        remembered.actor.cellId = cellId;
+        actors[actorKey] = std::move(remembered);
+    }
+    return merged;
+}
+
+std::optional<MPServer::ActorRegistryRecord> MPServer::removeActorFromOtherCells(
+    const BaseActor& actor,
+    const std::string& destinationCellId,
+    std::unordered_set<std::string>& changedCellIds)
+{
+    if (actor.mpNum == 0 && actor.refId.empty())
+        return std::nullopt;
+
+    const std::string actorKey = makeActorKey(actor);
+    std::optional<ActorRegistryRecord> migratedRecord;
+    bool removedSpawnedActorLink = false;
+
+    auto removeFromCell = [&](const std::string& cellId, CellActorState& cellState)
+    {
+        if (cellId == destinationCellId)
+            return;
+
+        auto actorIt = cellState.actors.find(actorKey);
+        if (actorIt == cellState.actors.end())
+            return;
+
+        ActorRegistryRecord removedRecord = actorIt->second;
+        if (!migratedRecord || removedRecord.lastSnapshotTime >= migratedRecord->lastSnapshotTime)
+            migratedRecord = removedRecord;
+
+        if (mPlayerDb && removedRecord.actor.mpNum != 0)
+        {
+            mPlayerDb->deleteSpawnedActorDynamicRecordLink(removedRecord.actor.mpNum, cellId);
+            removedSpawnedActorLink = true;
+        }
+
+        cellState.actors.erase(actorIt);
+        forgetActorLocation(removedRecord.actor, cellId);
+        changedCellIds.insert(cellId);
+
+        Log(Debug::Info) << "[Server] Actor migrated between cells"
+                         << " refId=" << actor.refId
+                         << " refNum=" << actor.refNum
+                         << " mpNum=" << actor.mpNum
+                         << " from=" << cellId
+                         << " to=" << destinationCellId;
+    };
+
+    const auto locationIt = mWorld.actorLocations.find(actorKey);
+    std::string indexedCellId;
+    if (locationIt != mWorld.actorLocations.end())
+    {
+        indexedCellId = locationIt->second;
+        auto cellIt = mWorld.actorCells.find(indexedCellId);
+        if (cellIt != mWorld.actorCells.end())
+            removeFromCell(indexedCellId, cellIt->second);
+        else if (indexedCellId != destinationCellId)
+            mWorld.actorLocations.erase(locationIt);
+    }
+
+    // Fallback scan cleans up duplicate records from older builds or from any
+    // path that inserted actor state before the location index existed.
+    for (auto& [cellId, cellState] : mWorld.actorCells)
+    {
+        if (cellId == indexedCellId)
+            continue;
+        removeFromCell(cellId, cellState);
+    }
+
+    if (removedSpawnedActorLink)
+        scheduleGeneratedDynamicRecordGc("actor_migration_unlink");
+
+    return migratedRecord;
+}
+
+void MPServer::broadcastActorListForCell(const std::string& cellId, CellActorState& cellState)
+{
+    std::unordered_map<std::string, ActorRegistryRecord> actors = cellState.actors;
+    mergeDeadVanillaActorsForCell(cellId, actors);
+
+    ActorList actorList;
+    actorList.cellId = cellId;
+    actorList.isAuthority = false;
+    actorList.authorityGuid = cellState.authorityGuid;
+    actorList.authorityGeneration = cellState.authorityGeneration;
+    actorList.snapshotSequence = cellState.nextSnapshotSequence++;
+    actorList.serverTimestamp = currentServerTimeMs();
+    actorList.actors.reserve(actors.size());
+    for (const auto& [actorKey, record] : actors)
+        actorList.actors.push_back(record.actor);
+
+    PacketActorList pkt;
+    pkt.setActorList(&actorList);
+    broadcastActorToCell(cellId, pkt.encode());
+}
+
+void MPServer::upsertSpawnedActorDynamicRecordLinkIfNeeded(const BaseActor& actor)
+{
+    if (!mPlayerDb || actor.mpNum == 0 || actor.refId.empty() || actor.cellId.empty())
+        return;
+
+    for (const std::string_view recordType : { std::string_view("npc"), std::string_view("creature") })
+    {
+        if (mWorld.dynamicRecords.find(makeDynamicRecordKey(recordType, actor.refId)) == mWorld.dynamicRecords.end())
+            continue;
+
+        mPlayerDb->upsertSpawnedActorDynamicRecordLink(actor.refId, actor.cellId, actor.mpNum);
+        return;
+    }
 }
 
 void MPServer::persistSpawnedActorIfNeeded(const ActorRegistryRecord& record)
@@ -1434,6 +1903,7 @@ void MPServer::onClientMessage(ConnectedClient& client,
         case PacketType::PlayerBaseInfo:   handlePlayerBaseInfo(client, data, size);     break;
         case PacketType::PlayerPosition:   handlePlayerPosition(client, data, size);     break;
         case PacketType::PlayerCellChange: handlePlayerCellChange(client, data, size);   break;
+        case PacketType::PlayerLoadedCells: handlePlayerLoadedCells(client, data, size); break;
         case PacketType::PlayerEquipment:  handlePlayerEquipment(client, data, size);    break;
         case PacketType::PlayerAnimFlags:  handlePlayerAnimFlags(client, data, size);    break;
         case PacketType::PlayerAnimPlay:   handlePlayerAnimPlay(client, data, size);     break;
@@ -1457,6 +1927,7 @@ void MPServer::onClientMessage(ConnectedClient& client,
         case PacketType::ActorAnimPlay:    handleActorAnimPlay(client, data, size);      break;
         case PacketType::ActorAttack:      handleActorAttack(client, data, size);        break;
         case PacketType::ActorCast:        handleActorCast(client, data, size);          break;
+        case PacketType::ActorCellChange:  handleActorCellChange(client, data, size);    break;
         case PacketType::ActorDeath:       handleActorDeath(client, data, size);         break;
         case PacketType::ActorEquipment:   handleActorEquipment(client, data, size);     break;
         case PacketType::ActorStatsDynamic: handleActorStatsDynamic(client, data, size); break;
@@ -1491,16 +1962,17 @@ void MPServer::loadPersistentWorldState()
     // their links after dynamic records are loaded below.
     mPlayerDb->clearSpawnedActorDynamicRecordLinks();
 
-    uint32_t maxMpNum = 0;
+    uint64_t maxMpNum = 0;
     std::size_t objectCount = 0;
     std::size_t spawnedActorCount = 0;
+    std::size_t deadVanillaActorCount = 0;
     std::size_t dynamicRecordCount = 0;
     std::vector<DynamicRecordCatalogEntry> dynamicRecordCatalog;
 
     std::unordered_set<uint32_t> worldObjectMpNums;
     for (const auto& object : mPlayerDb->loadWorldObjects())
     {
-        maxMpNum = std::max(maxMpNum, object.mpNum);
+        maxMpNum = std::max<uint64_t>(maxMpNum, object.mpNum);
         mWorld.placedObjects[object.cellId].push_back(object);
         if (object.mpNum != 0)
             worldObjectMpNums.insert(object.mpNum);
@@ -1587,10 +2059,11 @@ void MPServer::loadPersistentWorldState()
             continue;
 
         normalizeActorIdentity(actor);
-        maxMpNum = std::max(maxMpNum, actor.mpNum);
+        maxMpNum = std::max<uint64_t>(maxMpNum, actor.mpNum);
         auto& cellState = mWorld.actorCells[actor.cellId];
         // serverSpawnTime = 0: loaded actors are "old"; no spawn-grace needed.
         cellState.actors[makeActorKey(actor)] = { actor, currentServerTimeMs(), /*serverSpawnTime=*/0, /*persistent=*/true };
+        rememberActorLocation(actor, actor.cellId);
         ++spawnedActorCount;
 
         for (const std::string_view recordType : { std::string_view("npc"), std::string_view("creature") })
@@ -1604,21 +2077,45 @@ void MPServer::loadPersistentWorldState()
         }
     }
 
+    for (const auto& persistedActor : mPlayerDb->loadDeadVanillaActors())
+    {
+        BaseActor actor = persistedActor;
+        actor.mpNum = 0;
+        if (actor.refId.empty() || actor.cellId.empty())
+            continue;
+
+        normalizeActorIdentity(actor);
+        actor.isDead = true;
+        actor.isInstantDeath = true;
+        if (actor.dynamicStats.health.current > 0.f)
+            actor.dynamicStats.health.current = 0.f;
+
+        ActorRegistryRecord record { actor, currentServerTimeMs(), /*serverSpawnTime=*/0, /*persistent=*/false };
+        const std::string actorKey = makeActorKey(actor);
+        auto& cellState = mWorld.actorCells[actor.cellId];
+        cellState.actors[actorKey] = record;
+        mWorld.deadVanillaActorCells[actor.cellId][actorKey] = record;
+        rememberActorLocation(actor, actor.cellId);
+        ++deadVanillaActorCount;
+    }
+
     objectCount = 0;
     for (const auto& [cellId, objects] : mWorld.placedObjects)
         objectCount += objects.size();
     dynamicRecordCount = mWorld.dynamicRecords.size();
 
-    const uint32_t nextMpNum = std::max<uint32_t>(1, maxMpNum + 1);
-    mWorld.nextObjectMpNum = nextMpNum;
-    mWorld.nextActorMpNum = nextMpNum;
+    const uint64_t minimumNextMpNum = std::max<uint64_t>(1, maxMpNum + 1);
+    const uint64_t nextMpNum = mPlayerDb->loadNextMpNum(minimumNextMpNum);
+    setNextWorldMpNum(nextMpNum);
 
     Log(Debug::Info) << "[Server] Loaded persistent world state: objects="
                      << objectCount
                      << " spawnedActors=" << spawnedActorCount
+                     << " deadVanillaActors=" << deadVanillaActorCount
                      << " containers=" << mWorld.containers.size()
                      << " doorCells=" << mWorld.doorStates.size()
-                     << " dynamicRecords=" << dynamicRecordCount;
+                     << " dynamicRecords=" << dynamicRecordCount
+                     << " nextMpNum=" << nextMpNum;
 }
 
 // ---------------------------------------------------------------------------
@@ -2658,6 +3155,107 @@ void MPServer::handlePlayerCellChange(ConnectedClient& c, const uint8_t* data, s
         sendCellStateToClient(c.conn, cellKey);
 }
 
+void MPServer::handlePlayerLoadedCells(ConnectedClient& c, const uint8_t* data, size_t size)
+{
+    PacketPlayerLoadedCells pkt;
+    if (!pkt.decode(data, size))
+        return;
+
+    if (!c.charSelectComplete)
+        return;
+
+    if (pkt.sequence != 0 && c.loadedActorCellsSequence != 0
+        && pkt.sequence <= c.loadedActorCellsSequence)
+    {
+        Log(Debug::Verbose) << "[Server] Ignoring stale PlayerLoadedCells from " << c.name
+                            << " seq=" << pkt.sequence
+                            << " current=" << c.loadedActorCellsSequence;
+        return;
+    }
+
+    const std::string currentCell = makeCellKey(c.player.cell);
+    if (currentCell.empty())
+        return;
+
+    if (!pkt.activeCellId.empty())
+    {
+        const auto parsedActive = parseCellKey(pkt.activeCellId);
+        if (parsedActive && makeCellKey(*parsedActive) != currentCell)
+        {
+            Log(Debug::Verbose) << "[Server] PlayerLoadedCells active cell mismatch for " << c.name
+                                << ": packet=" << pkt.activeCellId
+                                << " server=" << currentCell;
+        }
+    }
+
+    std::unordered_set<std::string> normalizedCells;
+    normalizedCells.reserve(std::min<std::size_t>(pkt.loadedCellIds.size() + 1, MaxLoadedActorCells));
+
+    const bool currentIsExterior = c.player.cell.isExterior;
+    for (const std::string& rawCellId : pkt.loadedCellIds)
+    {
+        if (normalizedCells.size() >= MaxLoadedActorCells)
+            break;
+
+        const auto parsedCell = parseCellKey(rawCellId);
+        if (!parsedCell)
+            continue;
+
+        const std::string normalizedCellId = makeCellKey(*parsedCell);
+        if (normalizedCellId.empty())
+            continue;
+
+        if (!currentIsExterior)
+        {
+            if (normalizedCellId != currentCell)
+                continue;
+        }
+        else if (!parsedCell->isExterior)
+            continue;
+
+        normalizedCells.insert(normalizedCellId);
+    }
+
+    normalizedCells.insert(currentCell);
+    for (auto it = normalizedCells.begin(); normalizedCells.size() > MaxLoadedActorCells && it != normalizedCells.end();)
+    {
+        if (*it == currentCell)
+        {
+            ++it;
+            continue;
+        }
+        it = normalizedCells.erase(it);
+    }
+
+    std::vector<std::string> addedCells;
+    std::vector<std::string> removedCells;
+    for (const std::string& cellId : normalizedCells)
+    {
+        if (c.loadedActorCells.find(cellId) == c.loadedActorCells.end())
+            addedCells.push_back(cellId);
+    }
+    for (const std::string& cellId : c.loadedActorCells)
+    {
+        if (normalizedCells.find(cellId) == normalizedCells.end())
+            removedCells.push_back(cellId);
+    }
+
+    c.loadedActorCells = std::move(normalizedCells);
+    c.loadedActorCellsSequence = pkt.sequence;
+
+    for (const std::string& cellId : addedCells)
+        refreshActorAuthorityForCell(cellId, c.guid);
+    for (const std::string& cellId : removedCells)
+        refreshActorAuthorityForCell(cellId);
+
+    Log(Debug::Verbose) << "[Server] PlayerLoadedCells from " << c.name
+                        << " active=" << currentCell
+                        << " loaded=" << c.loadedActorCells.size()
+                        << " added=" << addedCells.size()
+                        << " removed=" << removedCells.size()
+                        << " seq=" << pkt.sequence;
+}
+
 // ---------------------------------------------------------------------------
 void MPServer::handlePlayerEquipment(ConnectedClient& c, const uint8_t* data, size_t size)
 {
@@ -2854,8 +3452,13 @@ void MPServer::handleActorList(ConnectedClient& c, const uint8_t* data, size_t s
     // processed the spawn notification (timing race with the Lua tick thread).
     std::unordered_map<uint32_t, uint64_t> previousSpawnedActorSpawnTime;
     std::unordered_map<uint32_t, ActorRegistryRecord> previousActorRecords;
+    std::unordered_map<std::string, ActorRegistryRecord> previousDeadVanillaActorRecords;
+    std::vector<ActorRegistryRecord> previousCellRecords;
+    std::unordered_set<std::string> previousCellActorKeys;
     for (const auto& [key, record] : cellState.actors)
     {
+        previousCellRecords.push_back(record);
+        previousCellActorKeys.insert(key);
         if (record.actor.mpNum != 0)
         {
             previousSpawnedActorMpNums.insert(record.actor.mpNum);
@@ -2863,22 +3466,52 @@ void MPServer::handleActorList(ConnectedClient& c, const uint8_t* data, size_t s
             previousSpawnedActorSpawnTime[record.actor.mpNum] = record.serverSpawnTime;
             previousActorRecords[record.actor.mpNum] = record;
         }
+        else if (record.actor.isDead)
+            previousDeadVanillaActorRecords[key] = record;
     }
 
     std::unordered_set<uint32_t> currentSpawnedActorMpNums;
+    std::unordered_set<std::string> migratedActorCells;
     cellState.actors.clear();
     for (auto& actor : incoming.actors)
     {
         actor.cellId = incoming.cellId;
         normalizeActorIdentity(actor);
+        if (rejectStaleAliveVanillaActor(actor, incoming.cellId, c, "ActorList"))
+            continue;
+
+        const std::string actorKey = makeActorKey(actor);
+        auto locationIt = mWorld.actorLocations.find(actorKey);
+        if (locationIt != mWorld.actorLocations.end() && locationIt->second != incoming.cellId)
+        {
+            // If this actor previously belonged to this cell but has since migrated away,
+            // this is a stale ActorList from the old cell. Ignore it.
+            if (previousCellActorKeys.count(actorKey) != 0)
+                continue;
+        }
+
+        std::optional<ActorRegistryRecord> migratedRecord
+            = removeActorFromOtherCells(actor, incoming.cellId, migratedActorCells);
+        const auto previousRecordIt = previousActorRecords.find(actor.mpNum);
+        const ActorRegistryRecord* previousRecord = nullptr;
+        if (previousRecordIt != previousActorRecords.end())
+            previousRecord = &previousRecordIt->second;
+        else if (migratedRecord)
+            previousRecord = &*migratedRecord;
+        if (actor.mpNum != 0 && previousRecord == nullptr)
+        {
+            Log(Debug::Warning) << "[Server] ActorList dropped unknown spawned actor"
+                                << " refId=" << actor.refId
+                                << " mpNum=" << actor.mpNum
+                                << " cell=" << incoming.cellId;
+            continue;
+        }
         if (actor.mpNum != 0)
             currentSpawnedActorMpNums.insert(actor.mpNum);
-        const auto previousRecordIt = previousActorRecords.find(actor.mpNum);
-        const bool hadPreviousRecord = previousRecordIt != previousActorRecords.end();
-        const bool wasDead = hadPreviousRecord && previousRecordIt->second.actor.isDead;
-        const auto persistentIt = previousSpawnedActorPersistence.find(actor.mpNum);
-        const bool persistent = persistentIt != previousSpawnedActorPersistence.end() && persistentIt->second;
-        auto [it, inserted] = cellState.actors.emplace(makeActorKey(actor),
+        const bool hadPreviousRecord = previousRecord != nullptr;
+        const bool wasDead = hadPreviousRecord && previousRecord->actor.isDead;
+        const bool persistent = actor.mpNum != 0 && previousRecord != nullptr && previousRecord->persistent;
+        auto [it, inserted] = cellState.actors.emplace(actorKey,
             ActorRegistryRecord { actor, incoming.serverTimestamp, 0, persistent });
         if (!inserted)
             it->second = { actor, incoming.serverTimestamp, 0, persistent };
@@ -2887,7 +3520,13 @@ void MPServer::handleActorList(ConnectedClient& c, const uint8_t* data, size_t s
         const auto spawnTimeIt = previousSpawnedActorSpawnTime.find(actor.mpNum);
         if (spawnTimeIt != previousSpawnedActorSpawnTime.end())
             it->second.serverSpawnTime = spawnTimeIt->second;
+        else if (migratedRecord)
+            it->second.serverSpawnTime = migratedRecord->serverSpawnTime;
         persistSpawnedActorIfNeeded(it->second);
+        rememberActorLocation(it->second.actor, incoming.cellId);
+        rememberDeadVanillaActor(it->second);
+        if (migratedRecord && it->second.actor.mpNum != 0)
+            upsertSpawnedActorDynamicRecordLinkIfNeeded(it->second.actor);
 
         if (actor.mpNum != 0 && hadPreviousRecord && actor.isDead && !wasDead)
         {
@@ -2915,20 +3554,60 @@ void MPServer::handleActorList(ConnectedClient& c, const uint8_t* data, size_t s
             continue; // acknowledged by client
 
         const uint64_t spawnTime = previousSpawnedActorSpawnTime[previousMpNum];
+        const auto& prev = previousActorRecords[previousMpNum];
+        if (spawnTime == 0 || prev.lastSnapshotTime > spawnTime)
+            continue; // already acknowledged once by the authority
+
         const uint64_t age = (incoming.serverTimestamp > spawnTime)
             ? (incoming.serverTimestamp - spawnTime) : 0;
         if (age > kSpawnGraceMs)
             continue; // old enough that the authority has definitely seen it
 
         // Re-inject: the actor is too new to have been intentionally removed.
-        const auto& prev = previousActorRecords[previousMpNum];
         const std::string actorKey = makeActorKey(prev.actor);
+        const auto locationIt2 = mWorld.actorLocations.find(actorKey);
+        if (locationIt2 != mWorld.actorLocations.end() && locationIt2->second != incoming.cellId)
+            continue;
         cellState.actors[actorKey] = prev;
+        rememberActorLocation(prev.actor, incoming.cellId);
         currentSpawnedActorMpNums.insert(previousMpNum);
         Log(Debug::Info) << "[Server] handleActorList re-injected recent actor"
                          << " mpNum=" << previousMpNum
                          << " age=" << age << "ms"
                          << " cell=" << incoming.cellId;
+    }
+
+    std::size_t retainedDeadVanillaActors = 0;
+    for (const auto& [actorKey, record] : previousDeadVanillaActorRecords)
+    {
+        if (cellState.actors.find(actorKey) != cellState.actors.end())
+            continue;
+
+        cellState.actors[actorKey] = record;
+        rememberActorLocation(record.actor, incoming.cellId);
+        rememberDeadVanillaActor(record);
+        ++retainedDeadVanillaActors;
+    }
+    if (retainedDeadVanillaActors != 0)
+    {
+        Log(Debug::Info) << "[Server] handleActorList retained dead vanilla actor(s)"
+                         << " count=" << retainedDeadVanillaActors
+                         << " cell=" << incoming.cellId;
+    }
+
+    const std::size_t restoredDeadVanillaActors = mergeDeadVanillaActorsForCell(incoming.cellId, cellState.actors);
+    if (restoredDeadVanillaActors != 0)
+    {
+        Log(Debug::Info) << "[Server] handleActorList restored dead vanilla overlay(s)"
+                         << " count=" << restoredDeadVanillaActors
+                         << " cell=" << incoming.cellId;
+    }
+
+    for (const ActorRegistryRecord& previousRecord : previousCellRecords)
+    {
+        if (cellState.actors.find(makeActorKey(previousRecord.actor)) != cellState.actors.end())
+            continue;
+        forgetActorLocation(previousRecord.actor, incoming.cellId);
     }
 
     if (mPlayerDb)
@@ -2939,14 +3618,37 @@ void MPServer::handleActorList(ConnectedClient& c, const uint8_t* data, size_t s
             if (currentSpawnedActorMpNums.count(previousMpNum) != 0)
                 continue;
 
-            mPlayerDb->deleteSpawnedActorDynamicRecordLink(previousMpNum, incoming.cellId);
+            // NEW: retain persistent actors instead of deleting them on relog
             if (previousSpawnedActorPersistence[previousMpNum])
-                deletePersistedSpawnedActor(previousMpNum);
+            {
+                const auto& prev = previousActorRecords[previousMpNum];
+                const std::string actorKey = makeActorKey(prev.actor);
+                const auto locationIt = mWorld.actorLocations.find(actorKey);
+                if (locationIt != mWorld.actorLocations.end() && locationIt->second != incoming.cellId)
+                    continue; // already migrated, do not duplicate into old cell
+
+                cellState.actors[actorKey] = prev;
+                rememberActorLocation(prev.actor, incoming.cellId);
+                currentSpawnedActorMpNums.insert(previousMpNum);
+                Log(Debug::Verbose) << "[Server] retained persistent spawned actor"
+                                    << " mpNum=" << previousMpNum
+                                    << " cell=" << incoming.cellId;
+                continue;
+            }
+
+            mPlayerDb->deleteSpawnedActorDynamicRecordLink(previousMpNum, incoming.cellId);
             removedActorLink = true;
         }
 
         if (removedActorLink)
             scheduleGeneratedDynamicRecordGc("actor_list_unlink");
+    }
+
+    for (const std::string& migratedCellId : migratedActorCells)
+    {
+        auto migratedCellIt = mWorld.actorCells.find(migratedCellId);
+        if (migratedCellIt != mWorld.actorCells.end())
+            broadcastActorListForCell(migratedCellId, migratedCellIt->second);
     }
 
     ActorList deduped = incoming;
@@ -2957,7 +3659,7 @@ void MPServer::handleActorList(ConnectedClient& c, const uint8_t* data, size_t s
 
     PacketActorList out;
     out.setActorList(&deduped);
-    broadcastToCell(incoming.cellId, out.encode(), c.conn);
+    broadcastActorToCell(incoming.cellId, out.encode(), c.conn);
 }
 
 // ---------------------------------------------------------------------------
@@ -2984,9 +3686,15 @@ void MPServer::handleActorPosition(ConnectedClient& c, const uint8_t* data, size
     {
         actor.cellId = incoming.cellId;
         normalizeActorIdentity(actor);
+        if (rejectStaleAliveVanillaActor(actor, incoming.cellId, c, "ActorPosition"))
+            continue;
+
         ActorRegistryRecord* stored = findTrackedActor(cellState, actor, c, "ActorPosition");
         if (!stored)
+        {
+            filtered.actors.push_back(actor);
             continue;
+        }
         stored->actor.refId = actor.refId;
         stored->actor.refNum = actor.refNum;
         stored->actor.mpNum = actor.mpNum;
@@ -3003,7 +3711,7 @@ void MPServer::handleActorPosition(ConnectedClient& c, const uint8_t* data, size
 
     PacketActorPosition out;
     out.setActorList(&filtered);
-    broadcastToCell(filtered.cellId, out.encode(), c.conn, /*reliable=*/false);
+    broadcastActorToCell(filtered.cellId, out.encode(), c.conn, /*reliable=*/false);
 }
 
 // ---------------------------------------------------------------------------
@@ -3030,6 +3738,9 @@ void MPServer::handleActorAnimFlags(ConnectedClient& c, const uint8_t* data, siz
     {
         actor.cellId = incoming.cellId;
         normalizeActorIdentity(actor);
+        if (rejectStaleAliveVanillaActor(actor, incoming.cellId, c, "ActorAnimFlags"))
+            continue;
+
         ActorRegistryRecord* stored = findTrackedActor(cellState, actor, c, "ActorAnimFlags");
         if (!stored)
             continue;
@@ -3048,7 +3759,7 @@ void MPServer::handleActorAnimFlags(ConnectedClient& c, const uint8_t* data, siz
 
     PacketActorAnimFlags out;
     out.setActorList(&filtered);
-    broadcastToCell(filtered.cellId, out.encode(), c.conn, /*reliable=*/false);
+    broadcastActorToCell(filtered.cellId, out.encode(), c.conn, /*reliable=*/false);
 }
 
 // ---------------------------------------------------------------------------
@@ -3075,6 +3786,9 @@ void MPServer::handleActorAnimPlay(ConnectedClient& c, const uint8_t* data, size
     {
         actor.cellId = incoming.cellId;
         normalizeActorIdentity(actor);
+        if (rejectStaleAliveVanillaActor(actor, incoming.cellId, c, "ActorAnimPlay"))
+            continue;
+
         ActorRegistryRecord* stored = findTrackedActor(cellState, actor, c, "ActorAnimPlay");
         if (!stored)
             continue;
@@ -3093,7 +3807,7 @@ void MPServer::handleActorAnimPlay(ConnectedClient& c, const uint8_t* data, size
 
     PacketActorAnimPlay out;
     out.setActorList(&filtered);
-    broadcastToCell(filtered.cellId, out.encode(), c.conn);
+    broadcastActorToCell(filtered.cellId, out.encode(), c.conn);
 }
 
 // ---------------------------------------------------------------------------
@@ -3103,9 +3817,9 @@ void MPServer::handleActorAttack(ConnectedClient& c, const uint8_t* data, size_t
     PacketActorAttack pkt;
     pkt.setActorList(&incoming);
     if (!pkt.decode(data, size)) return;
-    Log(Debug::Info) << "[Server] Received ActorAttack from " << c.name << " cellId=" << incoming.cellId;
+    Log(Debug::Verbose) << "[Server] Received ActorAttack from " << c.name << " cellId=" << incoming.cellId;
     if (!validateActorUpdate(c, incoming, "ActorAttack")) return;
-    Log(Debug::Info) << "[Server] ActorAttack from " << c.name << " cell=" << incoming.cellId << " actors=" << incoming.actors.size();
+    Log(Debug::Verbose) << "[Server] ActorAttack from " << c.name << " cell=" << incoming.cellId << " actors=" << incoming.actors.size();
 
     auto& cellState = mWorld.actorCells[incoming.cellId];
     incoming.isAuthority = true;
@@ -3122,13 +3836,16 @@ void MPServer::handleActorAttack(ConnectedClient& c, const uint8_t* data, size_t
     {
         actor.cellId = incoming.cellId;
         normalizeActorIdentity(actor);
-        Log(Debug::Info) << "[Server] ActorAttack candidate from " << c.name
-                         << " refId=" << actor.refId
-                         << " refNum=" << actor.refNum
-                         << " mpNum=" << actor.mpNum
-                         << " targetMpNum=" << actor.attack.targetMpNum
-                         << " damage=" << actor.attack.damage
-                         << " healthDamage=" << actor.attack.healthDamage;
+        if (rejectStaleAliveVanillaActor(actor, incoming.cellId, c, "ActorAttack"))
+            continue;
+
+        Log(Debug::Verbose) << "[Server] ActorAttack candidate from " << c.name
+                            << " refId=" << actor.refId
+                            << " refNum=" << actor.refNum
+                            << " mpNum=" << actor.mpNum
+                            << " targetMpNum=" << actor.attack.targetMpNum
+                            << " damage=" << actor.attack.damage
+                            << " healthDamage=" << actor.attack.healthDamage;
         ActorRegistryRecord* stored = findTrackedActor(cellState, actor, c, "ActorAttack");
         if (!stored)
         {
@@ -3139,12 +3856,12 @@ void MPServer::handleActorAttack(ConnectedClient& c, const uint8_t* data, size_t
                                 << " cell=" << incoming.cellId;
             continue;
         }
-        Log(Debug::Info) << "[Server] ActorAttack matched tracked actor"
-                         << " refId=" << stored->actor.refId
-                         << " refNum=" << stored->actor.refNum
-                         << " mpNum=" << stored->actor.mpNum
-                         << " persistent=" << stored->persistent
-                         << " wasDead=" << stored->actor.isDead;
+        Log(Debug::Verbose) << "[Server] ActorAttack matched tracked actor"
+                            << " refId=" << stored->actor.refId
+                            << " refNum=" << stored->actor.refNum
+                            << " mpNum=" << stored->actor.mpNum
+                            << " persistent=" << stored->persistent
+                            << " wasDead=" << stored->actor.isDead;
         stored->actor.refId = actor.refId;
         stored->actor.refNum = actor.refNum;
         stored->actor.mpNum = actor.mpNum;
@@ -3160,8 +3877,8 @@ void MPServer::handleActorAttack(ConnectedClient& c, const uint8_t* data, size_t
 
     PacketActorAttack out;
     out.setActorList(&filtered);
-    broadcastToCell(filtered.cellId, out.encode(), c.conn);
-    Log(Debug::Info) << "[Server] Broadcast ActorAttack to cell=" << filtered.cellId;
+    broadcastActorToCell(filtered.cellId, out.encode(), c.conn);
+    Log(Debug::Verbose) << "[Server] Broadcast ActorAttack to cell=" << filtered.cellId;
 }
 
 // ---------------------------------------------------------------------------
@@ -3190,6 +3907,9 @@ void MPServer::handleActorCast(ConnectedClient& c, const uint8_t* data, size_t s
     {
         actor.cellId = incoming.cellId;
         normalizeActorIdentity(actor);
+        if (rejectStaleAliveVanillaActor(actor, incoming.cellId, c, "ActorCast"))
+            continue;
+
         ActorRegistryRecord* stored = findTrackedActor(cellState, actor, c, "ActorCast");
         if (!stored)
             continue;
@@ -3208,8 +3928,138 @@ void MPServer::handleActorCast(ConnectedClient& c, const uint8_t* data, size_t s
 
     PacketActorCast out;
     out.setActorList(&filtered);
-    broadcastToCell(filtered.cellId, out.encode(), c.conn);
+    broadcastActorToCell(filtered.cellId, out.encode(), c.conn);
     Log(Debug::Info) << "[Server] Broadcast ActorCast to cell=" << filtered.cellId;
+}
+
+// ---------------------------------------------------------------------------
+void MPServer::handleActorCellChange(ConnectedClient& c, const uint8_t* data, size_t size)
+{
+    ActorList incoming;
+    PacketActorCellChange pkt;
+    pkt.setActorList(&incoming);
+    if (!pkt.decode(data, size)) return;
+    if (!validateActorUpdate(c, incoming, "ActorCellChange")) return;
+
+    auto& sourceCellState = mWorld.actorCells[incoming.cellId];
+    incoming.isAuthority = true;
+    incoming.authorityGuid = sourceCellState.authorityGuid;
+    incoming.authorityGeneration = sourceCellState.authorityGeneration;
+    incoming.snapshotSequence = sourceCellState.nextSnapshotSequence++;
+    incoming.serverTimestamp = currentServerTimeMs();
+
+    ActorList accepted = incoming;
+    accepted.actors.clear();
+    accepted.actors.reserve(incoming.actors.size());
+    std::unordered_set<std::string> destinationCellIds;
+    std::unordered_set<std::string> changedCellIds;
+
+    for (auto& actor : incoming.actors)
+    {
+        const std::string destinationCellId = actor.cellId;
+        if (destinationCellId.empty() || destinationCellId == incoming.cellId)
+        {
+            Log(Debug::Warning) << "[Server] Rejecting ActorCellChange from " << c.name
+                                << " for actor " << actor.refId
+                                << " because destination cell is invalid: " << destinationCellId;
+            continue;
+        }
+
+        if (!clientHasActorCellLoaded(c, destinationCellId))
+        {
+            Log(Debug::Warning) << "[Server] Rejecting ActorCellChange from " << c.name
+                                << " for actor " << actor.refId
+                                << " because destination cell is not loaded: " << destinationCellId;
+            continue;
+        }
+
+        normalizeActorIdentity(actor);
+        actor.cellId = destinationCellId;
+        if (rejectStaleAliveVanillaActor(actor, destinationCellId, c, "ActorCellChange"))
+            continue;
+
+        const std::string actorKey = makeActorKey(actor);
+        auto sourceActorIt = sourceCellState.actors.find(actorKey);
+        if (sourceActorIt == sourceCellState.actors.end())
+        {
+            findTrackedActor(sourceCellState, actor, c, "ActorCellChange");
+            continue;
+        }
+
+        ActorRegistryRecord movedRecord = sourceActorIt->second;
+        const bool wasDead = movedRecord.actor.isDead;
+        sourceCellState.actors.erase(sourceActorIt);
+        forgetActorLocation(movedRecord.actor, incoming.cellId);
+        if (mPlayerDb && movedRecord.actor.mpNum != 0)
+            mPlayerDb->deleteSpawnedActorDynamicRecordLink(movedRecord.actor.mpNum, incoming.cellId);
+
+        removeActorFromOtherCells(actor, destinationCellId, changedCellIds);
+
+        movedRecord.actor = actor;
+        movedRecord.actor.cellId = destinationCellId;
+        movedRecord.lastSnapshotTime = incoming.serverTimestamp;
+
+        auto& destinationCellState = mWorld.actorCells[destinationCellId];
+        destinationCellState.actors[actorKey] = movedRecord;
+        rememberActorLocation(movedRecord.actor, destinationCellId);
+        rememberDeadVanillaActor(movedRecord);
+        persistSpawnedActorIfNeeded(movedRecord);
+        upsertSpawnedActorDynamicRecordLinkIfNeeded(movedRecord.actor);
+
+        if (movedRecord.actor.mpNum != 0 && movedRecord.actor.isDead && !wasDead)
+            sendActorLifecycleEvent("death", movedRecord.actor, movedRecord.persistent);
+
+        accepted.actors.push_back(movedRecord.actor);
+        destinationCellIds.insert(destinationCellId);
+
+        Log(Debug::Info) << "[Server] ActorCellChange migrated actor"
+                         << " refId=" << movedRecord.actor.refId
+                         << " mpNum=" << movedRecord.actor.mpNum
+                         << " from=" << incoming.cellId
+                         << " to=" << destinationCellId;
+    }
+
+    if (accepted.actors.empty())
+        return;
+
+    PacketActorCellChange out;
+    out.setActorList(&accepted);
+    const std::vector<uint8_t> encoded = out.encode();
+    for (auto& [conn, client] : mClients)
+    {
+        if (conn == c.conn)
+            continue;
+
+        bool interested = clientHasActorCellLoaded(client, incoming.cellId);
+        if (!interested)
+        {
+            for (const std::string& destinationCellId : destinationCellIds)
+            {
+                if (clientHasActorCellLoaded(client, destinationCellId))
+                {
+                    interested = true;
+                    break;
+                }
+            }
+        }
+
+        if (interested)
+            sendTo(conn, encoded);
+    }
+
+    for (const std::string& destinationCellId : destinationCellIds)
+    {
+        auto destinationCellIt = mWorld.actorCells.find(destinationCellId);
+        if (destinationCellIt != mWorld.actorCells.end() && destinationCellIt->second.authorityGuid == 0)
+            refreshActorAuthorityForCell(destinationCellId, c.guid);
+    }
+
+    for (const std::string& changedCellId : changedCellIds)
+    {
+        auto changedCellIt = mWorld.actorCells.find(changedCellId);
+        if (changedCellIt != mWorld.actorCells.end())
+            broadcastActorListForCell(changedCellId, changedCellIt->second);
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -3238,6 +4088,9 @@ void MPServer::handleActorDeath(ConnectedClient& c, const uint8_t* data, size_t 
     {
         actor.cellId = incoming.cellId;
         normalizeActorIdentity(actor);
+        if (rejectStaleAliveVanillaActor(actor, incoming.cellId, c, "ActorDeath"))
+            continue;
+
         Log(Debug::Info) << "[Server] ActorDeath candidate from " << c.name
                          << " refId=" << actor.refId
                          << " refNum=" << actor.refNum
@@ -3274,6 +4127,10 @@ void MPServer::handleActorDeath(ConnectedClient& c, const uint8_t* data, size_t 
         stored->actor.dynamicStats.health.current = actor.dynamicStats.health.current;
         stored->lastSnapshotTime = incoming.serverTimestamp;
         persistSpawnedActorIfNeeded(*stored);
+        if (stored->actor.mpNum == 0 && stored->actor.isDead)
+            rememberDeadVanillaActor(*stored);
+        else if (wasDead)
+            forgetDeadVanillaActor(stored->actor, incoming.cellId);
         if (actor.isDead && !wasDead)
             sendActorLifecycleEvent("death", stored->actor, stored->persistent);
         filtered.actors.push_back(actor);
@@ -3284,7 +4141,7 @@ void MPServer::handleActorDeath(ConnectedClient& c, const uint8_t* data, size_t 
 
     PacketActorDeath out;
     out.setActorList(&filtered);
-    broadcastToCell(filtered.cellId, out.encode(), c.conn);
+    broadcastActorToCell(filtered.cellId, out.encode(), c.conn);
     Log(Debug::Info) << "[Server] Broadcast ActorDeath to cell=" << filtered.cellId;
 }
 
@@ -3312,6 +4169,9 @@ void MPServer::handleActorEquipment(ConnectedClient& c, const uint8_t* data, siz
     {
         actor.cellId = incoming.cellId;
         normalizeActorIdentity(actor);
+        if (rejectStaleAliveVanillaActor(actor, incoming.cellId, c, "ActorEquipment"))
+            continue;
+
         ActorRegistryRecord* stored = findTrackedActor(cellState, actor, c, "ActorEquipment");
         if (!stored)
             continue;
@@ -3330,7 +4190,7 @@ void MPServer::handleActorEquipment(ConnectedClient& c, const uint8_t* data, siz
 
     PacketActorEquipment out;
     out.setActorList(&filtered);
-    broadcastToCell(filtered.cellId, out.encode(), c.conn);
+    broadcastActorToCell(filtered.cellId, out.encode(), c.conn);
 }
 
 // ---------------------------------------------------------------------------
@@ -3357,6 +4217,9 @@ void MPServer::handleActorStatsDynamic(ConnectedClient& c, const uint8_t* data, 
     {
         actor.cellId = incoming.cellId;
         normalizeActorIdentity(actor);
+        if (rejectStaleAliveVanillaActor(actor, incoming.cellId, c, "ActorStatsDynamic"))
+            continue;
+
         ActorRegistryRecord* stored = findTrackedActor(cellState, actor, c, "ActorStatsDynamic");
         if (!stored)
             continue;
@@ -3369,6 +4232,10 @@ void MPServer::handleActorStatsDynamic(ConnectedClient& c, const uint8_t* data, 
         stored->actor.isDead = actor.isDead;
         stored->lastSnapshotTime = incoming.serverTimestamp;
         persistSpawnedActorIfNeeded(*stored);
+        if (stored->actor.mpNum == 0 && stored->actor.isDead)
+            rememberDeadVanillaActor(*stored);
+        else if (wasDead)
+            forgetDeadVanillaActor(stored->actor, incoming.cellId);
         if (actor.isDead && !wasDead)
             sendActorLifecycleEvent("death", stored->actor, stored->persistent);
         filtered.actors.push_back(actor);
@@ -3379,7 +4246,7 @@ void MPServer::handleActorStatsDynamic(ConnectedClient& c, const uint8_t* data, 
 
     PacketActorStatsDynamic out;
     out.setActorList(&filtered);
-    broadcastToCell(filtered.cellId, out.encode(), c.conn);
+    broadcastActorToCell(filtered.cellId, out.encode(), c.conn);
 }
 
 // ---------------------------------------------------------------------------
@@ -3406,6 +4273,9 @@ void MPServer::handleActorAI(ConnectedClient& c, const uint8_t* data, size_t siz
     {
         actor.cellId = incoming.cellId;
         normalizeActorIdentity(actor);
+        if (rejectStaleAliveVanillaActor(actor, incoming.cellId, c, "ActorAI"))
+            continue;
+
         ActorRegistryRecord* stored = findTrackedActor(cellState, actor, c, "ActorAI");
         if (!stored)
             continue;
@@ -3424,7 +4294,7 @@ void MPServer::handleActorAI(ConnectedClient& c, const uint8_t* data, size_t siz
 
     PacketActorAI out;
     out.setActorList(&filtered);
-    broadcastToCell(filtered.cellId, out.encode(), c.conn);
+    broadcastActorToCell(filtered.cellId, out.encode(), c.conn);
 }
 
 // ---------------------------------------------------------------------------
@@ -3447,11 +4317,27 @@ void MPServer::handleActorCombatRequest(ConnectedClient& c, const uint8_t* data,
     PacketActorCombatRequest out;
     out.setActorList(&incoming);
 
+    if (incoming.cellId.empty() || !clientHasActorCellLoaded(c, incoming.cellId))
+    {
+        Log(Debug::Verbose) << "[Server] Rejecting ActorCombatRequest from " << c.name
+                            << " because the actor cell is not loaded: player=" << makeCellKey(c.player.cell)
+                            << " packet=" << incoming.cellId;
+        return;
+    }
+
+    auto cellIt = mWorld.actorCells.find(incoming.cellId);
+    if (cellIt == mWorld.actorCells.end()) return;
+
+    const uint32_t authorityGuid = cellIt->second.authorityGuid;
+
     // NPC->player damage: routed by the cell authority to the victim player.
     // This must be checked BEFORE the authority guard because the sender IS
     // the authority in this case (authority forwards NPC hits to the victim).
     if (incoming.victimPlayerGuid != 0)
     {
+        if (authorityGuid == 0 || authorityGuid != c.guid)
+            return;
+
         for (auto& [conn, client] : mClients)
         {
             if (client.guid == incoming.victimPlayerGuid)
@@ -3466,10 +4352,6 @@ void MPServer::handleActorCombatRequest(ConnectedClient& c, const uint8_t* data,
     }
 
     // Normal non-authority->authority: find the cell and validate sender is not authority.
-    auto cellIt = mWorld.actorCells.find(incoming.cellId);
-    if (cellIt == mWorld.actorCells.end()) return;
-
-    const uint32_t authorityGuid = cellIt->second.authorityGuid;
     if (authorityGuid == 0 || authorityGuid == c.guid)
         return; // sender already has authority or no one does
 
@@ -3938,6 +4820,80 @@ bool MPServer::removePlacedObjectByMpNum(uint32_t mpNum, const std::string& cell
     return removePlacedObjectAuthoritativeAnyCell(mpNum, cellId);
 }
 
+bool MPServer::worldMpNumInUse(uint32_t mpNum) const
+{
+    if (mpNum == 0)
+        return false;
+
+    for (const auto& [cellId, objects] : mWorld.placedObjects)
+    {
+        for (const auto& object : objects)
+        {
+            if (object.mpNum == mpNum)
+                return true;
+        }
+    }
+
+    for (const auto& [cellId, cellState] : mWorld.actorCells)
+    {
+        for (const auto& [actorKey, record] : cellState.actors)
+        {
+            if (record.actor.mpNum == mpNum)
+                return true;
+        }
+    }
+
+    for (const auto& [containerKey, record] : mWorld.containers)
+    {
+        if (record.mpNum == mpNum)
+            return true;
+    }
+
+    for (const auto& [cellId, doors] : mWorld.doorStates)
+    {
+        for (const auto& door : doors)
+        {
+            if (door.mpNum == mpNum)
+                return true;
+        }
+    }
+
+    return false;
+}
+
+void MPServer::setNextWorldMpNum(uint64_t nextMpNum)
+{
+    nextMpNum = std::max<uint64_t>(nextMpNum, 1);
+    mWorld.nextObjectMpNum = nextMpNum;
+    mWorld.nextActorMpNum = nextMpNum;
+    if (mPlayerDb)
+        mPlayerDb->saveNextMpNum(nextMpNum);
+}
+
+std::optional<uint32_t> MPServer::reserveWorldMpNum()
+{
+    uint64_t candidate = std::max<uint64_t>(mWorld.nextObjectMpNum, mWorld.nextActorMpNum);
+    candidate = std::max<uint64_t>(candidate, 1);
+
+    constexpr uint64_t maxMpNum = std::numeric_limits<uint32_t>::max();
+    if (candidate > maxMpNum)
+        return std::nullopt;
+
+    setNextWorldMpNum(candidate + 1);
+    return static_cast<uint32_t>(candidate);
+}
+
+void MPServer::advanceWorldMpNumPast(uint32_t mpNum)
+{
+    if (mpNum == 0)
+        return;
+
+    const uint64_t minimumNext = static_cast<uint64_t>(mpNum) + 1;
+    const uint64_t nextMpNum = std::max({ mWorld.nextObjectMpNum, mWorld.nextActorMpNum, minimumNext });
+    if (nextMpNum != mWorld.nextObjectMpNum || nextMpNum != mWorld.nextActorMpNum)
+        setNextWorldMpNum(nextMpNum);
+}
+
 bool MPServer::removeGameObject(uint32_t mpNum, const std::string& cellId)
 {
     if (mpNum == 0)
@@ -3989,45 +4945,32 @@ bool MPServer::spawnActor(
         }
     }
 
-    auto actorMpNumInUse = [&](uint32_t candidate) {
-        if (candidate == 0)
-            return false;
-
-        for (const auto& [existingCellId, cellState] : mWorld.actorCells)
-        {
-            for (const auto& [actorKey, record] : cellState.actors)
-            {
-                if (record.actor.mpNum == candidate)
-                    return true;
-            }
-        }
-
-        return false;
-    };
-
     uint32_t assignedMpNum = mpNum;
     if (assignedMpNum == 0)
     {
-        mWorld.nextActorMpNum = std::max(mWorld.nextActorMpNum, mWorld.nextObjectMpNum);
         do
         {
-            assignedMpNum = mWorld.nextActorMpNum++;
-            if (mWorld.nextActorMpNum == 0)
-                mWorld.nextActorMpNum = 1;
+            const std::optional<uint32_t> reservedMpNum = reserveWorldMpNum();
+            if (!reservedMpNum)
+            {
+                Log(Debug::Warning) << "[Server] Rejecting Script ActorSpawn because mpNum space is exhausted";
+                return false;
+            }
+
+            assignedMpNum = *reservedMpNum;
         }
-        while (actorMpNumInUse(assignedMpNum));
+        while (worldMpNumInUse(assignedMpNum));
     }
     else
     {
-        if (actorMpNumInUse(assignedMpNum))
+        if (worldMpNumInUse(assignedMpNum))
         {
             Log(Debug::Warning) << "[Server] Rejecting Script ActorSpawn for duplicate actor mpNum=" << assignedMpNum;
             return false;
         }
 
-        mWorld.nextActorMpNum = std::max(mWorld.nextActorMpNum, assignedMpNum + 1);
+        advanceWorldMpNumPast(assignedMpNum);
     }
-    mWorld.nextObjectMpNum = std::max(mWorld.nextObjectMpNum, assignedMpNum + 1);
 
     BaseActor actor;
     actor.refId = refId;
@@ -4069,6 +5012,7 @@ bool MPServer::spawnActor(
     registryRecord.serverSpawnTime  = timestamp;   // never updated by client
     registryRecord.persistent       = persistent;
     cellState.actors[makeActorKey(actor)] = registryRecord;
+    rememberActorLocation(actor, cellId);
 
     if (dynamicActorRecord != nullptr)
     {
@@ -4076,7 +5020,7 @@ bool MPServer::spawnActor(
         recordPkt.action = DynamicRecordAction::Upsert;
         recordPkt.recordType = dynamicActorRecord->recordType;
         recordPkt.entries.push_back({ dynamicActorRecord->recordId, dynamicActorRecord->data });
-        broadcastToCell(cellId, recordPkt.encode());
+        broadcastActorToCell(cellId, recordPkt.encode());
 
         if (mPlayerDb)
             mPlayerDb->upsertSpawnedActorDynamicRecordLink(actor.refId, cellId, actor.mpNum);
@@ -4097,7 +5041,7 @@ bool MPServer::spawnActor(
 
     PacketActorList pkt;
     pkt.setActorList(&actorList);
-    broadcastToCell(cellId, pkt.encode());
+    broadcastActorToCell(cellId, pkt.encode());
 
     Log(Debug::Info) << "[Server] Script ActorSpawn accepted: refId=" << actor.refId
                      << " refNum=" << actor.refNum
@@ -4150,6 +5094,7 @@ bool MPServer::removeActor(uint32_t mpNum, const std::string& cellId)
     {
         if (it->second.actor.mpNum == mpNum)
         {
+            forgetActorLocation(it->second.actor, resolvedCellId);
             it = actors.erase(it);
             removed = true;
         }
@@ -4197,7 +5142,7 @@ bool MPServer::removeActor(uint32_t mpNum, const std::string& cellId)
 
     PacketActorList pkt;
     pkt.setActorList(&actorList);
-    broadcastToCell(resolvedCellId, pkt.encode());
+    broadcastActorToCell(resolvedCellId, pkt.encode());
 
     Log(Debug::Info) << "[Server] Script ActorRemove accepted: mpNum=" << mpNum
                      << " cell=" << resolvedCellId;
@@ -4385,9 +5330,18 @@ bool MPServer::acceptPlacedObject(PlacedObject& object)
     if (object.refId.empty() || object.cellId.empty() || object.count <= 0)
         return false;
 
-    mWorld.nextObjectMpNum = std::max(mWorld.nextObjectMpNum, mWorld.nextActorMpNum);
-    object.mpNum = mWorld.nextObjectMpNum++;
-    mWorld.nextActorMpNum = std::max(mWorld.nextActorMpNum, object.mpNum + 1);
+    do
+    {
+        const std::optional<uint32_t> reservedMpNum = reserveWorldMpNum();
+        if (!reservedMpNum)
+        {
+            Log(Debug::Warning) << "[Server] Rejecting ObjectPlace because mpNum space is exhausted";
+            return false;
+        }
+
+        object.mpNum = *reservedMpNum;
+    }
+    while (worldMpNumInUse(object.mpNum));
 
     auto& objects = mWorld.placedObjects[object.cellId];
     objects.push_back(object);
@@ -4431,6 +5385,24 @@ void MPServer::syncLuaSnapshot()
     }
 
     mLua.syncSnapshot(getUptime(), mWorld.gameHour, players);
+
+    std::vector<LuaActorSnapshot> actors;
+    for (const auto& [cellId, cellState] : mWorld.actorCells)
+    {
+        for (const auto& [actorKey, record] : cellState.actors)
+        {
+            if (record.actor.mpNum == 0)
+                continue;
+
+            LuaActorSnapshot snapshot;
+            snapshot.actor = record.actor;
+            if (snapshot.actor.cellId.empty())
+                snapshot.actor.cellId = cellId;
+            snapshot.persistent = record.persistent;
+            actors.push_back(std::move(snapshot));
+        }
+    }
+    mLua.syncActors(std::move(actors));
 }
 
 // ---------------------------------------------------------------------------
@@ -4677,6 +5649,21 @@ void MPServer::broadcastToCell(const std::string& cellId,
     {
         if (conn == except || !client.charSelectComplete) continue;
         if (!cellMatches(client.player.cell, cellId)) continue;
+        mInterface->SendMessageToConnection(
+            conn, data.data(), static_cast<uint32_t>(data.size()), flags, nullptr);
+    }
+}
+
+void MPServer::broadcastActorToCell(const std::string& cellId,
+                                    const std::vector<uint8_t>& data,
+                                    HSteamNetConnection except,
+                                    bool reliable)
+{
+    int flags = reliable ? k_nSteamNetworkingSend_Reliable
+                         : k_nSteamNetworkingSend_UnreliableNoDelay;
+    for (auto& [conn, client] : mClients)
+    {
+        if (conn == except || !clientHasActorCellLoaded(client, cellId)) continue;
         mInterface->SendMessageToConnection(
             conn, data.data(), static_cast<uint32_t>(data.size()), flags, nullptr);
     }

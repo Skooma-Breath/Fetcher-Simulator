@@ -58,6 +58,7 @@ namespace mwmp
         // ---- send helpers ----
         void sendPosition(bool reliable);
         void sendCellChange();
+        void sendLoadedActorCells(bool force = false);
         void sendEquipment();
         void sendInventory();
         void sendAnimFlags(float dt);
@@ -86,6 +87,7 @@ namespace mwmp
         void snapshotDynamicStats();
         void captureEquipment(const MWWorld::Ptr& player);
         void captureInventory(const MWWorld::Ptr& player);
+        std::vector<std::string> collectLoadedActorCellIds() const;
         void applyPendingAuthoritativeState(const MWWorld::Ptr& player);
         uint32_t resolveTargetMpNum(const MWWorld::Ptr& victim) const;
         void sendCastPacket(
@@ -112,6 +114,8 @@ namespace mwmp
 
         struct CellSnapshot { std::string cellName; bool isExterior; int gx; int gy; };
         CellSnapshot mLastCell{};
+        std::vector<std::string> mLastLoadedActorCells;
+        uint32_t mLoadedActorCellsSequence = 0;
 
         std::array<EquipmentItem, BasePlayer::NUM_EQUIPMENT_SLOTS> mLastEquip{};
         std::vector<Item> mLastInventory;

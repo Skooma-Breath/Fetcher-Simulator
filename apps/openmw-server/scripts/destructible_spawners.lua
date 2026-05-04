@@ -7,8 +7,11 @@ local M = {}
 local STORAGE_SECTION = "DestructibleSpawners"
 local DEFAULT_SPAWN_INTERVAL = 10
 local DEFAULT_SPAWN_CONFIRM_TIMEOUT = 8
+local DEFAULT_SPAWNER_TICK_INTERVAL = 0.25
+local EXTERIOR_CELL_SIZE = 8192
 
 local stateCache
+local tickAccumulator = 0
 
 local function trim(text)
     if not text then
@@ -108,6 +111,24 @@ local function copyPosition(position)
     }
 end
 
+local function cellIdForPosition(baseCellId, position)
+    baseCellId = trim(baseCellId) or ""
+    local x = tonumber(position and position.x)
+    local y = tonumber(position and position.y)
+    if not x or not y then
+        return baseCellId
+    end
+
+    if not baseCellId:match("^EXT:%-?%d+,%-?%d+$") then
+        return baseCellId
+    end
+
+    return string.format("EXT:%d,%d",
+        math.floor(x / EXTERIOR_CELL_SIZE),
+        math.floor(y / EXTERIOR_CELL_SIZE)
+    )
+end
+
 local function tableCount(value)
     local count = 0
     if type(value) ~= "table" then
@@ -116,6 +137,20 @@ local function tableCount(value)
 
     for _, _ in pairs(value) do
         count = count + 1
+    end
+    return count
+end
+
+local function liveSpawnedCount(spawnedMpNums)
+    local count = 0
+    if type(spawnedMpNums) ~= "table" then
+        return count
+    end
+
+    for _, entry in pairs(spawnedMpNums) do
+        if type(entry) ~= "table" or entry.dead ~= true then
+            count = count + 1
+        end
     end
     return count
 end
@@ -137,6 +172,14 @@ local function getSpawnConfirmTimeout()
     return math.max(1, tonumber(Config.SPAWNER_SPAWN_CONFIRM_TIMEOUT_SECONDS) or DEFAULT_SPAWN_CONFIRM_TIMEOUT)
 end
 
+local function getSpawnerTickInterval()
+    local configured = tonumber(Config.SPAWNER_TICK_INTERVAL_SECONDS) or tonumber(Config.SPAWNER_TICK_INTERVAL)
+    if configured and configured > 0 then
+        return math.max(0.05, configured)
+    end
+    return DEFAULT_SPAWNER_TICK_INTERVAL
+end
+
 local function normalizeSpawnedMpNums(spawner)
     local normalized = {}
     if type(spawner.spawnedMpNums) == "table" then
@@ -148,6 +191,7 @@ local function normalizeSpawnedMpNums(spawner)
                 end
                 entry.refId = trim(entry.refId) or spawner.spawnRefId
                 entry.cellId = trim(entry.cellId) or spawner.cellId
+                entry.dead = entry.dead == true
                 normalized[tostring(numericMpNum)] = entry
             end
         end
@@ -161,12 +205,17 @@ local function normalizePendingSpawns(spawner)
         for _, entry in pairs(spawner.pendingSpawns) do
             if type(entry) == "table" then
                 local refId = trim(entry.refId) or spawner.spawnRefId
-                local cellId = trim(entry.cellId) or spawner.cellId
+                local position = copyPosition(entry.position)
+                local cellId = trim(entry.cellId)
+                if not cellId or cellId == "" then
+                    cellId = spawner.cellId
+                end
+                cellId = cellIdForPosition(cellId, position)
                 if refId and refId ~= "" and cellId and cellId ~= "" then
                     normalized[#normalized + 1] = {
                         refId = refId,
                         cellId = cellId,
-                        position = copyPosition(entry.position),
+                        position = position,
                         queued = entry.queued == true,
                         age = math.max(0, tonumber(entry.age) or 0),
                     }
@@ -178,7 +227,7 @@ local function normalizePendingSpawns(spawner)
 end
 
 local function refreshCounts(spawner)
-    spawner.liveCount = tableCount(spawner.spawnedMpNums)
+    spawner.liveCount = liveSpawnedCount(spawner.spawnedMpNums)
     spawner.pendingCount = #spawner.pendingSpawns
     spawner.remaining = math.max(0,
         (tonumber(spawner.spawnCount) or 0) - spawner.liveCount - spawner.pendingCount)
@@ -211,6 +260,30 @@ local function normalizeSpawnerState(spawner)
     return spawner
 end
 
+local function ensureSpawnerTickState(spawner)
+    if type(spawner) ~= "table" then
+        return false
+    end
+
+    spawner.spawnedMpNums = type(spawner.spawnedMpNums) == "table" and spawner.spawnedMpNums or {}
+    spawner.pendingSpawns = type(spawner.pendingSpawns) == "table" and spawner.pendingSpawns or {}
+    spawner.spawnCount = math.max(1,
+        math.floor(tonumber(spawner.spawnCount) or tonumber(Config.SPAWNER_DEFAULT_COUNT) or 1))
+    spawner.spawnInterval = math.max(0.1, tonumber(spawner.spawnInterval) or getSpawnInterval())
+    spawner.spawnTimer = math.max(0, tonumber(spawner.spawnTimer) or spawner.spawnInterval)
+    spawner.destroyed = spawner.destroyed == true
+    spawner.actorMpNum = tonumber(spawner.actorMpNum) or 0
+
+    local liveCount = tonumber(spawner.liveCount)
+    if not liveCount then
+        liveCount = liveSpawnedCount(spawner.spawnedMpNums)
+    end
+    spawner.liveCount = math.max(0, math.floor(liveCount))
+    spawner.pendingCount = #spawner.pendingSpawns
+    spawner.remaining = math.max(0, spawner.spawnCount - spawner.liveCount - spawner.pendingCount)
+    return true
+end
+
 local function ensureSpawnerRecord(name, persistent)
     local health = math.max(1, math.floor(tonumber(Config.SPAWNER_HEALTH) or 50))
     return recordStore.ensure("creature", {
@@ -240,7 +313,7 @@ local function ensureSpawnerRecord(name, persistent)
     })
 end
 
-local function spawnSpawnerActor(spawner)
+local function spawnSpawnerActor(spawner, ensureRecord)
     if not spawner or not spawner.recordId or spawner.recordId == "" or not spawner.cellId or spawner.cellId == "" then
         return false
     end
@@ -253,11 +326,13 @@ local function spawnSpawnerActor(spawner)
         return false
     end
 
-    local stored = ensureSpawnerRecord(spawner.name, spawner.persistent)
-    if not stored then
-        return false
+    if ensureRecord ~= false then
+        local stored = ensureSpawnerRecord(spawner.name, spawner.persistent)
+        if not stored then
+            return false
+        end
+        spawner.recordId = stored.recordId
     end
-    spawner.recordId = stored.recordId
 
     return mp.spawnActor(
         spawner.recordId,
@@ -279,11 +354,12 @@ local function payloadPosition(spawner, index, total)
 end
 
 local function spawnPayloadActor(spawner, position)
+    local cellId = cellIdForPosition(spawner.cellId, position)
     return mp.spawnActor(
         spawner.spawnRefId,
         0,
         0,
-        spawner.cellId,
+        cellId,
         copyPosition(position),
         { persistent = spawner.spawnedPersistent == true }
     )
@@ -316,16 +392,17 @@ local function parsePersistence(args, startIndex, defaultPersistent, defaultRese
 end
 
 local function queueSpawnIfNeeded(spawner)
-    normalizeSpawnerState(spawner)
+    ensureSpawnerTickState(spawner)
     if spawner.destroyed or spawner.remaining <= 0 then
         return false
     end
 
     local index = spawner.liveCount + spawner.pendingCount + 1
     local spawnPos = payloadPosition(spawner, index, spawner.spawnCount)
+    local cellId = cellIdForPosition(spawner.cellId, spawnPos)
     spawner.pendingSpawns[#spawner.pendingSpawns + 1] = {
         refId = spawner.spawnRefId,
-        cellId = spawner.cellId,
+        cellId = cellId,
         position = spawnPos,
         queued = false,
         age = 0,
@@ -397,10 +474,17 @@ local function purgeSpawnedActors(spawner)
     normalizeSpawnerState(spawner)
 
     local removed = 0
-    for mpNum, _ in pairs(spawner.spawnedMpNums) do
+    for mpNum, spawned in pairs(spawner.spawnedMpNums) do
         local numericMpNum = tonumber(mpNum)
         if numericMpNum and numericMpNum ~= 0 then
-            mp.removeGameObject(numericMpNum, spawner.cellId or "")
+            local cellId = spawner.cellId or ""
+            if type(spawned) == "table" then
+                local spawnedCellId = trim(spawned.cellId)
+                if spawnedCellId and spawnedCellId ~= "" then
+                    cellId = spawnedCellId
+                end
+            end
+            mp.removeGameObject(numericMpNum, cellId)
             removed = removed + 1
         end
     end
@@ -469,14 +553,12 @@ local function createSpawner(player, options, env)
     state[name] = spawner
     saveState(state)
 
-    if not spawnSpawnerActor(spawner) then
+    if not spawnSpawnerActor(spawner, false) then
         state[name] = nil
         saveState(state)
         recordStore.remove("creature", stored.recordId, { force = true })
         return false, "Failed to queue spawner actor spawn."
     end
-
-    saveState(state)
     return true, string.format("Created spawner %s -> %s x%d in %s.", name, spawnRefId, count, cellId)
 end
 
@@ -918,32 +1000,40 @@ function M.onActorSpawned(data)
     local state = loadState()
     local changed = false
     for name, spawner in pairs(state) do
-        normalizeSpawnerState(spawner)
-        if spawner.recordId == data.refId and spawner.cellId == data.cellId then
-            spawner.actorMpNum = tonumber(data.mpNum) or 0
-            spawner.active = true
-            changed = true
-            mp.log(string.format("[spawner] %s actor mpNum=%s", name, tostring(data.mpNum)))
-            break
-        end
+        if type(spawner) == "table" then
+            local recordId = trim(spawner.recordId) or (spawner.name and recordIdForName(spawner.name) or "")
+            local cellId = trim(spawner.cellId) or ""
+            if recordId == data.refId and cellId == data.cellId then
+                normalizeSpawnerState(spawner)
+                spawner.actorMpNum = tonumber(data.mpNum) or 0
+                spawner.active = true
+                changed = true
+                mp.log(string.format("[spawner] %s actor mpNum=%s", name, tostring(data.mpNum)))
+                break
+            end
 
-        local pendingIndex = findPendingSpawn(spawner, data)
-        if pendingIndex then
-            table.remove(spawner.pendingSpawns, pendingIndex)
-            spawner.spawnedMpNums[tostring(data.mpNum)] = {
-                refId = data.refId,
-                cellId = data.cellId,
-            }
-            refreshCounts(spawner)
-            changed = true
-            mp.log(string.format("[spawner] %s payload actor mpNum=%s live=%d pending=%d remaining=%d",
-                name,
-                tostring(data.mpNum),
-                spawner.liveCount,
-                spawner.pendingCount,
-                spawner.remaining
-            ))
-            break
+            if type(spawner.pendingSpawns) == "table" and #spawner.pendingSpawns > 0 then
+                normalizeSpawnerState(spawner)
+                local pendingIndex = findPendingSpawn(spawner, data)
+                if pendingIndex then
+                    table.remove(spawner.pendingSpawns, pendingIndex)
+                    spawner.spawnedMpNums[tostring(data.mpNum)] = {
+                        refId = data.refId,
+                        cellId = data.cellId,
+                    }
+                    refreshCounts(spawner)
+                    changed = true
+                    mp.log(string.format("[spawner] %s payload actor mpNum=%s cell=%s live=%d pending=%d remaining=%d",
+                        name,
+                        tostring(data.mpNum),
+                        tostring(data.cellId),
+                        spawner.liveCount,
+                        spawner.pendingCount,
+                        spawner.remaining
+                    ))
+                    break
+                end
+            end
         end
     end
 
@@ -960,22 +1050,31 @@ function M.onActorDeath(data)
     local mpNum = tonumber(data.mpNum) or 0
 
     for name, candidate in pairs(state) do
-        normalizeSpawnerState(candidate)
-        -- Primary match: the server-side mpNum we explicitly track.
-        -- Fallback (actorMpNum == 0): match by recordId + cellId only when the
-        -- spawner actor hasn't been confirmed yet.  Requiring actorMpNum == 0
-        -- prevents a ghost actor from a previous server run (same recordId,
-        -- same cellId, different mpNum) from falsely destroying an active spawner.
-        if (candidate.actorMpNum ~= 0 and candidate.actorMpNum == mpNum)
-            or (candidate.actorMpNum == 0 and candidate.recordId == data.refId and candidate.cellId == data.cellId) then
-            matchedName = name
-            spawner = candidate
-            isSpawnerActor = true
-            break
-        elseif candidate.spawnedMpNums[tostring(mpNum)] then
-            matchedName = name
-            spawner = candidate
-            break
+        if type(candidate) == "table" then
+            local actorMpNum = tonumber(candidate.actorMpNum) or 0
+            local recordId = trim(candidate.recordId) or (candidate.name and recordIdForName(candidate.name) or "")
+            local cellId = trim(candidate.cellId) or ""
+            -- Primary match: the server-side mpNum we explicitly track.
+            -- Fallback (actorMpNum == 0): match by recordId + cellId only when the
+            -- spawner actor hasn't been confirmed yet.  Requiring actorMpNum == 0
+            -- prevents a ghost actor from a previous server run (same recordId,
+            -- same cellId, different mpNum) from falsely destroying an active spawner.
+            if (actorMpNum ~= 0 and actorMpNum == mpNum)
+                or (actorMpNum == 0 and recordId == data.refId and cellId == data.cellId) then
+                normalizeSpawnerState(candidate)
+                matchedName = name
+                spawner = candidate
+                isSpawnerActor = true
+                break
+            end
+
+            local spawnedMpNums = type(candidate.spawnedMpNums) == "table" and candidate.spawnedMpNums or nil
+            if spawnedMpNums and (spawnedMpNums[tostring(mpNum)] or spawnedMpNums[mpNum]) then
+                normalizeSpawnerState(candidate)
+                matchedName = name
+                spawner = candidate
+                break
+            end
         end
     end
 
@@ -1000,7 +1099,15 @@ function M.onActorDeath(data)
             mp.removeGameObject(mpNum, spawner.cellId or data.cellId or "")
         end
     else
-        spawner.spawnedMpNums[tostring(mpNum)] = nil
+        local tracked = spawner.spawnedMpNums[tostring(mpNum)]
+        if type(tracked) == "table" then
+            tracked.dead = true
+            tracked.cellId = data.cellId or tracked.cellId
+            tracked.refId = data.refId or tracked.refId
+        end
+        -- Keep the mpNum tracked while the corpse exists so purge/remove can
+        -- clean up persistent payload corpses later. The mpNum should only be
+        -- removed from spawnedMpNums after an explicit cleanup/remove succeeds.
         if not spawner.destroyed then
             spawner.spawnTimer = spawner.spawnInterval
         end
@@ -1101,12 +1208,20 @@ function M.onServerTick(data)
         return
     end
 
+    tickAccumulator = tickAccumulator + dt
+    local tickInterval = getSpawnerTickInterval()
+    if tickAccumulator < tickInterval then
+        return
+    end
+    dt = tickAccumulator
+    tickAccumulator = 0
+
     local state = loadState()
     local changed = false
 
     for name, spawner in pairs(state) do
         if type(spawner) == "table" then
-            normalizeSpawnerState(spawner)
+            ensureSpawnerTickState(spawner)
 
             if spawner.destroyed then
                 if spawner.actorMpNum ~= 0 then

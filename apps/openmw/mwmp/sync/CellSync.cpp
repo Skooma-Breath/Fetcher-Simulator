@@ -9,7 +9,7 @@ namespace mwmp
     {
         mLoaded.push_back(cell);
         Log(Debug::Verbose) << "[MP] CellSync: loaded " << cell.cellName;
-        // Phase 4: send PlayerCellState packet to server
+        // Loaded actor-cell reporting is handled by PlayerSync.
     }
     void CellSync::onCellUnloaded(const CellId& cell)
     {

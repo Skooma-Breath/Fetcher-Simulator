@@ -47,6 +47,7 @@ namespace mwmp
         void onActorStatsDynamic(const ActorList& list);
         void onActorAI(const ActorList& list);
         void onActorCombatRequest(const ActorList& list);
+        void onActorCellChange(const ActorList& list);
 
         bool hasAuthority(const std::string& cellId) const;
         uint32_t getActorMpNum(const MWWorld::Ptr& ptr) const;
