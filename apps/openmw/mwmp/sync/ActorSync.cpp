@@ -6,6 +6,7 @@
 #include <limits>
 #include <map>
 #include <unordered_set>
+#include <vector>
 
 #include <components/debug/debuglog.hpp>
 #include <components/esm/refid.hpp>
@@ -85,6 +86,89 @@ namespace
     float lerpFloat(float current, float target, float alpha)
     {
         return current + ((target - current) * alpha);
+    }
+
+    float shortestAngleDelta(float target, float current)
+    {
+        static constexpr float kPi = 3.14159265358979323846f;
+        static constexpr float kTwoPi = kPi * 2.f;
+
+        float delta = std::fmod(target - current + kPi, kTwoPi);
+        if (delta < 0.f)
+            delta += kTwoPi;
+        return delta - kPi;
+    }
+
+    float lerpAngle(float current, float target, float alpha)
+    {
+        return current + shortestAngleDelta(target, current) * alpha;
+    }
+
+    mwmp::Position interpolatePosition(const mwmp::Position& from, const mwmp::Position& to, float alpha)
+    {
+        mwmp::Position result = from;
+        for (int i = 0; i < 3; ++i)
+        {
+            result.pos[i] = lerpFloat(from.pos[i], to.pos[i], alpha);
+            result.rot[i] = lerpAngle(from.rot[i], to.rot[i], alpha);
+        }
+        result.isTeleporting = to.isTeleporting;
+        return result;
+    }
+
+    mwmp::Position extrapolatePosition(const mwmp::Position& from, const mwmp::Velocity& velocity, double milliseconds)
+    {
+        mwmp::Position result = from;
+        const float seconds = static_cast<float>(milliseconds / 1000.0);
+        for (int i = 0; i < 3; ++i)
+        {
+            result.pos[i] += velocity.linear[i] * seconds;
+            result.rot[i] += velocity.angular[i] * seconds;
+        }
+        return result;
+    }
+
+    float distanceSquared(const MWWorld::Ptr& lhs, const MWWorld::Ptr& rhs)
+    {
+        if (lhs.isEmpty() || rhs.isEmpty())
+            return -1.f;
+
+        const auto& a = lhs.getRefData().getPosition().pos;
+        const auto& b = rhs.getRefData().getPosition().pos;
+        const float dx = a[0] - b[0];
+        const float dy = a[1] - b[1];
+        const float dz = a[2] - b[2];
+        return (dx * dx) + (dy * dy) + (dz * dz);
+    }
+
+    bool isMeleeAttackType(int attackType)
+    {
+        return attackType != 1 && attackType != 2 && attackType != 3;
+    }
+
+    constexpr float kMaxReplicatedMeleeHitDistance = 512.f;
+
+    bool isHighPriorityPositionActor(const mwmp::BaseActor& actor, bool hasPrevious, float previousHealth,
+        bool previousMoving)
+    {
+        if (actor.isDead)
+            return false;
+        if (actor.isMoving || actor.isAttackingOrCasting || actor.hasWeaponDrawn || actor.hasSpellReadied)
+            return true;
+        if (actor.ai.type == mwmp::BaseActor::AIAction::Type::Combat)
+            return true;
+        if (std::abs(actor.velocity.linear[0]) > 1.f || std::abs(actor.velocity.linear[1]) > 1.f
+            || std::abs(actor.velocity.linear[2]) > 1.f)
+            return true;
+        if (hasPrevious)
+        {
+            if (previousMoving != actor.isMoving)
+                return true;
+            const float healthDelta = std::abs(actor.dynamicStats.health.current - previousHealth);
+            if (healthDelta > 0.5f)
+                return true;
+        }
+        return false;
     }
 
     MWWorld::CellStore* findActiveCellById(MWWorld::World& world, const std::string& cellId)
@@ -324,7 +408,8 @@ namespace mwmp
         }
     }
 
-    bool ActorSync::shouldAcceptSnapshot(CellRuntime& cell, const ActorList& list, const char* packetName)
+    bool ActorSync::shouldAcceptSnapshot(CellRuntime& cell, const ActorList& list, const char* packetName,
+        bool isPositionSnapshot)
     {
         if (cell.latest.authorityGeneration != 0
             && list.authorityGeneration != 0
@@ -339,14 +424,24 @@ namespace mwmp
             return false;
         }
 
-        if (cell.latest.snapshotSequence != 0
+        if (cell.latest.authorityGeneration != 0
+            && list.authorityGeneration != 0
+            && list.authorityGeneration > cell.latest.authorityGeneration)
+        {
+            cell.latestPositionSequence = 0;
+            cell.latestReliableSequence = 0;
+        }
+
+        const uint32_t latestStreamSequence = isPositionSnapshot
+            ? cell.latestPositionSequence : cell.latestReliableSequence;
+        if (latestStreamSequence != 0
             && list.snapshotSequence != 0
-            && list.snapshotSequence < cell.latest.snapshotSequence)
+            && list.snapshotSequence < latestStreamSequence)
         {
             Log(Debug::Info) << "[MP] ActorSync: dropped stale " << packetName
                              << " cellId=" << list.cellId
                              << " seq=" << list.snapshotSequence
-                             << " latestSeq=" << cell.latest.snapshotSequence
+                             << " latestSeq=" << latestStreamSequence
                              << " gen=" << list.authorityGeneration
                              << " latestGen=" << cell.latest.authorityGeneration;
             return false;
@@ -357,7 +452,13 @@ namespace mwmp
         if (list.authorityGeneration != 0)
             cell.latest.authorityGeneration = list.authorityGeneration;
         if (list.snapshotSequence != 0)
-            cell.latest.snapshotSequence = list.snapshotSequence;
+        {
+            if (isPositionSnapshot)
+                cell.latestPositionSequence = list.snapshotSequence;
+            else
+                cell.latestReliableSequence = list.snapshotSequence;
+            cell.latest.snapshotSequence = std::max(cell.latestPositionSequence, cell.latestReliableSequence);
+        }
         if (list.serverTimestamp != 0)
             cell.latest.serverTimestamp = list.serverTimestamp;
 
@@ -386,6 +487,9 @@ namespace mwmp
         {
             cell.initialListSent = false;
             cell.positionSendTimer = 0.f;
+            cell.positionDiagnosticsTimer = 0.f;
+            cell.positionSendCursor = 0;
+            cell.priorityPositionSendCursor = 0;
             cell.outboundCellId = list.cellId;
             Log(Debug::Info) << "[MP] ActorSync: authority "
                              << (hasLocalAuthority ? "granted" : "revoked")
@@ -409,6 +513,16 @@ namespace mwmp
 
         for (const auto& actorState : list.actors)
         {
+            if (isStaleServerSpawnedActorUpdate(actorState.mpNum, list.serverTimestamp))
+            {
+                Log(Debug::Verbose) << "[MP] ActorSync: skipped stale ActorList actor"
+                                    << " cell=" << list.cellId
+                                    << " refId=" << actorState.refId
+                                    << " mpNum=" << actorState.mpNum
+                                    << " ts=" << list.serverTimestamp;
+                continue;
+            }
+
             const std::string actorKey = makeActorKey(actorState);
             ActorRuntime runtime;
             if (actorState.mpNum != 0)
@@ -417,6 +531,21 @@ namespace mwmp
             auto existing = cell.actors.find(actorKey);
             if (existing != cell.actors.end())
                 runtime = existing->second;
+            else if (actorState.mpNum != 0)
+            {
+                takeServerSpawnedRuntimeFromOtherCell(list.cellId, actorState, list.serverTimestamp, runtime);
+                if (runtime.boundActor.isEmpty())
+                {
+                    auto mappedIt = mServerSpawnedActorsByMpNum.find(actorState.mpNum);
+                    if (mappedIt != mServerSpawnedActorsByMpNum.end()
+                        && !mappedIt->second.isEmpty()
+                        && matchesActor(mappedIt->second, actorState))
+                    {
+                        runtime.boundActor = mappedIt->second;
+                        runtime.bindingLogged = false;
+                    }
+                }
+            }
 
             runtime.state = actorState;
             // If the actor arrives already dead from a full actor list (not a
@@ -425,10 +554,10 @@ namespace mwmp
             if (actorState.isDead)
                 runtime.deathFromRealtimePacket = false;
             queueSnapshot(runtime, actorState, list);
+            rememberServerSpawnedActorTimestamp(actorState.mpNum, list.serverTimestamp);
             updatedActors[actorKey] = std::move(runtime);
         }
 
-        MWBase::World* world = MWBase::Environment::get().getWorld();
         for (auto& [actorKey, runtime] : cell.actors)
         {
             if (runtime.state.mpNum == 0 || incomingServerSpawnedMpNums.count(runtime.state.mpNum) != 0)
@@ -436,9 +565,14 @@ namespace mwmp
 
             if (!runtime.boundActor.isEmpty())
             {
-                forgetServerSpawnedActor(list.cellId, runtime.boundActor, runtime.state.mpNum);
-                if (world)
-                    world->deleteObject(runtime.boundActor);
+                const std::string boundCellId = cellIdForPtr(runtime.boundActor);
+                rememberServerSpawnedActor(boundCellId.empty() ? list.cellId : boundCellId,
+                    runtime.boundActor, runtime.state.mpNum);
+                Log(Debug::Verbose) << "[MP] ActorSync: deferred missing server-spawned actor cleanup"
+                                    << " cell=" << list.cellId
+                                    << " boundCell=" << boundCellId
+                                    << " refId=" << runtime.state.refId
+                                    << " mpNum=" << runtime.state.mpNum;
             }
         }
 
@@ -451,25 +585,54 @@ namespace mwmp
         // actor.cellId = destination cell (where the actor is going)
         // Move each actor's runtime from the source cell to the destination cell.
         auto srcIt = mCells.find(list.cellId);
-        if (srcIt == mCells.end())
-            return;
 
         for (const auto& actorState : list.actors)
         {
-            const std::string actorKey = makeActorKey(actorState);
-            auto runtimeIt = srcIt->second.actors.find(actorKey);
-            if (runtimeIt == srcIt->second.actors.end())
+            if (isStaleServerSpawnedActorUpdate(actorState.mpNum, list.serverTimestamp))
+            {
+                Log(Debug::Verbose) << "[MP] ActorSync: skipped stale ActorCellChange actor"
+                                    << " from=" << list.cellId
+                                    << " to=" << actorState.cellId
+                                    << " refId=" << actorState.refId
+                                    << " mpNum=" << actorState.mpNum
+                                    << " ts=" << list.serverTimestamp;
                 continue;
+            }
 
-            ActorRuntime runtime = std::move(runtimeIt->second);
-            srcIt->second.actors.erase(runtimeIt);
-
+            const std::string actorKey = makeActorKey(actorState);
             const std::string& destCellId = actorState.cellId;
+            ActorRuntime runtime;
+            if (srcIt != mCells.end())
+            {
+                auto runtimeIt = srcIt->second.actors.find(actorKey);
+                if (runtimeIt != srcIt->second.actors.end())
+                {
+                    runtime = std::move(runtimeIt->second);
+                    srcIt->second.actors.erase(runtimeIt);
+                }
+            }
+
+            if (runtime.state.refId.empty())
+            {
+                const bool migrated = takeServerSpawnedRuntimeFromOtherCell(destCellId, actorState,
+                    list.serverTimestamp, runtime);
+                if (!migrated && actorState.mpNum != 0)
+                {
+                    auto mappedIt = mServerSpawnedActorsByMpNum.find(actorState.mpNum);
+                    if (mappedIt != mServerSpawnedActorsByMpNum.end()
+                        && !mappedIt->second.isEmpty()
+                        && matchesActor(mappedIt->second, actorState))
+                    {
+                        runtime.boundActor = mappedIt->second;
+                        runtime.bindingLogged = false;
+                    }
+                }
+            }
+
             auto& destCell = mCells[destCellId];
             runtime.state = actorState;
-            runtime.snapshots.clear();
-            runtime.hasSmoothedPosition = false;
             queueSnapshot(runtime, actorState, list);
+            rememberServerSpawnedActorTimestamp(actorState.mpNum, list.serverTimestamp);
             destCell.actors[actorKey] = std::move(runtime);
 
             Log(Debug::Info) << "[MP] ActorSync: cell change " << actorState.refId
@@ -482,7 +645,7 @@ namespace mwmp
     void ActorSync::onActorPositionUpdate(const ActorList& list)
     {
         auto& cell = mCells[list.cellId];
-        if (!shouldAcceptSnapshot(cell, list, "ActorPosition"))
+        if (!shouldAcceptSnapshot(cell, list, "ActorPosition", true))
             return;
 
         cell.latest.cellId = list.cellId;
@@ -493,9 +656,43 @@ namespace mwmp
 
         for (const auto& actorState : list.actors)
         {
-            auto& runtime = cell.actors[makeActorKey(actorState)];
+            if (isStaleServerSpawnedActorUpdate(actorState.mpNum, list.serverTimestamp))
+            {
+                Log(Debug::Verbose) << "[MP] ActorSync: skipped stale ActorPosition actor"
+                                    << " cell=" << list.cellId
+                                    << " refId=" << actorState.refId
+                                    << " mpNum=" << actorState.mpNum
+                                    << " ts=" << list.serverTimestamp;
+                continue;
+            }
+
+            const std::string actorKey = makeActorKey(actorState);
+            auto runtimeIt = cell.actors.find(actorKey);
+            if (runtimeIt == cell.actors.end() && actorState.mpNum != 0)
+            {
+                ActorRuntime migratedRuntime;
+                if (takeServerSpawnedRuntimeFromOtherCell(list.cellId, actorState, list.serverTimestamp, migratedRuntime))
+                    runtimeIt = cell.actors.emplace(actorKey, std::move(migratedRuntime)).first;
+                else
+                {
+                    auto mappedIt = mServerSpawnedActorsByMpNum.find(actorState.mpNum);
+                    if (mappedIt != mServerSpawnedActorsByMpNum.end()
+                        && !mappedIt->second.isEmpty()
+                        && matchesActor(mappedIt->second, actorState))
+                    {
+                        ActorRuntime mappedRuntime;
+                        mappedRuntime.boundActor = mappedIt->second;
+                        runtimeIt = cell.actors.emplace(actorKey, std::move(mappedRuntime)).first;
+                    }
+                }
+            }
+            if (runtimeIt == cell.actors.end())
+                runtimeIt = cell.actors.emplace(actorKey, ActorRuntime()).first;
+
+            auto& runtime = runtimeIt->second;
             mergeActorState(runtime, actorState, true);
             queueSnapshot(runtime, actorState, list);
+            rememberServerSpawnedActorTimestamp(actorState.mpNum, list.serverTimestamp);
         }
     }
 
@@ -595,6 +792,8 @@ namespace mwmp
         for (const auto& actorState : list.actors)
         {
             auto& runtime = cell.actors[makeActorKey(actorState)];
+            const bool wasDead = runtime.state.isDead || runtime.deathAlreadyApplied;
+            const float previousHealth = runtime.state.dynamicStats.health.current;
             mergeActorState(runtime, actorState, false);
             runtime.state.deathState = actorState.deathState;
             runtime.state.isDead = actorState.isDead;
@@ -603,9 +802,12 @@ namespace mwmp
                 runtime.state.deathAnimGroup = actorState.deathAnimGroup;
             runtime.state.dynamicStats.health.current = actorState.dynamicStats.health.current;
             runtime.deathFromRealtimePacket = true;
-            Log(Debug::Info) << "[MP] ActorSync: Death received for " << actorState.refId
-                             << " isDead=" << actorState.isDead
-                             << " hp=" << actorState.dynamicStats.health.current;
+            Log(actorState.isDead && !wasDead ? Debug::Info : Debug::Verbose)
+                << "[MP] ActorSync: Death received for " << actorState.refId
+                << " mpNum=" << actorState.mpNum
+                << " isDead=" << actorState.isDead
+                << " prevHp=" << previousHealth
+                << " hp=" << actorState.dynamicStats.health.current;
         }
     }
 
@@ -641,9 +843,10 @@ namespace mwmp
             mergeActorState(runtime, actorState, false);
             runtime.state.dynamicStats = actorState.dynamicStats;
             runtime.state.isDead = actorState.isDead;
-            Log(Debug::Info) << "[MP] ActorSync: StatsDynamic for " << actorState.refId
-                             << " hp=" << actorState.dynamicStats.health.current
-                             << " isDead=" << actorState.isDead;
+            Log(Debug::Verbose) << "[MP] ActorSync: StatsDynamic for " << actorState.refId
+                                << " mpNum=" << actorState.mpNum
+                                << " hp=" << actorState.dynamicStats.health.current
+                                << " isDead=" << actorState.isDead;
         }
     }
 
@@ -721,6 +924,17 @@ namespace mwmp
                     ? MWMechanics::DamageSourceType::Ranged
                     : (actorState.attack.type == 1 ? MWMechanics::DamageSourceType::Magical
                                                    : MWMechanics::DamageSourceType::Melee);
+                const float attackerDistanceSq = distanceSquared(attacker, player);
+                if (isMeleeAttackType(actorState.attack.type)
+                    && attackerDistanceSq > kMaxReplicatedMeleeHitDistance * kMaxReplicatedMeleeHitDistance)
+                {
+                    Log(Debug::Warning) << "[MP] ActorSync: skipped NPC damage outside melee range"
+                                        << " attacker=" << actorState.refId
+                                        << " mpNum=" << actorState.mpNum
+                                        << " distance=" << std::sqrt(attackerDistanceSq)
+                                        << " max=" << kMaxReplicatedMeleeHitDistance;
+                    continue;
+                }
 
                 MWBase::Environment::get().getLuaManager()->onHit(
                     attacker, player, weapon, MWWorld::Ptr(), actorState.attack.type,
@@ -733,7 +947,9 @@ namespace mwmp
                 Log(Debug::Info) << "[MP] ActorSync: NPC damage applied to local player"
                                  << " damage=" << actorState.attack.damage
                                  << " stat=" << (actorState.attack.healthDamage ? "health" : "fatigue")
-                                 << " attacker=" << actorState.refId;
+                                 << " attacker=" << actorState.refId
+                                 << " attackerMpNum=" << actorState.mpNum
+                                 << " distance=" << (attackerDistanceSq >= 0.f ? std::sqrt(attackerDistanceSq) : -1.f);
 
                 if (actorState.attack.healthDamage && actorState.attack.type != 1)
                     spawnReplicatedPlayerBloodEffect(player, hitPos);
@@ -830,10 +1046,29 @@ namespace mwmp
                 continue;
             }
 
+            const MWMechanics::DamageSourceType sourceType
+                = (actorState.attack.type == 2 || actorState.attack.type == 3)
+                ? MWMechanics::DamageSourceType::Ranged
+                : (actorState.attack.type == 1 ? MWMechanics::DamageSourceType::Magical
+                                               : MWMechanics::DamageSourceType::Melee);
+            const float attackerDistanceSq = distanceSquared(attacker, victim);
+            if (actorState.attack.damage > 0.f && isMeleeAttackType(actorState.attack.type)
+                && attackerDistanceSq > kMaxReplicatedMeleeHitDistance * kMaxReplicatedMeleeHitDistance)
+            {
+                Log(Debug::Warning) << "[MP] ActorSync: CombatRequest rejected outside melee range"
+                                    << " guid=" << list.authorityGuid
+                                    << " victim=" << actorState.refId
+                                    << " mpNum=" << actorState.mpNum
+                                    << " distance=" << std::sqrt(attackerDistanceSq)
+                                    << " max=" << kMaxReplicatedMeleeHitDistance;
+                continue;
+            }
+
             Log(Debug::Info) << "[MP] ActorSync: CombatRequest from guid=" << list.authorityGuid
                              << " victim=" << actorState.refId
                              << " mpNum=" << actorState.mpNum
-                             << " attackerEmpty=" << attacker.isEmpty();
+                             << " attackerEmpty=" << attacker.isEmpty()
+                             << " distance=" << (attackerDistanceSq >= 0.f ? std::sqrt(attackerDistanceSq) : -1.f);
 
             // Use startCombat so the NPC enters combat with the attacker unconditionally.
             // actorAttacked() requires the attacker to already be in combat with the victim,
@@ -846,12 +1081,6 @@ namespace mwmp
             // all follow the same code path as a local attack.
             if (actorState.attack.damage > 0.f)
             {
-                const MWMechanics::DamageSourceType sourceType
-                    = (actorState.attack.type == 2 || actorState.attack.type == 3)
-                    ? MWMechanics::DamageSourceType::Ranged
-                    : (actorState.attack.type == 1 ? MWMechanics::DamageSourceType::Magical
-                                                   : MWMechanics::DamageSourceType::Melee);
-
                 MWWorld::Ptr weapon = getEquippedWeapon(attacker);
                 bool healthDamage = actorState.attack.healthDamage;
                 if (sourceType == MWMechanics::DamageSourceType::Melee && weapon.isEmpty())
@@ -877,7 +1106,8 @@ namespace mwmp
                 Log(Debug::Info) << "[MP] ActorSync: CombatRequest applied damage=" << actorState.attack.damage
                                  << " stat=" << (healthDamage ? "health" : "fatigue")
                                  << " to " << actorState.refId
-                                 << " sourceType=" << static_cast<int>(sourceType);
+                                 << " sourceType=" << static_cast<int>(sourceType)
+                                 << " distance=" << (attackerDistanceSq >= 0.f ? std::sqrt(attackerDistanceSq) : -1.f);
             }
         }
     }
@@ -1010,6 +1240,32 @@ namespace mwmp
         npcActor.refId = npcAttacker.getCellRef().getRefId().serializeText();
         npcActor.refNum = npcAttacker.getCellRef().getRefNum().mIndex;
         npcActor.cellId = cellId;
+        const uint32_t mappedMpNum = mappedMpNumForPtr(cellId, npcAttacker);
+        if (mappedMpNum != 0)
+        {
+            npcActor.mpNum = mappedMpNum;
+            npcActor.refNum = 0;
+            rememberServerSpawnedActor(cellId, npcAttacker, mappedMpNum);
+        }
+
+        float victimDistanceSq = -1.f;
+        if (Main::isInitialised())
+        {
+            if (RemotePlayer* victimPlayer = Main::get().getPlayerList().getPlayer(victimGuid))
+                victimDistanceSq = distanceSquared(npcAttacker, victimPlayer->getNpcPtr());
+        }
+        if (isMeleeAttackType(attackType)
+            && victimDistanceSq > kMaxReplicatedMeleeHitDistance * kMaxReplicatedMeleeHitDistance)
+        {
+            Log(Debug::Warning) << "[MP] ActorSync: sendNpcPlayerDamage skipped outside melee range"
+                                << " victimGuid=" << victimGuid
+                                << " attacker=" << npcActor.refId
+                                << " attackerMpNum=" << npcActor.mpNum
+                                << " distance=" << std::sqrt(victimDistanceSq)
+                                << " max=" << kMaxReplicatedMeleeHitDistance;
+            return;
+        }
+
         npcActor.attack.targetKind = mwmp::Attack::TargetPlayer;
         npcActor.attack.hit = true;
         npcActor.attack.healthDamage = healthDamage;
@@ -1028,7 +1284,11 @@ namespace mwmp
                          << " healthDamage=" << healthDamage
                          << " attackType=" << attackType
                          << " isDead=" << isDead
-                         << " attacker=" << npcActor.refId;
+                         << " attacker=" << npcActor.refId
+                         << " attackerMpNum=" << npcActor.mpNum
+                         << " attackerRefNum=" << npcActor.refNum
+                         << " cell=" << cellId
+                         << " distance=" << (victimDistanceSq >= 0.f ? std::sqrt(victimDistanceSq) : -1.f);
     }
 
     void ActorSync::notifyNpcCast(const MWWorld::Ptr& npc, const std::string& spellId,
@@ -1095,13 +1355,24 @@ namespace mwmp
         snapshot.velocity = state.velocity;
         snapshot.sequence = list.snapshotSequence;
         snapshot.serverTimestamp = list.serverTimestamp;
+        if (snapshot.serverTimestamp != 0)
+            actor.lastServerTimestamp = std::max(actor.lastServerTimestamp, snapshot.serverTimestamp);
 
+        const bool wasEmpty = actor.snapshots.empty();
         if (!actor.snapshots.empty() && actor.snapshots.back().sequence == snapshot.sequence)
             actor.snapshots.back() = snapshot;
         else
             actor.snapshots.push_back(snapshot);
 
-        while (actor.snapshots.size() > 6)
+        actor.latestSnapshotAge = 0.f;
+        if (snapshot.serverTimestamp != 0
+            && (wasEmpty || !actor.hasInterpolationRenderTimestamp))
+        {
+            actor.interpolationRenderTimestamp = static_cast<double>(snapshot.serverTimestamp);
+            actor.hasInterpolationRenderTimestamp = true;
+        }
+
+        while (actor.snapshots.size() > 10)
             actor.snapshots.pop_front();
 
         if (!actor.hasSmoothedPosition)
@@ -1142,37 +1413,107 @@ namespace mwmp
         if (actor.snapshots.empty())
             return;
 
+        actor.latestSnapshotAge += dt;
+
         if (!actor.hasSmoothedPosition)
         {
             actor.smoothedPosition = actor.snapshots.front().position;
             actor.hasSmoothedPosition = true;
         }
 
-        while (actor.snapshots.size() > 2)
-            actor.snapshots.pop_front();
-
-        const Position& target = (actor.snapshots.size() >= 2)
-            ? actor.snapshots[1].position
-            : actor.snapshots.front().position;
-
-        const float alpha = std::clamp(dt * 15.f, 0.f, 1.f);
-        for (int i = 0; i < 3; ++i)
+        if (actor.snapshots.back().serverTimestamp == 0)
         {
-            actor.smoothedPosition.pos[i] = lerpFloat(actor.smoothedPosition.pos[i], target.pos[i], alpha);
-            actor.smoothedPosition.rot[i] = lerpFloat(actor.smoothedPosition.rot[i], target.rot[i], alpha);
-        }
-        actor.smoothedPosition.isTeleporting = target.isTeleporting;
-        actor.state.position = actor.smoothedPosition;
+            while (actor.snapshots.size() > 2)
+                actor.snapshots.pop_front();
 
+            const Position& target = (actor.snapshots.size() >= 2)
+                ? actor.snapshots[1].position
+                : actor.snapshots.front().position;
+
+            const float alpha = std::clamp(dt * 15.f, 0.f, 1.f);
+            for (int i = 0; i < 3; ++i)
+            {
+                actor.smoothedPosition.pos[i] = lerpFloat(actor.smoothedPosition.pos[i], target.pos[i], alpha);
+                actor.smoothedPosition.rot[i] = lerpAngle(actor.smoothedPosition.rot[i], target.rot[i], alpha);
+            }
+            actor.smoothedPosition.isTeleporting = target.isTeleporting;
+            actor.state.position = actor.smoothedPosition;
+
+            if (actor.snapshots.size() >= 2)
+            {
+                const float dx = actor.smoothedPosition.pos[0] - target.pos[0];
+                const float dy = actor.smoothedPosition.pos[1] - target.pos[1];
+                const float dz = actor.smoothedPosition.pos[2] - target.pos[2];
+                const float distanceSq = (dx * dx) + (dy * dy) + (dz * dz);
+                if (distanceSq < 4.f)
+                    actor.snapshots.pop_front();
+            }
+            return;
+        }
+
+        static constexpr double kInterpolationDelayMs = 80.0;
+        static constexpr double kMaxExtrapolationMs = 150.0;
+
+        const double latestTimestamp = static_cast<double>(actor.snapshots.back().serverTimestamp);
+        const double estimatedServerNow = latestTimestamp + (std::max(0.f, actor.latestSnapshotAge) * 1000.0);
+        const double desiredRenderTimestamp = std::min(
+            estimatedServerNow - kInterpolationDelayMs,
+            latestTimestamp + kMaxExtrapolationMs);
+        const double earliestTimestamp = static_cast<double>(actor.snapshots.front().serverTimestamp);
+        const double targetRenderTimestamp = std::max(desiredRenderTimestamp, earliestTimestamp);
+
+        if (!actor.hasInterpolationRenderTimestamp
+            || actor.interpolationRenderTimestamp < earliestTimestamp
+            || actor.interpolationRenderTimestamp > latestTimestamp + kMaxExtrapolationMs)
+        {
+            actor.interpolationRenderTimestamp = earliestTimestamp;
+            actor.hasInterpolationRenderTimestamp = true;
+        }
+        else if (targetRenderTimestamp > actor.interpolationRenderTimestamp)
+        {
+            actor.interpolationRenderTimestamp = std::min(
+                actor.interpolationRenderTimestamp + (std::max(0.f, dt) * 1000.0),
+                targetRenderTimestamp);
+        }
+        else
+            actor.interpolationRenderTimestamp = targetRenderTimestamp;
+
+        const double renderTimestamp = actor.interpolationRenderTimestamp;
+        while (actor.snapshots.size() >= 2
+            && actor.snapshots[1].serverTimestamp != 0
+            && static_cast<double>(actor.snapshots[1].serverTimestamp) <= renderTimestamp)
+        {
+            actor.snapshots.pop_front();
+        }
+
+        Position target = actor.snapshots.front().position;
         if (actor.snapshots.size() >= 2)
         {
-            const float dx = actor.smoothedPosition.pos[0] - target.pos[0];
-            const float dy = actor.smoothedPosition.pos[1] - target.pos[1];
-            const float dz = actor.smoothedPosition.pos[2] - target.pos[2];
-            const float distanceSq = (dx * dx) + (dy * dy) + (dz * dz);
-            if (distanceSq < 4.f)
-                actor.snapshots.pop_front();
+            const BufferedSnapshot& from = actor.snapshots[0];
+            const BufferedSnapshot& to = actor.snapshots[1];
+            const double fromTimestamp = static_cast<double>(from.serverTimestamp);
+            const double toTimestamp = static_cast<double>(to.serverTimestamp);
+            if (toTimestamp > fromTimestamp && renderTimestamp >= fromTimestamp)
+            {
+                const float alpha = static_cast<float>(
+                    std::clamp((renderTimestamp - fromTimestamp) / (toTimestamp - fromTimestamp), 0.0, 1.0));
+                target = interpolatePosition(from.position, to.position, alpha);
+            }
         }
+        else if (renderTimestamp > latestTimestamp)
+        {
+            const double extrapolationMs = std::min(renderTimestamp - latestTimestamp, kMaxExtrapolationMs);
+            const bool movementInputActive = std::abs(actor.state.animFlags.animFwd) > 0.1f
+                || std::abs(actor.state.animFlags.animSide) > 0.1f;
+            if (actor.state.isMoving && movementInputActive)
+                target = extrapolatePosition(actor.snapshots.back().position, actor.snapshots.back().velocity,
+                    extrapolationMs);
+            else
+                target = actor.snapshots.back().position;
+        }
+
+        actor.smoothedPosition = target;
+        actor.state.position = actor.smoothedPosition;
     }
 
     void ActorSync::rememberServerSpawnedActor(const std::string& cellId, const MWWorld::Ptr& ptr, uint32_t mpNum)
@@ -1182,12 +1523,23 @@ namespace mwmp
 
         mMpNumsByLocalActor[makeLocalActorKey(cellId, ptr)] = mpNum;
         mServerSpawnedActorsByMpNum[mpNum] = ptr;
+        if (auto* baseNode = ptr.getRefData().getBaseNode())
+            baseNode->setUserValue("mp_actor_mpnum", static_cast<int>(mpNum));
     }
 
     void ActorSync::forgetServerSpawnedActor(const std::string& cellId, const MWWorld::Ptr& ptr, uint32_t mpNum)
     {
         if (!ptr.isEmpty())
+        {
             mMpNumsByLocalActor.erase(makeLocalActorKey(cellId, ptr));
+
+            const std::string currentCellId = cellIdForPtr(ptr);
+            if (mpNum != 0 && !currentCellId.empty() && currentCellId != cellId)
+            {
+                rememberServerSpawnedActor(currentCellId, ptr, mpNum);
+                return;
+            }
+        }
 
         if (mpNum == 0)
             return;
@@ -1206,6 +1558,13 @@ namespace mwmp
         if (localIt != mMpNumsByLocalActor.end())
             return localIt->second;
 
+        if (auto* baseNode = ptr.getRefData().getBaseNode())
+        {
+            int stampedMpNum = 0;
+            if (baseNode->getUserValue("mp_actor_mpnum", stampedMpNum) && stampedMpNum > 0)
+                return static_cast<uint32_t>(stampedMpNum);
+        }
+
         for (const auto& [mpNum, mappedPtr] : mServerSpawnedActorsByMpNum)
         {
             if (!mappedPtr.isEmpty() && mappedPtr == ptr)
@@ -1213,6 +1572,67 @@ namespace mwmp
         }
 
         return 0;
+    }
+
+    bool ActorSync::isStaleServerSpawnedActorUpdate(uint32_t mpNum, uint64_t serverTimestamp) const
+    {
+        if (mpNum == 0 || serverTimestamp == 0)
+            return false;
+
+        auto it = mServerSpawnedActorLastTimestamps.find(mpNum);
+        return it != mServerSpawnedActorLastTimestamps.end() && serverTimestamp < it->second;
+    }
+
+    void ActorSync::rememberServerSpawnedActorTimestamp(uint32_t mpNum, uint64_t serverTimestamp)
+    {
+        if (mpNum == 0 || serverTimestamp == 0)
+            return;
+
+        auto& latest = mServerSpawnedActorLastTimestamps[mpNum];
+        latest = std::max(latest, serverTimestamp);
+    }
+
+    bool ActorSync::takeServerSpawnedRuntimeFromOtherCell(const std::string& targetCellId,
+        const BaseActor& actorState, uint64_t serverTimestamp, ActorRuntime& runtime)
+    {
+        if (actorState.mpNum == 0)
+            return false;
+
+        const std::string actorKey = makeActorKey(actorState);
+        for (auto& [cellId, cell] : mCells)
+        {
+            if (cellId == targetCellId)
+                continue;
+
+            auto runtimeIt = cell.actors.find(actorKey);
+            if (runtimeIt == cell.actors.end())
+                continue;
+
+            if (serverTimestamp != 0 && runtimeIt->second.lastServerTimestamp != 0
+                && serverTimestamp < runtimeIt->second.lastServerTimestamp)
+            {
+                Log(Debug::Verbose) << "[MP] ActorSync: ignored stale cross-cell runtime update"
+                                    << " refId=" << actorState.refId
+                                    << " mpNum=" << actorState.mpNum
+                                    << " from=" << cellId
+                                    << " to=" << targetCellId
+                                    << " ts=" << serverTimestamp
+                                    << " latestTs=" << runtimeIt->second.lastServerTimestamp;
+                return false;
+            }
+
+            runtime = std::move(runtimeIt->second);
+            cell.actors.erase(runtimeIt);
+            runtime.bindingLogged = false;
+            Log(Debug::Info) << "[MP] ActorSync: runtime migrated between cells"
+                             << " refId=" << actorState.refId
+                             << " mpNum=" << actorState.mpNum
+                             << " from=" << cellId
+                             << " to=" << targetCellId;
+            return true;
+        }
+
+        return false;
     }
 
     void ActorSync::applyBootstrapDeathState(ActorRuntime& actor)
@@ -1281,6 +1701,9 @@ namespace mwmp
             cell.outboundCellId = cellId;
             cell.initialListSent = false;
             cell.positionSendTimer = 0.f;
+            cell.positionDiagnosticsTimer = 0.f;
+            cell.positionSendCursor = 0;
+            cell.priorityPositionSendCursor = 0;
             cell.actors.clear();
             cell.authorityLoggedMpNums.clear();
         }
@@ -1289,6 +1712,9 @@ namespace mwmp
         MWWorld::CellStore* targetCell = findActiveCellById(worldImp, cell.outboundCellId);
         if (!targetCell)
             return;
+
+        for (auto& [actorKey, runtime] : cell.actors)
+            runtime.timeSinceLastPositionSend += std::max(0.f, dt);
 
         ActorList outgoing;
         outgoing.cellId = cell.outboundCellId;
@@ -1349,6 +1775,7 @@ namespace mwmp
                 }
                 actor.mpNum = mappedMpNum;
                 actor.refNum = 0;
+                rememberServerSpawnedActor(cell.outboundCellId, ptr, mappedMpNum);
                 if (cell.authorityLoggedMpNums.insert(mappedMpNum).second)
                 {
                     Log(Debug::Info) << "[MP] ActorSync: authority mapped actor"
@@ -1360,11 +1787,23 @@ namespace mwmp
             }
             else if (actor.refId == "fargoth" || actor.refId.find("spawner_") != std::string::npos)
             {
-                Log(Debug::Info) << "[MP] ActorSync: authority actor has no mapped mpNum"
-                                 << " cell=" << cell.outboundCellId
-                                 << " refId=" << actor.refId
-                                 << " localRefNum=" << actor.refNum
-                                 << " pos=(" << actor.position.pos[0] << "," << actor.position.pos[1] << "," << actor.position.pos[2] << ")";
+                Log(Debug::Verbose) << "[MP] ActorSync: authority actor has no mapped mpNum"
+                                    << " cell=" << cell.outboundCellId
+                                    << " refId=" << actor.refId
+                                    << " localRefNum=" << actor.refNum
+                                    << " pos=(" << actor.position.pos[0] << "," << actor.position.pos[1] << "," << actor.position.pos[2] << ")";
+            }
+
+            const std::string actorKey = makeActorKey(actor);
+            const auto previousRuntime = cell.actors.find(actorKey);
+            if (previousRuntime != cell.actors.end() && dt > 0.0001f)
+            {
+                const Position& previousPosition = previousRuntime->second.state.position;
+                for (int i = 0; i < 3; ++i)
+                {
+                    actor.velocity.linear[i] = (actor.position.pos[i] - previousPosition.pos[i]) / dt;
+                    actor.velocity.angular[i] = shortestAngleDelta(actor.position.rot[i], previousPosition.rot[i]) / dt;
+                }
             }
 
             MWMechanics::CreatureStats& stats = ptr.getClass().getCreatureStats(ptr);
@@ -1458,6 +1897,10 @@ namespace mwmp
             return true;
         });
 
+        std::sort(outgoing.actors.begin(), outgoing.actors.end(), [](const BaseActor& lhs, const BaseActor& rhs) {
+            return makeActorKey(lhs) < makeActorKey(rhs);
+        });
+
         std::unordered_set<std::string> outgoingKeys;
         outgoingKeys.reserve(outgoing.actors.size());
         for (const auto& actorState : outgoing.actors)
@@ -1489,6 +1932,7 @@ namespace mwmp
         }
 
         cell.positionSendTimer += dt;
+        cell.positionDiagnosticsTimer += std::max(0.f, dt);
         if (cell.positionSendTimer >= 0.05f)
         {
             cell.positionSendTimer = 0.f;
@@ -1496,21 +1940,195 @@ namespace mwmp
             // Cap the number of actors per position packet to avoid flooding the
             // server when a cell has many actors (e.g. spawner stress test).
             // The full ActorList (used for keyset changes) is unaffected.
-            static constexpr int kMaxActorsPerPositionPacket = 12;
-            if (static_cast<int>(outgoing.actors.size()) > kMaxActorsPerPositionPacket)
+            static constexpr std::size_t kMaxActorsPerPositionPacket = 12;
+            static constexpr std::size_t kMaxPositionPacketsPerTick = 2;
+            static constexpr float kActivePositionMaxAge = 0.10f;
+            static constexpr float kAbsolutePositionMaxAge = 0.25f;
+
+            auto positionSendAge = [&](const BaseActor& actor) {
+                const auto runtimeIt = cell.actors.find(makeActorKey(actor));
+                return runtimeIt != cell.actors.end() ? runtimeIt->second.timeSinceLastPositionSend : 0.f;
+            };
+
+            float maxPositionSendAge = 0.f;
+            bool includesHeddvild = false;
+            bool includesMp2601 = false;
+            for (const BaseActor& actor : outgoing.actors)
             {
-                ActorList chunk = outgoing;
-                chunk.actors.assign(outgoing.actors.begin(),
-                    outgoing.actors.begin() + kMaxActorsPerPositionPacket);
+                maxPositionSendAge = std::max(maxPositionSendAge, positionSendAge(actor));
+                includesHeddvild = includesHeddvild || actor.refId == "heddvild";
+                includesMp2601 = includesMp2601 || actor.mpNum == 2601;
+            }
+
+            std::size_t priorityCount = 0;
+            std::size_t normalCount = 0;
+            std::size_t chunksSent = 0;
+            std::size_t sentActorCount = 0;
+            bool sentHeddvild = false;
+            bool sentMp2601 = false;
+
+            auto makePositionChunk = [&]() {
+                ActorList chunk;
+                chunk.cellId = outgoing.cellId;
+                chunk.isAuthority = outgoing.isAuthority;
+                chunk.authorityGuid = outgoing.authorityGuid;
+                chunk.authorityGeneration = outgoing.authorityGeneration;
+                chunk.snapshotSequence = outgoing.snapshotSequence;
+                chunk.serverTimestamp = outgoing.serverTimestamp;
+                chunk.actors.reserve(kMaxActorsPerPositionPacket);
+                return chunk;
+            };
+
+            auto sendPositionChunk = [&](ActorList& chunk) {
                 PacketActorPosition positionPacket;
                 positionPacket.setActorList(&chunk);
                 mClient.sendUnreliable(positionPacket.encode());
+                ++chunksSent;
+            };
+
+            auto resetPositionSendAge = [&](const BaseActor& actor) {
+                const auto runtimeIt = cell.actors.find(makeActorKey(actor));
+                if (runtimeIt != cell.actors.end())
+                    runtimeIt->second.timeSinceLastPositionSend = 0.f;
+            };
+
+            if (outgoing.actors.empty())
+            {
+                cell.positionSendCursor = 0;
+                cell.priorityPositionSendCursor = 0;
+            }
+            else if (outgoing.actors.size() > kMaxActorsPerPositionPacket)
+            {
+                const std::size_t actorCount = outgoing.actors.size();
+                std::vector<std::size_t> urgentIndices;
+                std::vector<std::size_t> priorityIndices;
+                std::vector<std::size_t> normalIndices;
+                urgentIndices.reserve(actorCount);
+                priorityIndices.reserve(actorCount);
+                normalIndices.reserve(actorCount);
+
+                for (std::size_t i = 0; i < actorCount; ++i)
+                {
+                    const BaseActor& actor = outgoing.actors[i];
+                    const auto previousRuntime = cell.actors.find(makeActorKey(actor));
+                    const bool hasPrevious = previousRuntime != cell.actors.end();
+                    const float previousHealth = hasPrevious
+                        ? previousRuntime->second.state.dynamicStats.health.current
+                        : actor.dynamicStats.health.current;
+                    const bool previousMoving = hasPrevious && previousRuntime->second.state.isMoving;
+
+                    const bool highPriority = isHighPriorityPositionActor(actor, hasPrevious, previousHealth, previousMoving);
+                    const float sendAge = hasPrevious ? previousRuntime->second.timeSinceLastPositionSend : 0.f;
+                    if (sendAge >= kAbsolutePositionMaxAge || (highPriority && sendAge >= kActivePositionMaxAge))
+                        urgentIndices.push_back(i);
+                    else if (highPriority)
+                        priorityIndices.push_back(i);
+                    else
+                        normalIndices.push_back(i);
+                }
+                priorityCount = urgentIndices.size() + priorityIndices.size();
+                normalCount = normalIndices.size();
+
+                std::sort(urgentIndices.begin(), urgentIndices.end(), [&](std::size_t lhs, std::size_t rhs) {
+                    const float lhsAge = positionSendAge(outgoing.actors[lhs]);
+                    const float rhsAge = positionSendAge(outgoing.actors[rhs]);
+                    if (lhsAge != rhsAge)
+                        return lhsAge > rhsAge;
+                    return makeActorKey(outgoing.actors[lhs]) < makeActorKey(outgoing.actors[rhs]);
+                });
+
+                std::vector<char> sent(actorCount, 0);
+                auto appendActor = [&](std::size_t actorIndex, ActorList& chunk) {
+                    if (actorIndex >= actorCount || sent[actorIndex] || chunk.actors.size() >= kMaxActorsPerPositionPacket)
+                        return false;
+
+                    const BaseActor& actor = outgoing.actors[actorIndex];
+                    sent[actorIndex] = 1;
+                    chunk.actors.push_back(actor);
+                    resetPositionSendAge(actor);
+                    ++sentActorCount;
+                    sentHeddvild = sentHeddvild || actor.refId == "heddvild";
+                    sentMp2601 = sentMp2601 || actor.mpNum == 2601;
+                    return true;
+                };
+
+                std::size_t urgentCursor = 0;
+                auto appendLinear = [&](const std::vector<std::size_t>& indices, ActorList& chunk) {
+                    while (urgentCursor < indices.size() && chunk.actors.size() < kMaxActorsPerPositionPacket)
+                    {
+                        appendActor(indices[urgentCursor], chunk);
+                        ++urgentCursor;
+                    }
+                };
+
+                auto appendRoundRobin = [&](const std::vector<std::size_t>& indices, std::size_t& cursor, ActorList& chunk)
+                {
+                    if (indices.empty())
+                    {
+                        cursor = 0;
+                        return;
+                    }
+                    if (chunk.actors.size() >= kMaxActorsPerPositionPacket)
+                        return;
+
+                    const std::size_t start = cursor % indices.size();
+                    std::size_t considered = 0;
+                    while (considered < indices.size() && chunk.actors.size() < kMaxActorsPerPositionPacket)
+                    {
+                        appendActor(indices[(start + considered) % indices.size()], chunk);
+                        ++considered;
+                    }
+                    cursor = (start + considered) % indices.size();
+                };
+
+                for (std::size_t packetIndex = 0;
+                     packetIndex < kMaxPositionPacketsPerTick && sentActorCount < actorCount;
+                     ++packetIndex)
+                {
+                    ActorList chunk = makePositionChunk();
+                    appendLinear(urgentIndices, chunk);
+                    appendRoundRobin(priorityIndices, cell.priorityPositionSendCursor, chunk);
+                    appendRoundRobin(normalIndices, cell.positionSendCursor, chunk);
+                    if (chunk.actors.empty())
+                        break;
+                    sendPositionChunk(chunk);
+                }
             }
             else
             {
+                cell.positionSendCursor = 0;
+                cell.priorityPositionSendCursor = 0;
+                priorityCount = outgoing.actors.size();
+                sentActorCount = outgoing.actors.size();
+                chunksSent = 1;
+                for (const BaseActor& actor : outgoing.actors)
+                {
+                    resetPositionSendAge(actor);
+                    sentHeddvild = sentHeddvild || actor.refId == "heddvild";
+                    sentMp2601 = sentMp2601 || actor.mpNum == 2601;
+                }
                 PacketActorPosition positionPacket;
                 positionPacket.setActorList(&outgoing);
                 mClient.sendUnreliable(positionPacket.encode());
+            }
+
+            if (cell.positionDiagnosticsTimer >= 1.f)
+            {
+                cell.positionDiagnosticsTimer = 0.f;
+                Log(Debug::Info) << "[MP] ActorSync: position send budget"
+                                 << " cell=" << outgoing.cellId
+                                 << " outgoing=" << outgoing.actors.size()
+                                 << " priority=" << priorityCount
+                                 << " normal=" << normalCount
+                                 << " chunks=" << chunksSent
+                                 << " sent=" << sentActorCount
+                                 << " priorityCursor=" << cell.priorityPositionSendCursor
+                                 << " normalCursor=" << cell.positionSendCursor
+                                 << " maxAgeMs=" << (maxPositionSendAge * 1000.f)
+                                 << " includesHeddvild=" << includesHeddvild
+                                 << " sentHeddvild=" << sentHeddvild
+                                 << " includesMp2601=" << includesMp2601
+                                 << " sentMp2601=" << sentMp2601;
             }
         }
 
@@ -1551,12 +2169,17 @@ namespace mwmp
             const float healthDelta = std::abs(actor.dynamicStats.health.current - prevHealth);
             if (healthDelta > 0.5f || prevIt == cell.actors.end())
             {
-                Log(Debug::Info) << "[MP] ActorSync: health update for " << actor.refId
-                                 << " mpNum=" << actor.mpNum
-                                 << " prev=" << prevHealth
-                                 << " cur=" << actor.dynamicStats.health.current
-                                 << " dead=" << actor.isDead
-                                 << " firstSeen=" << (prevIt == cell.actors.end());
+                const bool firstSeen = prevIt == cell.actors.end();
+                const bool importantHealthChange = !firstSeen && healthDelta > 0.5f
+                    && (actor.mpNum != 0 || actor.ai.type == BaseActor::AIAction::Type::Combat
+                        || actor.isAttackingOrCasting);
+                Log(importantHealthChange ? Debug::Info : Debug::Verbose)
+                    << "[MP] ActorSync: health update for " << actor.refId
+                    << " mpNum=" << actor.mpNum
+                    << " prev=" << prevHealth
+                    << " cur=" << actor.dynamicStats.health.current
+                    << " dead=" << actor.isDead
+                    << " firstSeen=" << firstSeen;
                 statsUpdate.actors.push_back(actor);
             }
 
@@ -1803,12 +2426,68 @@ namespace mwmp
         const bool logTrackedActor = actor.state.refId == "fargoth"
             || actor.state.refId.find("spawner_") != std::string::npos;
 
+        MWWorld::World& worldImp = static_cast<MWWorld::World&>(*world);
+        MWWorld::CellStore* targetCell = findActiveCellById(worldImp, cellId);
+        if (!targetCell)
+        {
+            actor.boundActor = MWWorld::Ptr();
+            return false;
+        }
+
+        auto moveBoundActorToTargetCell = [&]() -> bool
+        {
+            if (actor.boundActor.isEmpty())
+                return false;
+
+            const std::string currentBoundCellId = cellIdForPtr(actor.boundActor);
+            if (expectsServerSpawn && actor.lastServerTimestamp != 0)
+            {
+                const auto latestTimestampIt = mServerSpawnedActorLastTimestamps.find(actor.state.mpNum);
+                if (latestTimestampIt != mServerSpawnedActorLastTimestamps.end()
+                    && latestTimestampIt->second != 0
+                    && actor.lastServerTimestamp < latestTimestampIt->second)
+                {
+                    Log(Debug::Verbose) << "[MP] ActorSync: skipped stale cross-cell bound actor move"
+                                        << " targetCell=" << cellId
+                                        << " boundCell=" << currentBoundCellId
+                                        << " refId=" << actor.state.refId
+                                        << " mpNum=" << actor.state.mpNum
+                                        << " runtimeTs=" << actor.lastServerTimestamp
+                                        << " latestTs=" << latestTimestampIt->second;
+                    return false;
+                }
+            }
+
+            const Position& movePos = actor.hasSmoothedPosition ? actor.smoothedPosition : actor.state.position;
+            actor.boundActor = world->moveObject(actor.boundActor, targetCell,
+                osg::Vec3f(movePos.pos[0], movePos.pos[1], movePos.pos[2]));
+            if (actor.boundActor.isEmpty())
+                return false;
+
+            actor.bindingLogged = false;
+            rememberServerSpawnedActor(cellId, actor.boundActor, actor.state.mpNum);
+            applyBootstrapDeathState(actor);
+            Log(Debug::Info) << "[MP] ActorSync: moved bound actor between cells"
+                             << " cell=" << cellId
+                             << " refId=" << actor.state.refId
+                             << " mpNum=" << actor.state.mpNum
+                             << " pos=(" << movePos.pos[0] << "," << movePos.pos[1] << "," << movePos.pos[2] << ")";
+            return true;
+        };
+
         if (!actor.boundActor.isEmpty() && matchesActor(actor.boundActor, actor.state))
         {
+            const std::string boundCellId = cellIdForPtr(actor.boundActor);
+            if (expectsServerSpawn && !boundCellId.empty() && boundCellId != cellId)
+            {
+                rememberServerSpawnedActor(boundCellId, actor.boundActor, actor.state.mpNum);
+                return moveBoundActorToTargetCell();
+            }
+
             if ((!expectsServerSpawn || mappedMpNumForPtr(cellId, actor.boundActor) == actor.state.mpNum)
                 && actor.boundActor.getCell() != nullptr)
             {
-                if (cellIdForPtr(actor.boundActor) == cellId)
+                if (boundCellId == cellId)
                 {
                     if (logTrackedActor && !actor.bindingLogged)
                     {
@@ -1831,22 +2510,32 @@ namespace mwmp
             if (mappedIt != mServerSpawnedActorsByMpNum.end())
             {
                 if (!mappedIt->second.isEmpty()
-                    && matchesActor(mappedIt->second, actor.state)
-                    && cellIdForPtr(mappedIt->second) == cellId)
+                    && matchesActor(mappedIt->second, actor.state))
                 {
-                    actor.boundActor = mappedIt->second;
-                    rememberServerSpawnedActor(cellId, actor.boundActor, actor.state.mpNum);
-                    if (logTrackedActor && !actor.bindingLogged)
+                    const std::string mappedCellId = cellIdForPtr(mappedIt->second);
+                    if (mappedCellId == cellId)
                     {
-                        Log(Debug::Info) << "[MP] ActorSync: resolveActorBinding reused mpNum map"
-                                         << " cell=" << cellId
-                                         << " refId=" << actor.state.refId
-                                         << " mpNum=" << actor.state.mpNum
-                                         << " localRefNum=" << actor.boundActor.getCellRef().getRefNum().mIndex;
-                        actor.bindingLogged = true;
+                        actor.boundActor = mappedIt->second;
+                        rememberServerSpawnedActor(cellId, actor.boundActor, actor.state.mpNum);
+                        if (logTrackedActor && !actor.bindingLogged)
+                        {
+                            Log(Debug::Info) << "[MP] ActorSync: resolveActorBinding reused mpNum map"
+                                             << " cell=" << cellId
+                                             << " refId=" << actor.state.refId
+                                             << " mpNum=" << actor.state.mpNum
+                                             << " localRefNum=" << actor.boundActor.getCellRef().getRefNum().mIndex;
+                            actor.bindingLogged = true;
+                        }
+                        applyBootstrapDeathState(actor);
+                        return true;
                     }
-                    applyBootstrapDeathState(actor);
-                    return true;
+
+                    if (!mappedCellId.empty())
+                    {
+                        actor.boundActor = mappedIt->second;
+                        rememberServerSpawnedActor(mappedCellId, actor.boundActor, actor.state.mpNum);
+                        return moveBoundActorToTargetCell();
+                    }
                 }
 
                 if (logTrackedActor)
@@ -1858,14 +2547,6 @@ namespace mwmp
                 }
                 mServerSpawnedActorsByMpNum.erase(mappedIt);
             }
-        }
-
-        MWWorld::World& worldImp = static_cast<MWWorld::World&>(*world);
-        MWWorld::CellStore* targetCell = findActiveCellById(worldImp, cellId);
-        if (!targetCell)
-        {
-            actor.boundActor = MWWorld::Ptr();
-            return false;
         }
 
         MWWorld::Ptr found;
@@ -1883,9 +2564,19 @@ namespace mwmp
         if (found.isEmpty() && !actor.boundActor.isEmpty()
             && (!expectsServerSpawn || mappedMpNumForPtr(cellId, actor.boundActor) == actor.state.mpNum))
         {
-            actor.boundActor = world->moveObject(actor.boundActor, targetCell,
-                osg::Vec3f(actor.state.position.pos[0], actor.state.position.pos[1], actor.state.position.pos[2]));
-            found = actor.boundActor;
+            const std::string boundCellId = cellIdForPtr(actor.boundActor);
+            if (boundCellId.empty() || boundCellId == cellId)
+            {
+                actor.boundActor = world->moveObject(actor.boundActor, targetCell,
+                    osg::Vec3f(actor.state.position.pos[0], actor.state.position.pos[1], actor.state.position.pos[2]));
+                found = actor.boundActor;
+            }
+            else
+            {
+                if (expectsServerSpawn)
+                    rememberServerSpawnedActor(boundCellId, actor.boundActor, actor.state.mpNum);
+                return false;
+            }
         }
 
         if (found.isEmpty() && expectsServerSpawn)
@@ -2434,13 +3125,13 @@ namespace mwmp
                             std::numeric_limits<uint32_t>::max(),
                             true);
 
-                        Log(Debug::Info) << "[MP] ActorSync: anim group -> '" << newGrp
+                        Log(Debug::Verbose) << "[MP] ActorSync: anim group -> '" << newGrp
                             << "' (was '" << oldGrp << "') prio=" << prio
                             << " actor=" << actor.state.refId;
                     }
                     else
                     {
-                        Log(Debug::Info) << "[MP] ActorSync: anim group -> '" << newGrp
+                        Log(Debug::Verbose) << "[MP] ActorSync: anim group -> '" << newGrp
                             << "' (CC-managed) actor=" << actor.state.refId;
                     }
                     actor.lastAppliedAnimGroup = newGrp;
@@ -2523,6 +3214,26 @@ namespace mwmp
                             weaponGroup = "handtohand";
 
                         std::string attackType = atkType.empty() ? std::string("slash") : std::string(atkType);
+                        const std::string hitKey = attackType == "shoot" ? "release" : "hit";
+                        std::string startKey = attackType + " max attack";
+                        std::string stopKey = attackType == "shoot"
+                            ? attackType + " follow stop"
+                            : attackType + " large follow stop";
+                        auto keyTime = [&](const std::string& key) {
+                            return animation->getTextKeyTime(weaponGroup + ": " + key);
+                        };
+                        float startTime = keyTime(startKey);
+                        float stopTime = keyTime(stopKey);
+                        if (startTime < 0.f || stopTime <= startTime)
+                        {
+                            stopKey = attackType + ' ' + hitKey;
+                            stopTime = keyTime(stopKey);
+                        }
+                        if (startTime < 0.f || stopTime <= startTime)
+                        {
+                            startKey = attackType + " start";
+                            stopKey = attackType + " stop";
+                        }
 
                         animation->disable(weaponGroup);
                         animation->play(weaponGroup,
@@ -2530,19 +3241,22 @@ namespace mwmp
                             MWRender::BlendMask_All,
                             true,
                             1.f,
-                            attackType + " start",
-                            attackType + " large follow start",
+                            startKey,
+                            stopKey,
                             0.f,
                             0u);
 
                         Log(Debug::Info) << "[MP] ActorSync: playing attack anim group='" << weaponGroup
-                                         << "' type='" << attackType << "' for " << actor.state.refId;
+                                         << "' type='" << attackType
+                                         << "' start='" << startKey
+                                         << "' stop='" << stopKey
+                                         << "' for " << actor.state.refId;
                     }
 
                     actor.animGroupHoldTimer = std::max(actor.animGroupHoldTimer, 0.65f);
                 }
 
-                stats.setAttackingOrSpell(actor.state.attack.pressed);
+                stats.setAttackingOrSpell(false);
                 actor.pendingAttack = false;
             }
         }

@@ -26,7 +26,7 @@ namespace mwmp
     public:
         // Attach a label showing 'name' to parentNode, offset above the NPC.
         // parentNode must remain valid for the lifetime of this object.
-        Nameplate(osg::Group* parentNode, const std::string& name);
+        Nameplate(const osg::ref_ptr<osg::Group>& parentNode, const std::string& name);
         ~Nameplate();
 
         // Update the displayed text in-place (no node rebuild needed).
@@ -37,7 +37,7 @@ namespace mwmp
         Nameplate& operator=(const Nameplate&) = delete;
 
     private:
-        osg::Group*                       mParentNode;
+        osg::ref_ptr<osg::Group>          mParentNode;
         osg::ref_ptr<osg::AutoTransform>  mLabelNode;
         osg::ref_ptr<osgText::Text>       mText;
     };

@@ -63,7 +63,7 @@ namespace mwmp
     }
 
     // -----------------------------------------------------------------------
-    Nameplate::Nameplate(osg::Group* parentNode, const std::string& name)
+    Nameplate::Nameplate(const osg::ref_ptr<osg::Group>& parentNode, const std::string& name)
         : mParentNode(parentNode)
     {
         // --- text node -------------------------------------------------------

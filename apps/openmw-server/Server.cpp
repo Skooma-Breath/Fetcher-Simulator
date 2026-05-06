@@ -1757,12 +1757,13 @@ std::optional<MPServer::ActorRegistryRecord> MPServer::removeActorFromOtherCells
         forgetActorLocation(removedRecord.actor, cellId);
         changedCellIds.insert(cellId);
 
-        Log(Debug::Info) << "[Server] Actor migrated between cells"
-                         << " refId=" << actor.refId
-                         << " refNum=" << actor.refNum
-                         << " mpNum=" << actor.mpNum
-                         << " from=" << cellId
-                         << " to=" << destinationCellId;
+        Log(removedRecord.actor.mpNum != 0 ? Debug::Info : Debug::Verbose)
+            << "[Server] Actor migrated between cells"
+            << " refId=" << actor.refId
+            << " refNum=" << actor.refNum
+            << " mpNum=" << actor.mpNum
+            << " from=" << cellId
+            << " to=" << destinationCellId;
     };
 
     const auto locationIt = mWorld.actorLocations.find(actorKey);
@@ -3590,17 +3591,17 @@ void MPServer::handleActorList(ConnectedClient& c, const uint8_t* data, size_t s
     }
     if (retainedDeadVanillaActors != 0)
     {
-        Log(Debug::Info) << "[Server] handleActorList retained dead vanilla actor(s)"
-                         << " count=" << retainedDeadVanillaActors
-                         << " cell=" << incoming.cellId;
+        Log(Debug::Verbose) << "[Server] handleActorList retained dead vanilla actor(s)"
+                            << " count=" << retainedDeadVanillaActors
+                            << " cell=" << incoming.cellId;
     }
 
     const std::size_t restoredDeadVanillaActors = mergeDeadVanillaActorsForCell(incoming.cellId, cellState.actors);
     if (restoredDeadVanillaActors != 0)
     {
-        Log(Debug::Info) << "[Server] handleActorList restored dead vanilla overlay(s)"
-                         << " count=" << restoredDeadVanillaActors
-                         << " cell=" << incoming.cellId;
+        Log(Debug::Verbose) << "[Server] handleActorList restored dead vanilla overlay(s)"
+                            << " count=" << restoredDeadVanillaActors
+                            << " cell=" << incoming.cellId;
     }
 
     for (const ActorRegistryRecord& previousRecord : previousCellRecords)

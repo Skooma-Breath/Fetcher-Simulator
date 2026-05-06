@@ -2,6 +2,7 @@
 #define OPENMW_MWMP_SYNC_ACTORSYNC_HPP
 
 #include <string>
+#include <cstddef>
 #include <deque>
 #include <unordered_map>
 #include <unordered_set>
@@ -73,6 +74,10 @@ namespace mwmp
             Position smoothedPosition;
             bool hasSmoothedPosition = false;
             std::deque<BufferedSnapshot> snapshots;
+            double interpolationRenderTimestamp = 0.0;
+            float latestSnapshotAge = 0.f;
+            uint64_t lastServerTimestamp = 0;
+            bool hasInterpolationRenderTimestamp = false;
             MWWorld::Ptr boundActor;
             bool pendingAnimPlay = false;
             bool pendingAttack = false;
@@ -114,6 +119,10 @@ namespace mwmp
             // Briefly suppress authoritative lower-body group sync so local hit/attack
             // transitions can finish without being immediately overwritten.
             float animGroupHoldTimer = 0.f;
+            // Authority side: seconds since this actor was last included in an
+            // ActorPosition packet. Dense-cell scheduling uses this to avoid
+            // starving active actors behind a large high-priority set.
+            float timeSinceLastPositionSend = 0.f;
             // Log-dedup: true once the steady-state "reused binding" message has
             // been emitted for the current boundActor.  Reset whenever a new
             // binding is established so the first confirmation is always logged.
@@ -125,6 +134,11 @@ namespace mwmp
             ActorList latest;
             std::unordered_map<std::string, ActorRuntime> actors;
             float positionSendTimer = 0.f;
+            float positionDiagnosticsTimer = 0.f;
+            std::size_t positionSendCursor = 0;
+            std::size_t priorityPositionSendCursor = 0;
+            uint32_t latestPositionSequence = 0;
+            uint32_t latestReliableSequence = 0;
             bool initialListSent = false;
             std::string outboundCellId;
             // Log-dedup: mpNums already reported via "authority mapped actor".
@@ -136,19 +150,25 @@ namespace mwmp
         void mergeActorState(ActorRuntime& actor, const BaseActor& state, bool includeTransform);
         void advanceSmoothing(ActorRuntime& actor, float dt);
         void sendAuthoritativeActorUpdates(const std::string& cellId, CellRuntime& cell, float dt);
-        bool shouldAcceptSnapshot(CellRuntime& cell, const ActorList& list, const char* packetName);
+        bool shouldAcceptSnapshot(CellRuntime& cell, const ActorList& list, const char* packetName,
+            bool isPositionSnapshot = false);
         bool resolveActorBinding(const std::string& cellId, ActorRuntime& actor);
         void applyBootstrapDeathState(ActorRuntime& actor);
         void applyBoundActorState(ActorRuntime& actor);
         void rememberServerSpawnedActor(const std::string& cellId, const MWWorld::Ptr& ptr, uint32_t mpNum);
         void forgetServerSpawnedActor(const std::string& cellId, const MWWorld::Ptr& ptr, uint32_t mpNum);
         uint32_t mappedMpNumForPtr(const std::string& cellId, const MWWorld::Ptr& ptr) const;
+        bool isStaleServerSpawnedActorUpdate(uint32_t mpNum, uint64_t serverTimestamp) const;
+        void rememberServerSpawnedActorTimestamp(uint32_t mpNum, uint64_t serverTimestamp);
+        bool takeServerSpawnedRuntimeFromOtherCell(const std::string& targetCellId, const BaseActor& actorState,
+            uint64_t serverTimestamp, ActorRuntime& runtime);
 
         NetworkClient& mClient;
         std::unordered_map<std::string, CellRuntime> mCells;
         std::unordered_map<std::string, bool>        mAuthority;
         std::unordered_map<std::string, uint32_t>    mMpNumsByLocalActor;
         std::unordered_map<uint32_t, MWWorld::Ptr>   mServerSpawnedActorsByMpNum;
+        std::unordered_map<uint32_t, uint64_t>       mServerSpawnedActorLastTimestamps;
     };
 
 } // namespace mwmp
