@@ -103,6 +103,33 @@ namespace mwmp
         std::vector<CompactActorSnapshot> snapshots;
     };
 
+    struct ActorPresentationSnapshot
+    {
+        uint32_t actorNetId = 0;
+        bool isMoving = false;
+        bool isAttackingOrCasting = false;
+        bool hasWeaponDrawn = false;
+        bool hasSpellReadied = false;
+        bool isDead = false;
+        uint16_t movementFlags = 0;
+        int8_t animFwd = 0;
+        int8_t animSide = 0;
+        uint8_t presentationFlags = 0;
+        // Temporary v2 bridge. Replace with a small animation group id/string table
+        // before this becomes part of a long-lived high-churn protocol surface.
+        std::string currentAnimGroup;
+    };
+
+    struct ActorPresentationV2List
+    {
+        uint32_t protocolVersion = ActorSyncProtocolVersionV2;
+        uint32_t authorityGuid = 0;
+        uint32_t authorityGeneration = 0;
+        uint32_t sequence = 0;
+        uint64_t serverTimestamp = 0;
+        std::vector<ActorPresentationSnapshot> snapshots;
+    };
+
     inline int8_t quantizeActorAxis(float value)
     {
         value = std::clamp(value, -1.f, 1.f);

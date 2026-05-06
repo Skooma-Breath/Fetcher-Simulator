@@ -17,6 +17,7 @@
 #include <components/openmw-mp/Packets/Actor/PacketActorList.hpp>
 #include <components/openmw-mp/Packets/Actor/PacketActorPosition.hpp>
 #include <components/openmw-mp/Packets/Actor/PacketActorPositionV2.hpp>
+#include <components/openmw-mp/Packets/Actor/PacketActorPresentationV2.hpp>
 #include <components/openmw-mp/Packets/Actor/PacketActorCombatRequest.hpp>
 #include <components/openmw-mp/Packets/Actor/PacketActorDeath.hpp>
 #include <components/openmw-mp/Packets/Actor/PacketActorIdentity.hpp>
@@ -172,6 +173,49 @@ namespace
                 return true;
         }
         return false;
+    }
+
+    bool isLocomotionAnimGroup(const std::string& group)
+    {
+        return group.find("walk") != std::string::npos
+            || group.find("run") != std::string::npos
+            || group.find("swim") != std::string::npos
+            || group.find("sneak") != std::string::npos
+            || group.find("turn") != std::string::npos;
+    }
+
+    bool isHitStateAnimGroup(const std::string& group)
+    {
+        return group.find("hit") != std::string::npos
+            || group.find("knock") != std::string::npos;
+    }
+
+    bool isWatchedPresentationActor(const mwmp::BaseActor& actor, uint32_t actorNetId)
+    {
+        return actor.refId == "heddvild" || actor.mpNum == 2601 || actorNetId == 2601;
+    }
+
+    mwmp::ActorPresentationSnapshot makePresentationSnapshot(const mwmp::BaseActor& actor, uint32_t actorNetId)
+    {
+        const bool hasLocomotionInput = !actor.isDead
+            && (std::abs(actor.animFlags.animFwd) > 0.1f || std::abs(actor.animFlags.animSide) > 0.1f);
+        mwmp::ActorPresentationSnapshot snapshot;
+        snapshot.actorNetId = actorNetId;
+        snapshot.isMoving = hasLocomotionInput;
+        snapshot.isAttackingOrCasting = actor.isAttackingOrCasting;
+        snapshot.hasWeaponDrawn = actor.hasWeaponDrawn;
+        snapshot.hasSpellReadied = actor.hasSpellReadied;
+        snapshot.isDead = actor.isDead;
+        snapshot.movementFlags = static_cast<uint16_t>(actor.animFlags.movementFlags);
+        snapshot.animFwd = hasLocomotionInput ? mwmp::quantizeActorAxis(actor.animFlags.animFwd) : 0;
+        snapshot.animSide = hasLocomotionInput ? mwmp::quantizeActorAxis(actor.animFlags.animSide) : 0;
+        mwmp::BaseActor presentationActor = actor;
+        presentationActor.isMoving = hasLocomotionInput;
+        snapshot.presentationFlags = mwmp::makeActorPresentationFlags(presentationActor);
+        snapshot.currentAnimGroup = actor.animFlags.currentAnimGroup;
+        if ((actor.isDead || !hasLocomotionInput) && isLocomotionAnimGroup(snapshot.currentAnimGroup))
+            snapshot.currentAnimGroup.clear();
+        return snapshot;
     }
 
     MWWorld::CellStore* findActiveCellById(MWWorld::World& world, const std::string& cellId)
@@ -418,6 +462,12 @@ namespace mwmp
         mActorV2StaleWindow = 0;
         mActorV2IdentityTransformPreservedWindow = 0;
         mActorV2IdentityZeroTransformSkippedWindow = 0;
+        mActorV2PresentationSentWindow = 0;
+        mActorV2PresentationAppliedWindow = 0;
+        mActorV2PresentationMissingIdentityWindow = 0;
+        mActorV2PresentationStaleWindow = 0;
+        mActorV2PresentationStopForcedWindow = 0;
+        mActorV2PresentationGroupChangedWindow = 0;
         mActorV2MissingIdentityByNetIdWindow.clear();
     }
 
@@ -488,9 +538,10 @@ namespace mwmp
 
     void ActorSync::update(float dt)
     {
-        std::unordered_set<uint32_t> appliedPrimaryActors;
+        std::size_t primaryActors = 0;
         for (auto& [actorNetId, actor] : mActorsByNetId)
         {
+
             if (actor.state.cellId.empty() || hasAuthority(actor.state.cellId))
                 continue;
             if (!actor.hasAuthoritativeTransform)
@@ -499,7 +550,7 @@ namespace mwmp
             advanceSmoothing(actor, dt);
             if (resolveActorBinding(actor.state.cellId, actor))
                 applyBoundActorState(actor);
-            appliedPrimaryActors.insert(actorNetId);
+            ++primaryActors;
         }
 
         for (auto& [cellId, cell] : mCells)
@@ -510,15 +561,31 @@ namespace mwmp
                 continue;
             }
 
+            std::size_t cellShadowSuppressedByPrimary = 0;
             for (auto& [actorKey, actor] : cell.actors)
             {
-                if (actor.actorNetId != 0 && appliedPrimaryActors.count(actor.actorNetId) != 0)
+                if (actor.actorNetId != 0)
+                {
+                    // In v2, mActorsByNetId owns this actor. A cell-owned shadow must not
+                    // move/apply the same MWWorld::Ptr even if the primary runtime was not
+                    // applied this frame because it is waiting for an authoritative transform.
+                    if (mActorsByNetId.find(actor.actorNetId) != mActorsByNetId.end())
+                    {
+                        ++cellShadowSuppressedByPrimary;
+                        continue;
+                    }
+                }
+
+                if (!actor.hasAuthoritativeTransform)
                     continue;
 
                 advanceSmoothing(actor, dt);
                 if (resolveActorBinding(cellId, actor))
                     applyBoundActorState(actor);
             }
+            if (cellShadowSuppressedByPrimary > 0)
+                Log(Debug::Verbose) << "[MP] ActorSync v2: cellShadowSuppressedByPrimary=" << cellShadowSuppressedByPrimary
+                                    << " cell=" << cellId;
         }
     }
 
@@ -932,7 +999,13 @@ namespace mwmp
 
                 auto runtimeIt = mActorsByNetId.find(*actorIdIt);
                 if (runtimeIt != mActorsByNetId.end() && runtimeIt->second.state.cellId == list.cellId)
-                    mActorsByNetId.erase(runtimeIt);
+                {
+                    // In v2, primary runtime lifetime is controlled by ActorIdentity (removed flag),
+                    // not by absence from a legacy ActorList. Skip the erase so we do not destroy
+                    // a live v2 primary runtime that simply wasn't included in this particular list.
+                    ++actorIdIt;
+                    continue;
+                }
                 actorIdIt = cellIndexIt->second.erase(actorIdIt);
             }
             if (cellIndexIt->second.empty())
@@ -1119,10 +1192,6 @@ namespace mwmp
             BaseActor actorState = runtime.state;
             actorState.position = snapshot.position;
             actorState.velocity = snapshot.velocity;
-            actorState.animFlags.movementFlags = snapshot.movementFlags;
-            actorState.animFlags.animFwd = dequantizeActorAxis(snapshot.animFwd);
-            actorState.animFlags.animSide = dequantizeActorAxis(snapshot.animSide);
-            applyActorPresentationFlags(actorState, snapshot.presentationFlags);
 
             ActorList synthetic;
             synthetic.cellId = actorState.cellId;
@@ -1163,6 +1232,12 @@ namespace mwmp
                              << " stale=" << mActorV2StaleWindow
                              << " identityTransformPreserved=" << mActorV2IdentityTransformPreservedWindow
                              << " identityZeroTransformSkipped=" << mActorV2IdentityZeroTransformSkippedWindow
+                             << " presentationSent=" << mActorV2PresentationSentWindow
+                             << " presentationApplied=" << mActorV2PresentationAppliedWindow
+                             << " presentationMissingIdentity=" << mActorV2PresentationMissingIdentityWindow
+                             << " presentationStale=" << mActorV2PresentationStaleWindow
+                             << " presentationStopForced=" << mActorV2PresentationStopForcedWindow
+                             << " presentationGroupChanged=" << mActorV2PresentationGroupChangedWindow
                              << " primaryActors=" << mActorsByNetId.size()
                              << " seq=" << list.sequence;
             mActorV2DiagnosticsLastLogMs = now;
@@ -1171,7 +1246,123 @@ namespace mwmp
             mActorV2StaleWindow = 0;
             mActorV2IdentityTransformPreservedWindow = 0;
             mActorV2IdentityZeroTransformSkippedWindow = 0;
+            mActorV2PresentationSentWindow = 0;
+            mActorV2PresentationAppliedWindow = 0;
+            mActorV2PresentationMissingIdentityWindow = 0;
+            mActorV2PresentationStaleWindow = 0;
+            mActorV2PresentationStopForcedWindow = 0;
+            mActorV2PresentationGroupChangedWindow = 0;
             mActorV2MissingIdentityByNetIdWindow.clear();
+        }
+    }
+
+    void ActorSync::onActorPresentationV2Update(const ActorPresentationV2List& list)
+    {
+        if (list.protocolVersion != ActorSyncProtocolVersionV2)
+        {
+            Log(Debug::Warning) << "[MP] ActorSync: ignored unsupported ActorPresentationV2 protocol="
+                                << list.protocolVersion;
+            return;
+        }
+
+        std::size_t applied = 0;
+        std::size_t missingIdentity = 0;
+        std::size_t stale = 0;
+        std::size_t stopForced = 0;
+        std::size_t groupChanged = 0;
+        uint32_t firstMissingActorNetId = 0;
+
+        for (const ActorPresentationSnapshot& snapshot : list.snapshots)
+        {
+            auto runtimeIt = mActorsByNetId.find(snapshot.actorNetId);
+            if (runtimeIt == mActorsByNetId.end())
+            {
+                ++missingIdentity;
+                if (firstMissingActorNetId == 0)
+                    firstMissingActorNetId = snapshot.actorNetId;
+                ++mActorV2MissingIdentityByNetIdWindow[snapshot.actorNetId];
+                continue;
+            }
+
+            ActorRuntime& runtime = runtimeIt->second;
+            if (runtime.lastPresentationServerTimestamp != 0
+                && list.serverTimestamp != 0
+                && list.serverTimestamp < runtime.lastPresentationServerTimestamp)
+            {
+                ++stale;
+                continue;
+            }
+
+            const bool wasMoving = runtime.state.isMoving
+                || std::abs(runtime.state.animFlags.animFwd) > 0.1f
+                || std::abs(runtime.state.animFlags.animSide) > 0.1f;
+            const bool hadLocomotionGroup = isLocomotionAnimGroup(runtime.lastAppliedAnimGroup)
+                || isLocomotionAnimGroup(runtime.state.animFlags.currentAnimGroup);
+            const std::string previousGroup = runtime.state.animFlags.currentAnimGroup;
+
+            applyActorPresentationFlags(runtime.state, snapshot.presentationFlags);
+            runtime.state.isMoving = snapshot.isMoving;
+            runtime.state.isAttackingOrCasting = snapshot.isAttackingOrCasting;
+            runtime.state.hasWeaponDrawn = snapshot.hasWeaponDrawn;
+            runtime.state.hasSpellReadied = snapshot.hasSpellReadied;
+            runtime.state.isDead = snapshot.isDead;
+            runtime.state.animFlags.movementFlags = snapshot.movementFlags;
+            runtime.state.animFlags.animFwd = dequantizeActorAxis(snapshot.animFwd);
+            runtime.state.animFlags.animSide = dequantizeActorAxis(snapshot.animSide);
+
+            if (!snapshot.currentAnimGroup.empty())
+                runtime.state.animFlags.currentAnimGroup = snapshot.currentAnimGroup;
+            else if (!snapshot.isMoving)
+                runtime.state.animFlags.currentAnimGroup.clear();
+
+            if (!snapshot.isMoving)
+            {
+                runtime.state.animFlags.animFwd = 0.f;
+                runtime.state.animFlags.animSide = 0.f;
+                runtime.state.isMoving = false;
+                if (wasMoving || hadLocomotionGroup)
+                    ++stopForced;
+            }
+
+            if (runtime.state.animFlags.currentAnimGroup != previousGroup)
+                ++groupChanged;
+
+            if (list.serverTimestamp != 0)
+                runtime.lastPresentationServerTimestamp = list.serverTimestamp;
+
+            if (isWatchedPresentationActor(runtime.state, snapshot.actorNetId))
+            {
+                Log(Debug::Info) << "[MP] ActorSync v2: presentation apply"
+                                 << " actorNetId=" << snapshot.actorNetId
+                                 << " refId=" << runtime.state.refId
+                                 << " mpNum=" << runtime.state.mpNum
+                                 << " moving=" << runtime.state.isMoving
+                                 << " fwd=" << runtime.state.animFlags.animFwd
+                                 << " side=" << runtime.state.animFlags.animSide
+                                 << " movementFlags=" << runtime.state.animFlags.movementFlags
+                                 << " group='" << runtime.state.animFlags.currentAnimGroup << "'"
+                                 << " flags=" << static_cast<unsigned>(snapshot.presentationFlags)
+                                 << " ts=" << list.serverTimestamp;
+            }
+
+            ++applied;
+        }
+
+        mActorV2PresentationAppliedWindow += applied;
+        mActorV2PresentationMissingIdentityWindow += missingIdentity;
+        mActorV2PresentationStaleWindow += stale;
+        mActorV2PresentationStopForcedWindow += stopForced;
+        mActorV2PresentationGroupChangedWindow += groupChanged;
+
+        if (missingIdentity != 0 || stale != 0)
+        {
+            Log(Debug::Verbose) << "[MP] ActorSync v2: presentation filtered"
+                                << " snapshots=" << list.snapshots.size()
+                                << " applied=" << applied
+                                << " missingIdentity=" << missingIdentity
+                                << " firstMissingActorNetId=" << firstMissingActorNetId
+                                << " stale=" << stale
+                                << " seq=" << list.sequence;
         }
     }
 
@@ -2194,7 +2385,10 @@ namespace mwmp
             return;
 
         for (auto& [actorKey, runtime] : cell.actors)
+        {
             runtime.timeSinceLastPositionSend += std::max(0.f, dt);
+            runtime.presentationSendTimer += std::max(0.f, dt);
+        }
 
         ActorList outgoing;
         outgoing.cellId = cell.outboundCellId;
@@ -2673,6 +2867,13 @@ namespace mwmp
         equipmentUpdate.isAuthority = true;
         equipmentUpdate.authorityGuid = outgoing.authorityGuid;
 
+        ActorPresentationV2List presentationUpdate;
+        presentationUpdate.protocolVersion = ActorSyncProtocolVersionV2;
+        presentationUpdate.authorityGuid = outgoing.authorityGuid;
+        presentationUpdate.authorityGeneration = outgoing.authorityGeneration;
+        presentationUpdate.sequence = outgoing.snapshotSequence;
+        presentationUpdate.serverTimestamp = outgoing.serverTimestamp;
+
         for (const auto& actor : outgoing.actors)
         {
             const std::string key = makeActorKey(actor);
@@ -2845,6 +3046,81 @@ namespace mwmp
             }
             if (equipmentChanged)
                 equipmentUpdate.actors.push_back(actor);
+
+            const uint32_t actorNetId = actorNetIdForActorState(actor);
+            if (actorNetId != 0)
+            {
+                ActorPresentationSnapshot snapshot = makePresentationSnapshot(actor, actorNetId);
+                const std::string previousSentAnimGroup = prevIt != cell.actors.end()
+                    ? prevIt->second.lastSentAnimGroup
+                    : std::string();
+                const bool firstPresentation = prevIt == cell.actors.end()
+                    || !prevIt->second.lastSentPresentationValid;
+                const bool stopEdge = prevIt != cell.actors.end()
+                    && prevIt->second.lastSentPresentationValid
+                    && prevIt->second.lastSentIsMoving
+                    && !snapshot.isMoving;
+                const bool presentationChanged = firstPresentation
+                    || prevIt->second.lastSentIsMoving != snapshot.isMoving
+                    || prevIt->second.lastSentAttackingOrCasting != snapshot.isAttackingOrCasting
+                    || prevIt->second.lastSentWeaponDrawn != snapshot.hasWeaponDrawn
+                    || prevIt->second.lastSentSpellReadied != snapshot.hasSpellReadied
+                    || prevIt->second.lastSentDead != snapshot.isDead
+                    || prevIt->second.lastSentMovementFlags != snapshot.movementFlags
+                    || prevIt->second.lastSentAnimFwd != snapshot.animFwd
+                    || prevIt->second.lastSentAnimSide != snapshot.animSide
+                    || prevIt->second.lastSentPresentationFlags != snapshot.presentationFlags
+                    || prevIt->second.lastSentAnimGroup != snapshot.currentAnimGroup;
+                const bool refreshDue = prevIt != cell.actors.end()
+                    && prevIt->second.presentationSendTimer >= 1.f;
+
+                if (presentationChanged || stopEdge || refreshDue)
+                {
+                    presentationUpdate.snapshots.push_back(snapshot);
+                    ActorRuntime& runtime = cell.actors[key];
+                    runtime.lastSentPresentationValid = true;
+                    runtime.lastSentIsMoving = snapshot.isMoving;
+                    runtime.lastSentAttackingOrCasting = snapshot.isAttackingOrCasting;
+                    runtime.lastSentWeaponDrawn = snapshot.hasWeaponDrawn;
+                    runtime.lastSentSpellReadied = snapshot.hasSpellReadied;
+                    runtime.lastSentDead = snapshot.isDead;
+                    runtime.lastSentMovementFlags = snapshot.movementFlags;
+                    runtime.lastSentAnimFwd = snapshot.animFwd;
+                    runtime.lastSentAnimSide = snapshot.animSide;
+                    runtime.lastSentPresentationFlags = snapshot.presentationFlags;
+                    runtime.lastSentAnimGroup = snapshot.currentAnimGroup;
+                    runtime.presentationSendTimer = 0.f;
+
+                    if (stopEdge)
+                        ++mActorV2PresentationStopForcedWindow;
+                    if (presentationChanged && !firstPresentation && previousSentAnimGroup != snapshot.currentAnimGroup)
+                        ++mActorV2PresentationGroupChangedWindow;
+
+                    if (isWatchedPresentationActor(actor, actorNetId))
+                    {
+                        Log(Debug::Info) << "[MP] ActorSync v2: presentation send"
+                                         << " actorNetId=" << actorNetId
+                                         << " refId=" << actor.refId
+                                         << " mpNum=" << actor.mpNum
+                                         << " moving=" << snapshot.isMoving
+                                         << " fwd=" << dequantizeActorAxis(snapshot.animFwd)
+                                         << " side=" << dequantizeActorAxis(snapshot.animSide)
+                                         << " movementFlags=" << snapshot.movementFlags
+                                         << " group='" << snapshot.currentAnimGroup << "'"
+                                         << " flags=" << static_cast<unsigned>(snapshot.presentationFlags)
+                                         << " reason="
+                                         << (stopEdge ? "stop" : (presentationChanged ? "change" : "refresh"));
+                    }
+                }
+            }
+        }
+
+        if (!presentationUpdate.snapshots.empty())
+        {
+            PacketActorPresentationV2 presentationPacket;
+            presentationPacket.setPresentationList(&presentationUpdate);
+            mClient.sendReliable(presentationPacket.encode());
+            mActorV2PresentationSentWindow += presentationUpdate.snapshots.size();
         }
 
         if (!statsUpdate.actors.empty())
@@ -2974,6 +3250,25 @@ namespace mwmp
             }
 
             const Position& movePos = actor.hasSmoothedPosition ? actor.smoothedPosition : actor.state.position;
+            if (!actor.hasAuthoritativeTransform)
+            {
+                Log(Debug::Verbose) << "[MP] ActorSync: skipped cross-cell move without authoritative transform"
+                                    << " targetCell=" << cellId
+                                    << " refId=" << actor.state.refId
+                                    << " mpNum=" << actor.state.mpNum;
+                return false;
+            }
+            if (expectsServerSpawn
+                && isExteriorActorCellId(cellId)
+                && isZeroIdentityPosition(movePos)
+                && !actor.state.position.isTeleporting)
+            {
+                Log(Debug::Warning) << "[MP] ActorSync: skipped zero-position cross-cell move"
+                                    << " targetCell=" << cellId
+                                    << " refId=" << actor.state.refId
+                                    << " mpNum=" << actor.state.mpNum;
+                return false;
+            }
             actor.boundActor = world->moveObject(actor.boundActor, targetCell,
                 osg::Vec3f(movePos.pos[0], movePos.pos[1], movePos.pos[2]));
             if (actor.boundActor.isEmpty())
@@ -3082,6 +3377,27 @@ namespace mwmp
             const std::string boundCellId = cellIdForPtr(actor.boundActor);
             if (boundCellId.empty() || boundCellId == cellId)
             {
+                if (!actor.hasAuthoritativeTransform)
+                {
+                    Log(Debug::Verbose) << "[MP] ActorSync: skipped same-cell bound actor move without authoritative transform"
+                                        << " targetCell=" << cellId
+                                        << " refId=" << actor.state.refId
+                                        << " mpNum=" << actor.state.mpNum;
+                    return false;
+                }
+
+                if (expectsServerSpawn
+                    && isExteriorActorCellId(cellId)
+                    && isZeroIdentityPosition(actor.state.position)
+                    && !actor.state.position.isTeleporting)
+                {
+                    Log(Debug::Warning) << "[MP] ActorSync: skipped zero-position same-cell bound actor move"
+                                        << " targetCell=" << cellId
+                                        << " refId=" << actor.state.refId
+                                        << " mpNum=" << actor.state.mpNum;
+                    return false;
+                }
+
                 actor.boundActor = world->moveObject(actor.boundActor, targetCell,
                     osg::Vec3f(actor.state.position.pos[0], actor.state.position.pos[1], actor.state.position.pos[2]));
                 found = actor.boundActor;
@@ -3101,7 +3417,25 @@ namespace mwmp
                 const float spawnX = actor.state.position.pos[0];
                 const float spawnY = actor.state.position.pos[1];
                 const float spawnZ = actor.state.position.pos[2];
-                const bool suspectPos = (spawnX == 0.f && spawnY == 0.f && spawnZ == 0.f);
+                const bool suspectPos = isZeroIdentityPosition(actor.state.position);
+                if (!actor.hasAuthoritativeTransform)
+                {
+                    Log(Debug::Verbose) << "[MP] ActorSync: skipped spawned actor placement without authoritative transform"
+                                        << " cell=" << cellId
+                                        << " refId=" << actor.state.refId
+                                        << " mpNum=" << actor.state.mpNum;
+                    actor.boundActor = MWWorld::Ptr();
+                    return false;
+                }
+                if (isExteriorActorCellId(cellId) && suspectPos && !actor.state.position.isTeleporting)
+                {
+                    Log(Debug::Warning) << "[MP] ActorSync: skipped zero-position spawned actor placement"
+                                        << " cell=" << cellId
+                                        << " refId=" << actor.state.refId
+                                        << " mpNum=" << actor.state.mpNum;
+                    actor.boundActor = MWWorld::Ptr();
+                    return false;
+                }
                 Log(Debug::Info) << "[MP] ActorSync: resolveActorBinding spawning missing actor"
                                  << " cell=" << cellId
                                  << " refId=" << actor.state.refId
@@ -3593,26 +3927,34 @@ namespace mwmp
         if (!actor.state.isDead && !suppressLowerBodyGroupSync)
         {
             const std::string& newGrp = actor.state.animFlags.currentAnimGroup;
+            const bool stoppedPresentation = !shouldDriveLocomotion;
+            if (stoppedPresentation && !actor.lastAppliedAnimGroup.empty()
+                && isLocomotionAnimGroup(actor.lastAppliedAnimGroup))
+            {
+                if (MWRender::Animation* animObj = world->getAnimation(actor.boundActor))
+                    animObj->disable(actor.lastAppliedAnimGroup);
+                if (isWatchedPresentationActor(actor.state, actor.actorNetId))
+                {
+                    Log(Debug::Info) << "[MP] ActorSync v2: cleared stale locomotion"
+                                     << " actorNetId=" << actor.actorNetId
+                                     << " refId=" << actor.state.refId
+                                     << " mpNum=" << actor.state.mpNum
+                                     << " oldGroup='" << actor.lastAppliedAnimGroup << "'"
+                                     << " newGroup='" << newGrp << "'";
+                }
+                actor.lastAppliedAnimGroup.clear();
+            }
+
             if (!newGrp.empty() && newGrp != actor.lastAppliedAnimGroup)
             {
                 if (MWRender::Animation* animObj = world->getAnimation(actor.boundActor))
                 {
                     const std::string& oldGrp = actor.lastAppliedAnimGroup;
 
-                    auto classifyLoco = [](const std::string& g) -> bool {
-                        return g.find("walk") != std::string::npos
-                            || g.find("run")  != std::string::npos
-                            || g.find("swim") != std::string::npos
-                            || g.find("sneak") != std::string::npos
-                            || g.find("turn") != std::string::npos;
-                    };
-
-                    const bool newIsLoco = classifyLoco(newGrp);
-                    const bool oldIsLoco = !oldGrp.empty() && classifyLoco(oldGrp);
-                    const bool newIsHitState = newGrp.find("hit") != std::string::npos
-                        || newGrp.find("knock") != std::string::npos;
-                    const bool oldIsHitState = !oldGrp.empty()
-                        && (oldGrp.find("hit") != std::string::npos || oldGrp.find("knock") != std::string::npos);
+                    const bool newIsLoco = isLocomotionAnimGroup(newGrp);
+                    const bool oldIsLoco = !oldGrp.empty() && isLocomotionAnimGroup(oldGrp);
+                    const bool newIsHitState = isHitStateAnimGroup(newGrp);
+                    const bool oldIsHitState = !oldGrp.empty() && isHitStateAnimGroup(oldGrp);
 
                     if (!oldGrp.empty() && oldGrp != newGrp)
                     {
@@ -3621,7 +3963,12 @@ namespace mwmp
                     }
 
                     const bool isBaseIdle = (newGrp == "idle" || newGrp == "idleswim" || newGrp == "idlesneak");
-                    if (!isBaseIdle)
+                    if (stoppedPresentation && newIsLoco)
+                    {
+                        Log(Debug::Verbose) << "[MP] ActorSync: skipped stale stopped locomotion group '"
+                                            << newGrp << "' actor=" << actor.state.refId;
+                    }
+                    else if (!isBaseIdle)
                     {
                         int prio = static_cast<int>(MWMechanics::Priority_WeaponLowerBody);
                         if (newIsLoco)
@@ -3649,7 +3996,8 @@ namespace mwmp
                         Log(Debug::Verbose) << "[MP] ActorSync: anim group -> '" << newGrp
                             << "' (CC-managed) actor=" << actor.state.refId;
                     }
-                    actor.lastAppliedAnimGroup = newGrp;
+                    if (!(stoppedPresentation && newIsLoco))
+                        actor.lastAppliedAnimGroup = newGrp;
                 }
             }
         }

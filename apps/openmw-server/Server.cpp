@@ -69,6 +69,7 @@
 #include <components/openmw-mp/Packets/Actor/PacketActorList.hpp>
 #include <components/openmw-mp/Packets/Actor/PacketActorPosition.hpp>
 #include <components/openmw-mp/Packets/Actor/PacketActorPositionV2.hpp>
+#include <components/openmw-mp/Packets/Actor/PacketActorPresentationV2.hpp>
 #include <components/openmw-mp/Packets/Actor/PacketActorStatsDynamic.hpp>
 #include <components/openmw-mp/Packets/Actor/PacketActorCombatRequest.hpp>
 #include <components/openmw-mp/Packets/Worldstate/PacketWorldTime.hpp>
@@ -633,6 +634,38 @@ namespace
             && a.isDead == b.isDead
             && a.isInstantDeath == b.isInstantDeath
             && a.deathAnimGroup == b.deathAnimGroup;
+    }
+
+    bool isLocomotionAnimGroup(const std::string& group)
+    {
+        return group.find("walk") != std::string::npos
+            || group.find("run") != std::string::npos
+            || group.find("swim") != std::string::npos
+            || group.find("sneak") != std::string::npos
+            || group.find("turn") != std::string::npos;
+    }
+
+    mwmp::ActorPresentationSnapshot makePresentationSnapshot(const mwmp::BaseActor& actor, uint32_t actorNetId)
+    {
+        const bool hasLocomotionInput = !actor.isDead
+            && (std::abs(actor.animFlags.animFwd) > 0.1f || std::abs(actor.animFlags.animSide) > 0.1f);
+        mwmp::ActorPresentationSnapshot snapshot;
+        snapshot.actorNetId = actorNetId;
+        snapshot.isMoving = hasLocomotionInput;
+        snapshot.isAttackingOrCasting = actor.isAttackingOrCasting;
+        snapshot.hasWeaponDrawn = actor.hasWeaponDrawn;
+        snapshot.hasSpellReadied = actor.hasSpellReadied;
+        snapshot.isDead = actor.isDead;
+        snapshot.movementFlags = static_cast<uint16_t>(actor.animFlags.movementFlags);
+        snapshot.animFwd = hasLocomotionInput ? mwmp::quantizeActorAxis(actor.animFlags.animFwd) : 0;
+        snapshot.animSide = hasLocomotionInput ? mwmp::quantizeActorAxis(actor.animFlags.animSide) : 0;
+        mwmp::BaseActor presentationActor = actor;
+        presentationActor.isMoving = hasLocomotionInput;
+        snapshot.presentationFlags = mwmp::makeActorPresentationFlags(presentationActor);
+        snapshot.currentAnimGroup = actor.animFlags.currentAnimGroup;
+        if ((actor.isDead || !hasLocomotionInput) && isLocomotionAnimGroup(snapshot.currentAnimGroup))
+            snapshot.currentAnimGroup.clear();
+        return snapshot;
     }
 
     uint64_t currentServerTimeMs()
@@ -2089,9 +2122,12 @@ void MPServer::broadcastActorPositionV2ToCell(
                              << " identityAcked=" << client.actorV2IdentityAckedWindow
                              << " snapshots=" << client.actorV2SnapshotsSentWindow
                              << " bytes=" << client.actorV2BytesSentWindow
+                             << " presentationSent=" << client.actorV2PresentationSentWindow
+                             << " presentationBytes=" << client.actorV2PresentationBytesSentWindow
                              << " budget=" << kBudgetBytes
                              << " deferred=" << client.actorV2DeferredWindow
                              << " positionSuppressedUntilIdentityKnown=" << client.actorV2PositionSuppressedUntilIdentityKnownWindow
+                             << " presentationSuppressedUntilIdentityKnown=" << client.actorV2PresentationSuppressedUntilIdentityKnownWindow
                              << " missingIdentityActorNetId=" << noisiestMissingActorNetId
                              << " missingIdentityCount=" << noisiestMissingCount
                              << " tier0=" << client.actorV2TierCounts[0]
@@ -2104,12 +2140,67 @@ void MPServer::broadcastActorPositionV2ToCell(
             client.actorV2IdentityAckedWindow = 0;
             client.actorV2SnapshotsSentWindow = 0;
             client.actorV2BytesSentWindow = 0;
+            client.actorV2PresentationSentWindow = 0;
+            client.actorV2PresentationBytesSentWindow = 0;
             client.actorV2DeferredWindow = 0;
             client.actorV2PositionSuppressedUntilIdentityKnownWindow = 0;
+            client.actorV2PresentationSuppressedUntilIdentityKnownWindow = 0;
             client.actorV2MissingIdentityByNetIdWindow.clear();
             for (std::size_t& count : client.actorV2TierCounts)
                 count = 0;
         }
+    }
+}
+
+void MPServer::broadcastActorPresentationV2ToCell(
+    const std::string& cellId, CellActorState& cellState, const ActorList& actorList, HSteamNetConnection except)
+{
+    for (auto& [conn, client] : mClients)
+    {
+        if (conn == except
+            || !clientHasActorCellLoaded(client, cellId)
+            || client.actorSyncProtocolVersion < ActorSyncProtocolVersionV2)
+            continue;
+
+        ActorPresentationV2List presentationList;
+        presentationList.protocolVersion = ActorSyncProtocolVersionV2;
+        presentationList.authorityGuid = actorList.authorityGuid;
+        presentationList.authorityGeneration = actorList.authorityGeneration;
+        presentationList.sequence = actorList.snapshotSequence;
+        presentationList.serverTimestamp = actorList.serverTimestamp;
+        presentationList.snapshots.reserve(actorList.actors.size());
+
+        for (const BaseActor& actor : actorList.actors)
+        {
+            auto actorIt = cellState.actors.find(makeActorKey(actor));
+            if (actorIt == cellState.actors.end())
+                continue;
+
+            ActorRegistryRecord& record = actorIt->second;
+            const uint32_t actorNetId = ensureActorNetId(record, cellId);
+            if (actorNetId == 0)
+                continue;
+
+            if (client.actorV2IdentitySent.count(actorNetId) == 0
+                || client.actorV2IdentityAcked.count(actorNetId) == 0)
+            {
+                ++client.actorV2PresentationSuppressedUntilIdentityKnownWindow;
+                ++client.actorV2MissingIdentityByNetIdWindow[actorNetId];
+                continue;
+            }
+
+            presentationList.snapshots.push_back(makePresentationSnapshot(actor, actorNetId));
+        }
+
+        if (presentationList.snapshots.empty())
+            continue;
+
+        PacketActorPresentationV2 pkt;
+        pkt.setPresentationList(&presentationList);
+        const std::vector<uint8_t> encoded = pkt.encode();
+        sendTo(conn, encoded, /*reliable=*/true);
+        client.actorV2PresentationSentWindow += presentationList.snapshots.size();
+        client.actorV2PresentationBytesSentWindow += encoded.size();
     }
 }
 
@@ -2224,6 +2315,7 @@ void MPServer::onClientMessage(ConnectedClient& client,
         case PacketType::ActorList:        handleActorList(client, data, size);          break;
         case PacketType::ActorPosition:    handleActorPosition(client, data, size);      break;
         case PacketType::ActorPositionV2:  handleActorPositionV2(client, data, size);    break;
+        case PacketType::ActorPresentationV2: handleActorPresentationV2(client, data, size); break;
         case PacketType::ActorIdentityAck: handleActorIdentityAck(client, data, size);   break;
         case PacketType::ActorAnimFlags:   handleActorAnimFlags(client, data, size);     break;
         case PacketType::ActorAnimPlay:    handleActorAnimPlay(client, data, size);      break;
@@ -4043,6 +4135,7 @@ void MPServer::handleActorPosition(ConnectedClient& c, const uint8_t* data, size
         return;
 
     broadcastActorPositionV2ToCell(filtered.cellId, cellState, filtered, c.conn);
+    broadcastActorPresentationV2ToCell(filtered.cellId, cellState, filtered, c.conn);
 
     PacketActorPosition out;
     out.setActorList(&filtered);
@@ -4180,10 +4273,6 @@ void MPServer::handleActorPositionV2(ConnectedClient& c, const uint8_t* data, si
         BaseActor& actor = record->actor;
         actor.position = snapshot.position;
         actor.velocity = snapshot.velocity;
-        actor.animFlags.movementFlags = snapshot.movementFlags;
-        actor.animFlags.animFwd = dequantizeActorAxis(snapshot.animFwd);
-        actor.animFlags.animSide = dequantizeActorAxis(snapshot.animSide);
-        applyActorPresentationFlags(actor, snapshot.presentationFlags);
         actor.cellId = cellId;
         record->lastSnapshotTime = timestamp;
         ensureActorNetId(*record, cellId);
@@ -4214,6 +4303,146 @@ void MPServer::handleActorPositionV2(ConnectedClient& c, const uint8_t* data, si
     if (missingIdentity != 0 || wrongAuthority != 0)
     {
         Log(Debug::Verbose) << "[Server] ActorPositionV2 filtered"
+                            << " from=" << c.name
+                            << " snapshots=" << incoming.snapshots.size()
+                            << " accepted=" << accepted
+                            << " missingIdentity=" << missingIdentity
+                            << " firstMissingActorNetId=" << firstMissingActorNetId
+                            << " wrongAuthority=" << wrongAuthority;
+    }
+}
+
+void MPServer::handleActorPresentationV2(ConnectedClient& c, const uint8_t* data, size_t size)
+{
+    ActorPresentationV2List incoming;
+    PacketActorPresentationV2 pkt;
+    pkt.setPresentationList(&incoming);
+    if (!pkt.decode(data, size))
+        return;
+    if (incoming.protocolVersion != ActorSyncProtocolVersionV2)
+    {
+        Log(Debug::Warning) << "[Server] Rejecting ActorPresentationV2 from " << c.name
+                            << " unsupported protocol=" << incoming.protocolVersion;
+        return;
+    }
+
+    const uint64_t timestamp = currentServerTimeMs();
+    std::unordered_map<std::string, ActorList> updatesByCell;
+    std::size_t accepted = 0;
+    std::size_t missingIdentity = 0;
+    std::size_t wrongAuthority = 0;
+    uint32_t firstMissingActorNetId = 0;
+
+    for (const ActorPresentationSnapshot& snapshot : incoming.snapshots)
+    {
+        auto keyIt = mWorld.actorKeysByNetId.find(snapshot.actorNetId);
+        if (keyIt == mWorld.actorKeysByNetId.end())
+        {
+            ++missingIdentity;
+            if (firstMissingActorNetId == 0)
+                firstMissingActorNetId = snapshot.actorNetId;
+            continue;
+        }
+
+        const std::string& actorKey = keyIt->second;
+        std::string cellId;
+        CellActorState* cellState = nullptr;
+        ActorRegistryRecord* record = nullptr;
+
+        auto locationIt = mWorld.actorLocations.find(actorKey);
+        if (locationIt != mWorld.actorLocations.end())
+        {
+            auto cellIt = mWorld.actorCells.find(locationIt->second);
+            if (cellIt != mWorld.actorCells.end())
+            {
+                auto actorIt = cellIt->second.actors.find(actorKey);
+                if (actorIt != cellIt->second.actors.end())
+                {
+                    cellId = cellIt->first;
+                    cellState = &cellIt->second;
+                    record = &actorIt->second;
+                }
+            }
+        }
+
+        if (!record)
+        {
+            for (auto& [candidateCellId, candidateCellState] : mWorld.actorCells)
+            {
+                auto actorIt = candidateCellState.actors.find(actorKey);
+                if (actorIt == candidateCellState.actors.end())
+                    continue;
+
+                cellId = candidateCellId;
+                cellState = &candidateCellState;
+                record = &actorIt->second;
+                rememberActorLocation(record->actor, cellId);
+                break;
+            }
+        }
+
+        if (!record || !cellState)
+        {
+            ++missingIdentity;
+            if (firstMissingActorNetId == 0)
+                firstMissingActorNetId = snapshot.actorNetId;
+            continue;
+        }
+
+        if (cellState->authorityGuid != c.guid)
+        {
+            ++wrongAuthority;
+            continue;
+        }
+
+        BaseActor& actor = record->actor;
+        applyActorPresentationFlags(actor, snapshot.presentationFlags);
+        actor.isMoving = snapshot.isMoving;
+        actor.isAttackingOrCasting = snapshot.isAttackingOrCasting;
+        actor.hasWeaponDrawn = snapshot.hasWeaponDrawn;
+        actor.hasSpellReadied = snapshot.hasSpellReadied;
+        actor.isDead = snapshot.isDead;
+        actor.animFlags.movementFlags = snapshot.movementFlags;
+        actor.animFlags.animFwd = dequantizeActorAxis(snapshot.animFwd);
+        actor.animFlags.animSide = dequantizeActorAxis(snapshot.animSide);
+        if (!snapshot.currentAnimGroup.empty())
+            actor.animFlags.currentAnimGroup = snapshot.currentAnimGroup;
+        else if (!snapshot.isMoving)
+            actor.animFlags.currentAnimGroup.clear();
+        if (!snapshot.isMoving)
+        {
+            actor.animFlags.animFwd = 0.f;
+            actor.animFlags.animSide = 0.f;
+        }
+        actor.cellId = cellId;
+        record->lastSnapshotTime = timestamp;
+        ensureActorNetId(*record, cellId);
+
+        ActorList& outgoing = updatesByCell[cellId];
+        if (outgoing.cellId.empty())
+        {
+            outgoing.cellId = cellId;
+            outgoing.isAuthority = true;
+            outgoing.authorityGuid = cellState->authorityGuid;
+            outgoing.authorityGeneration = cellState->authorityGeneration;
+            outgoing.snapshotSequence = cellState->nextSnapshotSequence++;
+            outgoing.serverTimestamp = timestamp;
+        }
+        outgoing.actors.push_back(actor);
+        ++accepted;
+    }
+
+    for (auto& [cellId, actorList] : updatesByCell)
+    {
+        auto cellIt = mWorld.actorCells.find(cellId);
+        if (cellIt == mWorld.actorCells.end())
+            continue;
+        broadcastActorPresentationV2ToCell(cellId, cellIt->second, actorList, c.conn);
+    }
+
+    if (missingIdentity != 0 || wrongAuthority != 0)
+    {
+        Log(Debug::Verbose) << "[Server] ActorPresentationV2 filtered"
                             << " from=" << c.name
                             << " snapshots=" << incoming.snapshots.size()
                             << " accepted=" << accepted

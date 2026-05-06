@@ -97,6 +97,7 @@ namespace mwmp
         ActorIdentity       = 66,  // Reliable ActorSync v2 actorNetId/baseline map
         ActorPositionV2     = 67,  // Compact ActorSync v2 movement snapshots
         ActorIdentityAck    = 68,  // Client ack for ActorSync v2 identity bootstrap
+        ActorPresentationV2 = 69,  // ActorSync v2 animation/presentation snapshots
         ActorCombatRequest  = 65,  // Non-authority client → server → authority: NPC hit event
 
         // --- Object ---

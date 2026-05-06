@@ -42,6 +42,7 @@ namespace mwmp
         void onActorListUpdate(const ActorList& list);
         void onActorPositionUpdate(const ActorList& list);
         void onActorPositionV2Update(const ActorPositionV2List& list);
+        void onActorPresentationV2Update(const ActorPresentationV2List& list);
         void onActorAnimFlagsUpdate(const ActorList& list);
         void onActorAnimPlay(const ActorList& list);
         void onActorAttack(const ActorList& list);
@@ -80,6 +81,7 @@ namespace mwmp
             double interpolationRenderTimestamp = 0.0;
             float latestSnapshotAge = 0.f;
             uint64_t lastServerTimestamp = 0;
+            uint64_t lastPresentationServerTimestamp = 0;
             bool hasInterpolationRenderTimestamp = false;
             MWWorld::Ptr boundActor;
             bool pendingAnimPlay = false;
@@ -126,6 +128,18 @@ namespace mwmp
             // ActorPosition packet. Dense-cell scheduling uses this to avoid
             // starving active actors behind a large high-priority set.
             float timeSinceLastPositionSend = 0.f;
+            bool lastSentPresentationValid = false;
+            bool lastSentIsMoving = false;
+            bool lastSentAttackingOrCasting = false;
+            bool lastSentWeaponDrawn = false;
+            bool lastSentSpellReadied = false;
+            bool lastSentDead = false;
+            uint16_t lastSentMovementFlags = 0;
+            int8_t lastSentAnimFwd = 0;
+            int8_t lastSentAnimSide = 0;
+            uint8_t lastSentPresentationFlags = 0;
+            std::string lastSentAnimGroup;
+            float presentationSendTimer = 0.f;
             // Log-dedup: true once the steady-state "reused binding" message has
             // been emitted for the current boundActor.  Reset whenever a new
             // binding is established so the first confirmation is always logged.
@@ -188,6 +202,12 @@ namespace mwmp
         std::size_t mActorV2StaleWindow = 0;
         std::size_t mActorV2IdentityTransformPreservedWindow = 0;
         std::size_t mActorV2IdentityZeroTransformSkippedWindow = 0;
+        std::size_t mActorV2PresentationSentWindow = 0;
+        std::size_t mActorV2PresentationAppliedWindow = 0;
+        std::size_t mActorV2PresentationMissingIdentityWindow = 0;
+        std::size_t mActorV2PresentationStaleWindow = 0;
+        std::size_t mActorV2PresentationStopForcedWindow = 0;
+        std::size_t mActorV2PresentationGroupChangedWindow = 0;
         std::unordered_map<uint32_t, std::size_t> mActorV2MissingIdentityByNetIdWindow;
     };
 

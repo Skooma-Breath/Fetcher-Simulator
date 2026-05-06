@@ -44,6 +44,7 @@
 #include <components/openmw-mp/Packets/Actor/PacketActorList.hpp>
 #include <components/openmw-mp/Packets/Actor/PacketActorPosition.hpp>
 #include <components/openmw-mp/Packets/Actor/PacketActorPositionV2.hpp>
+#include <components/openmw-mp/Packets/Actor/PacketActorPresentationV2.hpp>
 #include <components/openmw-mp/Packets/Actor/PacketActorStatsDynamic.hpp>
 
 #include "network/Client.hpp"
@@ -909,6 +910,16 @@ void Main::registerProtocolHandlers()
             pkt.setPositionList(&tmp);
             if (!pkt.decode(data, size)) return;
             mActorSync->onActorPositionV2Update(tmp);
+        });
+
+    proto.registerHandler(PacketType::ActorPresentationV2,
+        [this](const uint8_t* data, size_t size)
+        {
+            ActorPresentationV2List tmp;
+            PacketActorPresentationV2 pkt;
+            pkt.setPresentationList(&tmp);
+            if (!pkt.decode(data, size)) return;
+            mActorSync->onActorPresentationV2Update(tmp);
         });
 
     proto.registerHandler(PacketType::ActorAnimFlags,

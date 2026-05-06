@@ -71,6 +71,9 @@ struct ConnectedClient
     std::size_t actorV2IdentityAckedWindow = 0;
     std::size_t actorV2SnapshotsSentWindow = 0;
     std::size_t actorV2BytesSentWindow = 0;
+    std::size_t actorV2PresentationSentWindow = 0;
+    std::size_t actorV2PresentationBytesSentWindow = 0;
+    std::size_t actorV2PresentationSuppressedUntilIdentityKnownWindow = 0;
     std::size_t actorV2DeferredWindow = 0;
     std::size_t actorV2PositionSuppressedUntilIdentityKnownWindow = 0;
     std::size_t actorV2TierCounts[5] = {};
@@ -235,6 +238,7 @@ private:
     void handleActorList        (ConnectedClient& c, const uint8_t* data, size_t size);
     void handleActorPosition    (ConnectedClient& c, const uint8_t* data, size_t size);
     void handleActorPositionV2  (ConnectedClient& c, const uint8_t* data, size_t size);
+    void handleActorPresentationV2(ConnectedClient& c, const uint8_t* data, size_t size);
     void handleActorIdentityAck (ConnectedClient& c, const uint8_t* data, size_t size);
     void handleActorAnimFlags   (ConnectedClient& c, const uint8_t* data, size_t size);
     void handleActorAnimPlay    (ConnectedClient& c, const uint8_t* data, size_t size);
@@ -319,6 +323,9 @@ private:
     void broadcastActorIdentityForCell(const std::string& cellId, CellActorState& cellState,
         HSteamNetConnection except = k_HSteamNetConnection_Invalid);
     void broadcastActorPositionV2ToCell(
+        const std::string& cellId, CellActorState& cellState, const ActorList& actorList,
+        HSteamNetConnection except = k_HSteamNetConnection_Invalid);
+    void broadcastActorPresentationV2ToCell(
         const std::string& cellId, CellActorState& cellState, const ActorList& actorList,
         HSteamNetConnection except = k_HSteamNetConnection_Invalid);
     void sendGameSettingsToClient(HSteamNetConnection conn, const std::string& cellId);
