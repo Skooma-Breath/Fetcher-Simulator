@@ -197,8 +197,26 @@ namespace
 
     mwmp::ActorPresentationSnapshot makePresentationSnapshot(const mwmp::BaseActor& actor, uint32_t actorNetId)
     {
-        const bool hasLocomotionInput = !actor.isDead
-            && (std::abs(actor.animFlags.animFwd) > 0.1f || std::abs(actor.animFlags.animSide) > 0.1f);
+        const bool axisLocomotion = std::abs(actor.animFlags.animFwd) > 0.1f
+            || std::abs(actor.animFlags.animSide) > 0.1f;
+        const float velX = actor.velocity.linear[0];
+        const float velY = actor.velocity.linear[1];
+        const float speedSq = velX * velX + velY * velY;
+        const bool velocityLocomotion = speedSq > 20.f * 20.f;
+        const bool hasLocomotionInput = !actor.isDead && (axisLocomotion || velocityLocomotion);
+
+        float animFwd = hasLocomotionInput ? actor.animFlags.animFwd : 0.f;
+        float animSide = hasLocomotionInput ? actor.animFlags.animSide : 0.f;
+        if (hasLocomotionInput && !axisLocomotion && velocityLocomotion)
+        {
+            // NPC AI often moves the actor by transform velocity without leaving
+            // useful movement axes behind.  Treat that as ordinary forward
+            // locomotion instead of deriving signed strafe/backpedal axes from
+            // world velocity, which proved too noisy near cell borders.
+            animFwd = 1.f;
+            animSide = 0.f;
+        }
+
         mwmp::ActorPresentationSnapshot snapshot;
         snapshot.actorNetId = actorNetId;
         snapshot.isMoving = hasLocomotionInput;
@@ -207,8 +225,8 @@ namespace
         snapshot.hasSpellReadied = actor.hasSpellReadied;
         snapshot.isDead = actor.isDead;
         snapshot.movementFlags = static_cast<uint16_t>(actor.animFlags.movementFlags);
-        snapshot.animFwd = hasLocomotionInput ? mwmp::quantizeActorAxis(actor.animFlags.animFwd) : 0;
-        snapshot.animSide = hasLocomotionInput ? mwmp::quantizeActorAxis(actor.animFlags.animSide) : 0;
+        snapshot.animFwd = hasLocomotionInput ? mwmp::quantizeActorAxis(animFwd) : 0;
+        snapshot.animSide = hasLocomotionInput ? mwmp::quantizeActorAxis(animSide) : 0;
         mwmp::BaseActor presentationActor = actor;
         presentationActor.isMoving = hasLocomotionInput;
         snapshot.presentationFlags = mwmp::makeActorPresentationFlags(presentationActor);
