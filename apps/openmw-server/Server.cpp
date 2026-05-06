@@ -65,8 +65,10 @@
 #include <components/openmw-mp/Packets/Actor/PacketActorCellChange.hpp>
 #include <components/openmw-mp/Packets/Actor/PacketActorDeath.hpp>
 #include <components/openmw-mp/Packets/Actor/PacketActorEquipment.hpp>
+#include <components/openmw-mp/Packets/Actor/PacketActorIdentity.hpp>
 #include <components/openmw-mp/Packets/Actor/PacketActorList.hpp>
 #include <components/openmw-mp/Packets/Actor/PacketActorPosition.hpp>
+#include <components/openmw-mp/Packets/Actor/PacketActorPositionV2.hpp>
 #include <components/openmw-mp/Packets/Actor/PacketActorStatsDynamic.hpp>
 #include <components/openmw-mp/Packets/Actor/PacketActorCombatRequest.hpp>
 #include <components/openmw-mp/Packets/Worldstate/PacketWorldTime.hpp>
@@ -1408,6 +1410,9 @@ void MPServer::sendActorStateToClient(HSteamNetConnection conn, const std::strin
                             << " includesHul=" << includesHul;
     }
 
+    if (it != mWorld.actorCells.end())
+        sendActorIdentityToClient(conn, cellId, it->second);
+
     PacketActorList pkt;
     pkt.setActorList(&actorList);
     sendTo(conn, pkt.encode());
@@ -1425,6 +1430,67 @@ void MPServer::sendActorStateToClient(HSteamNetConnection conn, const std::strin
         PacketActorDeath deathPkt;
         deathPkt.setActorList(&deathList);
         sendTo(conn, deathPkt.encode());
+    }
+}
+
+void MPServer::sendActorIdentityToClient(HSteamNetConnection conn, const std::string& cellId, CellActorState& cellState)
+{
+    auto clientIt = mClients.find(conn);
+    if (clientIt == mClients.end() || clientIt->second.actorSyncProtocolVersion < ActorSyncProtocolVersionV2)
+        return;
+
+    std::unordered_map<std::string, ActorRegistryRecord> actors = cellState.actors;
+    mergeDeadVanillaActorsForCell(cellId, actors);
+    if (actors.empty())
+        return;
+
+    ActorIdentityList identityList = buildActorIdentityList(cellId, cellState, actors);
+    if (identityList.actors.empty())
+        return;
+
+    PacketActorIdentity pkt;
+    pkt.setIdentityList(&identityList);
+    sendTo(conn, pkt.encode());
+    for (const ActorIdentityRecord& record : identityList.actors)
+    {
+        if (clientIt->second.actorV2IdentitySent.insert(record.actorNetId).second)
+            ++clientIt->second.actorV2IdentitySentWindow;
+    }
+
+    Log(Debug::Info) << "[Server] ActorSync v2 identity sent"
+                     << " to=" << clientIt->second.name
+                     << " cell=" << cellId
+                     << " actors=" << identityList.actors.size()
+                     << " seq=" << identityList.sequence;
+}
+
+void MPServer::broadcastActorIdentityForCell(
+    const std::string& cellId, CellActorState& cellState, HSteamNetConnection except)
+{
+    std::unordered_map<std::string, ActorRegistryRecord> actors = cellState.actors;
+    mergeDeadVanillaActorsForCell(cellId, actors);
+    if (actors.empty())
+        return;
+
+    ActorIdentityList identityList = buildActorIdentityList(cellId, cellState, actors);
+    if (identityList.actors.empty())
+        return;
+
+    PacketActorIdentity pkt;
+    pkt.setIdentityList(&identityList);
+    const std::vector<uint8_t> encoded = pkt.encode();
+    for (auto& [conn, client] : mClients)
+    {
+        if (conn == except
+            || !clientHasActorCellLoaded(client, cellId)
+            || client.actorSyncProtocolVersion < ActorSyncProtocolVersionV2)
+            continue;
+        sendTo(conn, encoded);
+        for (const ActorIdentityRecord& record : identityList.actors)
+        {
+            if (client.actorV2IdentitySent.insert(record.actorNetId).second)
+                ++client.actorV2IdentitySentWindow;
+        }
     }
 }
 
@@ -1722,6 +1788,79 @@ std::size_t MPServer::mergeDeadVanillaActorsForCell(
     return merged;
 }
 
+uint32_t MPServer::assignActorNetId(const BaseActor& actor)
+{
+    if (actor.mpNum == 0 && actor.refId.empty())
+        return 0;
+
+    const std::string actorKey = makeActorKey(actor);
+    if (actor.mpNum != 0)
+    {
+        const uint32_t actorNetId = actor.mpNum;
+        mWorld.actorNetIdsByKey[actorKey] = actorNetId;
+        mWorld.actorKeysByNetId[actorNetId] = actorKey;
+        return actorNetId;
+    }
+
+    auto mappedIt = mWorld.actorNetIdsByKey.find(actorKey);
+    if (mappedIt != mWorld.actorNetIdsByKey.end())
+        return mappedIt->second;
+
+    while (mWorld.nextActorNetId == 0
+        || mWorld.actorKeysByNetId.find(mWorld.nextActorNetId) != mWorld.actorKeysByNetId.end())
+        ++mWorld.nextActorNetId;
+
+    const uint32_t actorNetId = mWorld.nextActorNetId++;
+    mWorld.actorNetIdsByKey[actorKey] = actorNetId;
+    mWorld.actorKeysByNetId[actorNetId] = actorKey;
+    return actorNetId;
+}
+
+uint32_t MPServer::ensureActorNetId(ActorRegistryRecord& record, const std::string& cellId)
+{
+    if (!cellId.empty())
+        record.actor.cellId = cellId;
+
+    if (record.actorNetId == 0)
+        record.actorNetId = assignActorNetId(record.actor);
+    return record.actorNetId;
+}
+
+ActorIdentityList MPServer::buildActorIdentityList(
+    const std::string& cellId,
+    CellActorState& cellState,
+    std::unordered_map<std::string, ActorRegistryRecord>& actors)
+{
+    for (auto& [actorKey, record] : cellState.actors)
+        ensureActorNetId(record, cellId);
+
+    ActorIdentityList identityList;
+    identityList.protocolVersion = ActorSyncProtocolVersionV2;
+    identityList.cellId = cellId;
+    identityList.authorityGuid = cellState.authorityGuid;
+    identityList.authorityGeneration = cellState.authorityGeneration;
+    identityList.sequence = cellState.nextSnapshotSequence;
+    identityList.serverTimestamp = currentServerTimeMs();
+    identityList.actors.reserve(actors.size());
+
+    for (auto& [actorKey, record] : actors)
+    {
+        const uint32_t actorNetId = ensureActorNetId(record, cellId);
+        if (actorNetId == 0)
+            continue;
+
+        ActorIdentityRecord identity;
+        identity.actorNetId = actorNetId;
+        identity.persistent = record.persistent;
+        identity.serverSpawned = record.actor.mpNum != 0;
+        identity.actor = record.actor;
+        identity.actor.cellId = cellId;
+        identityList.actors.push_back(std::move(identity));
+    }
+
+    return identityList;
+}
+
 std::optional<MPServer::ActorRegistryRecord> MPServer::removeActorFromOtherCells(
     const BaseActor& actor,
     const std::string& destinationCellId,
@@ -1811,7 +1950,167 @@ void MPServer::broadcastActorListForCell(const std::string& cellId, CellActorSta
 
     PacketActorList pkt;
     pkt.setActorList(&actorList);
+    broadcastActorIdentityForCell(cellId, cellState);
     broadcastActorToCell(cellId, pkt.encode());
+}
+
+void MPServer::broadcastActorPositionV2ToCell(
+    const std::string& cellId, CellActorState& cellState, const ActorList& actorList, HSteamNetConnection except)
+{
+    static constexpr std::size_t kSnapshotCostBytes = 42;
+    static constexpr std::size_t kBudgetBytes = 900;
+
+    const uint64_t now = currentServerTimeMs();
+    auto tierForActor = [](const BaseActor& actor) -> std::size_t
+    {
+        if (actor.isDead)
+            return 4;
+        if (actor.isAttackingOrCasting
+            || (actor.animFlags.actionFlags & (AnimFlags::AF_ATTACKING | AnimFlags::AF_CASTING)) != 0)
+            return 0;
+        const float speedSq = actor.velocity.linear[0] * actor.velocity.linear[0]
+            + actor.velocity.linear[1] * actor.velocity.linear[1]
+            + actor.velocity.linear[2] * actor.velocity.linear[2];
+        if (actor.isMoving || speedSq > 25.f)
+            return 1;
+        return 2;
+    };
+    auto intervalForTier = [](std::size_t tier) -> uint64_t
+    {
+        switch (tier)
+        {
+            case 0: return 50;
+            case 1: return 100;
+            case 2: return 250;
+            case 3: return 1000;
+            default: return 0;
+        }
+    };
+
+    for (auto& [conn, client] : mClients)
+    {
+        if (conn == except
+            || !clientHasActorCellLoaded(client, cellId)
+            || client.actorSyncProtocolVersion < ActorSyncProtocolVersionV2)
+            continue;
+
+        ActorPositionV2List positionList;
+        positionList.protocolVersion = ActorSyncProtocolVersionV2;
+        positionList.authorityGuid = actorList.authorityGuid;
+        positionList.authorityGeneration = actorList.authorityGeneration;
+        positionList.sequence = actorList.snapshotSequence;
+        positionList.serverTimestamp = actorList.serverTimestamp;
+
+        std::size_t budgetUsed = 0;
+        for (const BaseActor& actor : actorList.actors)
+        {
+            auto actorIt = cellState.actors.find(makeActorKey(actor));
+            if (actorIt == cellState.actors.end())
+                continue;
+
+            ActorRegistryRecord& record = actorIt->second;
+            const uint32_t actorNetId = ensureActorNetId(record, cellId);
+            if (actorNetId == 0)
+                continue;
+
+            if (client.actorV2IdentitySent.count(actorNetId) == 0
+                || client.actorV2IdentityAcked.count(actorNetId) == 0)
+            {
+                ++client.actorV2PositionSuppressedUntilIdentityKnownWindow;
+                ++client.actorV2MissingIdentityByNetIdWindow[actorNetId];
+                continue;
+            }
+
+            const std::size_t tier = tierForActor(actor);
+            if (tier < (sizeof(client.actorV2TierCounts) / sizeof(client.actorV2TierCounts[0])))
+                ++client.actorV2TierCounts[tier];
+
+            const uint64_t intervalMs = intervalForTier(tier);
+            const bool forceSend = actor.position.isTeleporting || tier == 0;
+            const uint64_t lastSent = client.actorV2LastSentMs[actorNetId];
+            if (!forceSend && intervalMs == 0)
+            {
+                ++client.actorV2DeferredWindow;
+                continue;
+            }
+            if (!forceSend && lastSent != 0 && now - lastSent < intervalMs)
+            {
+                ++client.actorV2DeferredWindow;
+                continue;
+            }
+            if (budgetUsed + kSnapshotCostBytes > kBudgetBytes)
+            {
+                ++client.actorV2DeferredWindow;
+                continue;
+            }
+
+            CompactActorSnapshot snapshot;
+            snapshot.actorNetId = actorNetId;
+            snapshot.position = actor.position;
+            snapshot.velocity = actor.velocity;
+            snapshot.movementFlags = static_cast<uint16_t>(actor.animFlags.movementFlags);
+            snapshot.animFwd = quantizeActorAxis(actor.animFlags.animFwd);
+            snapshot.animSide = quantizeActorAxis(actor.animFlags.animSide);
+            snapshot.presentationFlags = makeActorPresentationFlags(actor);
+            positionList.snapshots.push_back(snapshot);
+            client.actorV2LastSentMs[actorNetId] = now;
+            budgetUsed += kSnapshotCostBytes;
+        }
+
+        if (!positionList.snapshots.empty())
+        {
+            PacketActorPositionV2 pkt;
+            pkt.setPositionList(&positionList);
+            const std::vector<uint8_t> encoded = pkt.encode();
+            sendTo(conn, encoded, /*reliable=*/false);
+            client.actorV2SnapshotsSentWindow += positionList.snapshots.size();
+            client.actorV2BytesSentWindow += encoded.size();
+        }
+
+        if (client.actorV2DiagnosticsLastLogMs == 0)
+            client.actorV2DiagnosticsLastLogMs = now;
+        else if (now - client.actorV2DiagnosticsLastLogMs >= 1000)
+        {
+            uint32_t noisiestMissingActorNetId = 0;
+            std::size_t noisiestMissingCount = 0;
+            for (const auto& [actorNetId, count] : client.actorV2MissingIdentityByNetIdWindow)
+            {
+                if (count > noisiestMissingCount)
+                {
+                    noisiestMissingActorNetId = actorNetId;
+                    noisiestMissingCount = count;
+                }
+            }
+            Log(Debug::Info) << "[Server] ActorSync v2 budget"
+                             << " receiver=" << client.guid
+                             << " cell=" << cellId
+                             << " interested=" << actorList.actors.size()
+                             << " identitySent=" << client.actorV2IdentitySentWindow
+                             << " identityAcked=" << client.actorV2IdentityAckedWindow
+                             << " snapshots=" << client.actorV2SnapshotsSentWindow
+                             << " bytes=" << client.actorV2BytesSentWindow
+                             << " budget=" << kBudgetBytes
+                             << " deferred=" << client.actorV2DeferredWindow
+                             << " positionSuppressedUntilIdentityKnown=" << client.actorV2PositionSuppressedUntilIdentityKnownWindow
+                             << " missingIdentityActorNetId=" << noisiestMissingActorNetId
+                             << " missingIdentityCount=" << noisiestMissingCount
+                             << " tier0=" << client.actorV2TierCounts[0]
+                             << " tier1=" << client.actorV2TierCounts[1]
+                             << " tier2=" << client.actorV2TierCounts[2]
+                             << " tier3=" << client.actorV2TierCounts[3]
+                             << " tier4=" << client.actorV2TierCounts[4];
+            client.actorV2DiagnosticsLastLogMs = now;
+            client.actorV2IdentitySentWindow = 0;
+            client.actorV2IdentityAckedWindow = 0;
+            client.actorV2SnapshotsSentWindow = 0;
+            client.actorV2BytesSentWindow = 0;
+            client.actorV2DeferredWindow = 0;
+            client.actorV2PositionSuppressedUntilIdentityKnownWindow = 0;
+            client.actorV2MissingIdentityByNetIdWindow.clear();
+            for (std::size_t& count : client.actorV2TierCounts)
+                count = 0;
+        }
+    }
 }
 
 void MPServer::upsertSpawnedActorDynamicRecordLinkIfNeeded(const BaseActor& actor)
@@ -1924,6 +2223,8 @@ void MPServer::onClientMessage(ConnectedClient& client,
         case PacketType::WorldWeather:     handleWeather(client, data, size);            break;
         case PacketType::ActorList:        handleActorList(client, data, size);          break;
         case PacketType::ActorPosition:    handleActorPosition(client, data, size);      break;
+        case PacketType::ActorPositionV2:  handleActorPositionV2(client, data, size);    break;
+        case PacketType::ActorIdentityAck: handleActorIdentityAck(client, data, size);   break;
         case PacketType::ActorAnimFlags:   handleActorAnimFlags(client, data, size);     break;
         case PacketType::ActorAnimPlay:    handleActorAnimPlay(client, data, size);      break;
         case PacketType::ActorAttack:      handleActorAttack(client, data, size);        break;
@@ -2623,6 +2924,19 @@ void MPServer::handleHandshake(ConnectedClient& c, const uint8_t* data, size_t s
         return;
     }
 
+    if (hs.actorSyncProtocolVersion < ActorSyncProtocolVersionV2)
+    {
+        PacketHandshakeResponse rsp;
+        rsp.accepted      = false;
+        rsp.serverVersion = SERVER_VERSION;
+        rsp.rejectReason  = "ActorSync protocol mismatch: server requires v2";
+        rsp.actorSyncProtocolVersion = ActorSyncProtocolVersionV2;
+        sendTo(c.conn, rsp.encode());
+        mInterface->CloseConnection(c.conn, 0, "ActorSync protocol mismatch", true);
+        return;
+    }
+    c.actorSyncProtocolVersion = ActorSyncProtocolVersionV2;
+
     // ── Ed25519 keypair path ──────────────────────────────────────────────────
     // If the client presents a public key and it maps to a known account,
     // issue a challenge instead of asking for a password.
@@ -2767,10 +3081,12 @@ void MPServer::handleHandshake(ConnectedClient& c, const uint8_t* data, size_t s
     rsp.accepted      = true;
     rsp.assignedGuid  = c.guid;
     rsp.serverVersion = SERVER_VERSION;
+    rsp.actorSyncProtocolVersion = c.actorSyncProtocolVersion;
     sendTo(c.conn, rsp.encode());
 
     Log(Debug::Info) << "[Server] Handshake accepted: " << c.name
-                     << " guid=" << c.guid;
+                     << " guid=" << c.guid
+                     << " actorSyncProtocol=" << c.actorSyncProtocolVersion;
 
     // Build and send the character list so the client can show the
     // CharacterSelectDialog with one row per character.
@@ -3516,6 +3832,11 @@ void MPServer::handleActorList(ConnectedClient& c, const uint8_t* data, size_t s
             ActorRegistryRecord { actor, incoming.serverTimestamp, 0, persistent });
         if (!inserted)
             it->second = { actor, incoming.serverTimestamp, 0, persistent };
+        if (previousRecord && previousRecord->actorNetId != 0)
+            it->second.actorNetId = previousRecord->actorNetId;
+        else if (migratedRecord && migratedRecord->actorNetId != 0)
+            it->second.actorNetId = migratedRecord->actorNetId;
+        ensureActorNetId(it->second, incoming.cellId);
         // Preserve the original serverSpawnTime so the grace-period logic
         // remains accurate even after later client updates.
         const auto spawnTimeIt = previousSpawnedActorSpawnTime.find(actor.mpNum);
@@ -3660,6 +3981,7 @@ void MPServer::handleActorList(ConnectedClient& c, const uint8_t* data, size_t s
 
     PacketActorList out;
     out.setActorList(&deduped);
+    broadcastActorIdentityForCell(incoming.cellId, cellState);
     broadcastActorToCell(incoming.cellId, out.encode(), c.conn);
 }
 
@@ -3702,7 +4024,17 @@ void MPServer::handleActorPosition(ConnectedClient& c, const uint8_t* data, size
         stored->actor.cellId = incoming.cellId;
         stored->actor.position = actor.position;
         stored->actor.velocity = actor.velocity;
+        stored->actor.isMoving = actor.isMoving;
+        stored->actor.hasWeaponDrawn = actor.hasWeaponDrawn;
+        stored->actor.hasSpellReadied = actor.hasSpellReadied;
+        stored->actor.isAttackingOrCasting = actor.isAttackingOrCasting;
+        stored->actor.animFlags.movementFlags = actor.animFlags.movementFlags;
+        stored->actor.animFlags.actionFlags = actor.animFlags.actionFlags;
+        stored->actor.animFlags.animFwd = actor.animFlags.animFwd;
+        stored->actor.animFlags.animSide = actor.animFlags.animSide;
+        stored->actor.animFlags.currentAnimGroup = actor.animFlags.currentAnimGroup;
         stored->lastSnapshotTime = incoming.serverTimestamp;
+        ensureActorNetId(*stored, incoming.cellId);
         persistSpawnedActorIfNeeded(*stored);
         filtered.actors.push_back(actor);
     }
@@ -3710,9 +4042,185 @@ void MPServer::handleActorPosition(ConnectedClient& c, const uint8_t* data, size
     if (filtered.actors.empty())
         return;
 
+    broadcastActorPositionV2ToCell(filtered.cellId, cellState, filtered, c.conn);
+
     PacketActorPosition out;
     out.setActorList(&filtered);
-    broadcastActorToCell(filtered.cellId, out.encode(), c.conn, /*reliable=*/false);
+    const std::vector<uint8_t> encodedLegacy = out.encode();
+    for (auto& [conn, client] : mClients)
+    {
+        if (conn == c.conn
+            || !clientHasActorCellLoaded(client, filtered.cellId)
+            || client.actorSyncProtocolVersion >= ActorSyncProtocolVersionV2)
+            continue;
+        sendTo(conn, encodedLegacy, /*reliable=*/false);
+    }
+}
+
+void MPServer::handleActorIdentityAck(ConnectedClient& c, const uint8_t* data, size_t size)
+{
+    ActorIdentityAck ack;
+    PacketActorIdentityAck pkt;
+    pkt.setAck(&ack);
+    if (!pkt.decode(data, size))
+        return;
+    if (ack.protocolVersion != ActorSyncProtocolVersionV2)
+    {
+        Log(Debug::Warning) << "[Server] Ignoring ActorIdentityAck from " << c.name
+                            << " unsupported protocol=" << ack.protocolVersion;
+        return;
+    }
+
+    std::size_t newlyAcked = 0;
+    for (uint32_t actorNetId : ack.actorNetIds)
+    {
+        if (actorNetId == 0)
+            continue;
+        if (c.actorV2IdentityAcked.insert(actorNetId).second)
+        {
+            ++newlyAcked;
+            ++c.actorV2IdentityAckedWindow;
+        }
+    }
+
+    if (newlyAcked != 0)
+    {
+        Log(Debug::Verbose) << "[Server] ActorSync v2 identity ack"
+                            << " receiver=" << c.guid
+                            << " cell=" << ack.cellId
+                            << " acked=" << newlyAcked
+                            << " totalAcked=" << c.actorV2IdentityAcked.size()
+                            << " seq=" << ack.sequence;
+    }
+}
+
+void MPServer::handleActorPositionV2(ConnectedClient& c, const uint8_t* data, size_t size)
+{
+    ActorPositionV2List incoming;
+    PacketActorPositionV2 pkt;
+    pkt.setPositionList(&incoming);
+    if (!pkt.decode(data, size))
+        return;
+    if (incoming.protocolVersion != ActorSyncProtocolVersionV2)
+    {
+        Log(Debug::Warning) << "[Server] Rejecting ActorPositionV2 from " << c.name
+                            << " unsupported protocol=" << incoming.protocolVersion;
+        return;
+    }
+
+    const uint64_t timestamp = currentServerTimeMs();
+    std::unordered_map<std::string, ActorList> updatesByCell;
+    std::size_t accepted = 0;
+    std::size_t missingIdentity = 0;
+    std::size_t wrongAuthority = 0;
+    uint32_t firstMissingActorNetId = 0;
+
+    for (const CompactActorSnapshot& snapshot : incoming.snapshots)
+    {
+        auto keyIt = mWorld.actorKeysByNetId.find(snapshot.actorNetId);
+        if (keyIt == mWorld.actorKeysByNetId.end())
+        {
+            ++missingIdentity;
+            if (firstMissingActorNetId == 0)
+                firstMissingActorNetId = snapshot.actorNetId;
+            continue;
+        }
+
+        const std::string& actorKey = keyIt->second;
+        std::string cellId;
+        CellActorState* cellState = nullptr;
+        ActorRegistryRecord* record = nullptr;
+
+        auto locationIt = mWorld.actorLocations.find(actorKey);
+        if (locationIt != mWorld.actorLocations.end())
+        {
+            auto cellIt = mWorld.actorCells.find(locationIt->second);
+            if (cellIt != mWorld.actorCells.end())
+            {
+                auto actorIt = cellIt->second.actors.find(actorKey);
+                if (actorIt != cellIt->second.actors.end())
+                {
+                    cellId = cellIt->first;
+                    cellState = &cellIt->second;
+                    record = &actorIt->second;
+                }
+            }
+        }
+
+        if (!record)
+        {
+            for (auto& [candidateCellId, candidateCellState] : mWorld.actorCells)
+            {
+                auto actorIt = candidateCellState.actors.find(actorKey);
+                if (actorIt == candidateCellState.actors.end())
+                    continue;
+
+                cellId = candidateCellId;
+                cellState = &candidateCellState;
+                record = &actorIt->second;
+                rememberActorLocation(record->actor, cellId);
+                break;
+            }
+        }
+
+        if (!record || !cellState)
+        {
+            ++missingIdentity;
+            if (firstMissingActorNetId == 0)
+                firstMissingActorNetId = snapshot.actorNetId;
+            continue;
+        }
+
+        if (cellState->authorityGuid != c.guid)
+        {
+            ++wrongAuthority;
+            continue;
+        }
+
+        BaseActor& actor = record->actor;
+        actor.position = snapshot.position;
+        actor.velocity = snapshot.velocity;
+        actor.animFlags.movementFlags = snapshot.movementFlags;
+        actor.animFlags.animFwd = dequantizeActorAxis(snapshot.animFwd);
+        actor.animFlags.animSide = dequantizeActorAxis(snapshot.animSide);
+        applyActorPresentationFlags(actor, snapshot.presentationFlags);
+        actor.cellId = cellId;
+        record->lastSnapshotTime = timestamp;
+        ensureActorNetId(*record, cellId);
+        persistSpawnedActorIfNeeded(*record);
+
+        ActorList& outgoing = updatesByCell[cellId];
+        if (outgoing.cellId.empty())
+        {
+            outgoing.cellId = cellId;
+            outgoing.isAuthority = true;
+            outgoing.authorityGuid = cellState->authorityGuid;
+            outgoing.authorityGeneration = cellState->authorityGeneration;
+            outgoing.snapshotSequence = cellState->nextSnapshotSequence++;
+            outgoing.serverTimestamp = timestamp;
+        }
+        outgoing.actors.push_back(actor);
+        ++accepted;
+    }
+
+    for (auto& [cellId, actorList] : updatesByCell)
+    {
+        auto cellIt = mWorld.actorCells.find(cellId);
+        if (cellIt == mWorld.actorCells.end())
+            continue;
+        broadcastActorPositionV2ToCell(cellId, cellIt->second, actorList, c.conn);
+    }
+
+    if (missingIdentity != 0 || wrongAuthority != 0)
+    {
+        Log(Debug::Verbose) << "[Server] ActorPositionV2 filtered"
+                            << " from=" << c.name
+                            << " snapshots=" << incoming.snapshots.size()
+                            << " accepted=" << accepted
+                            << " missingIdentity=" << missingIdentity
+                            << " firstMissingActorNetId=" << firstMissingActorNetId
+                            << " wrongAuthority=" << wrongAuthority;
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -5012,6 +5520,7 @@ bool MPServer::spawnActor(
     registryRecord.lastSnapshotTime = timestamp;
     registryRecord.serverSpawnTime  = timestamp;   // never updated by client
     registryRecord.persistent       = persistent;
+    ensureActorNetId(registryRecord, cellId);
     cellState.actors[makeActorKey(actor)] = registryRecord;
     rememberActorLocation(actor, cellId);
 
@@ -5042,11 +5551,13 @@ bool MPServer::spawnActor(
 
     PacketActorList pkt;
     pkt.setActorList(&actorList);
+    broadcastActorIdentityForCell(cellId, cellState);
     broadcastActorToCell(cellId, pkt.encode());
 
     Log(Debug::Info) << "[Server] Script ActorSpawn accepted: refId=" << actor.refId
                      << " refNum=" << actor.refNum
                      << " mpNum=" << actor.mpNum
+                     << " actorNetId=" << registryRecord.actorNetId
                      << " cell=" << actor.cellId
                      << " persistent=" << persistent;
     sendActorLifecycleEvent("spawned", actor, persistent);

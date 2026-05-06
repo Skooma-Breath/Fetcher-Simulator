@@ -1,6 +1,7 @@
 #ifndef OPENMW_MP_PACKETSYSTEMHANDSHAKE_HPP
 #define OPENMW_MP_PACKETSYSTEMHANDSHAKE_HPP
 
+#include <components/openmw-mp/Base/ActorSyncProtocol.hpp>
 #include <components/openmw-mp/Packets/BasePacket.hpp>
 #include <string>
 #include <vector>
@@ -21,6 +22,7 @@ namespace mwmp
         std::string passwordHash;         // SHA-256(password), hex string
         bool        isRegistration = false; // true → create account, false → login
         std::string publicKey;             // base64 Ed25519 public key; non-empty = try keypair auth
+        uint32_t    actorSyncProtocolVersion = ActorSyncProtocolVersionV2;
 
         struct PluginEntry
         {
@@ -39,6 +41,7 @@ namespace mwmp
             ws.writeString(passwordHash);
             ws.write(isRegistration);
             ws.writeString(publicKey);
+            ws.write(actorSyncProtocolVersion);
 
             // Plugin list — not yet populated by the client, but must be
             // symmetric with unpack() so the server can read the count (0).
@@ -57,6 +60,7 @@ namespace mwmp
             passwordHash   = rs.readString();
             rs.read(isRegistration);
             publicKey      = rs.readString();
+            rs.read(actorSyncProtocolVersion);
 
             uint32_t count = 0;
             rs.read(count);
@@ -83,6 +87,7 @@ namespace mwmp
         uint32_t    assignedGuid    = 0;
         std::string serverVersion;
         std::string rejectReason;
+        uint32_t    actorSyncProtocolVersion = ActorSyncProtocolVersionV2;
 
         struct PluginMismatch
         {
@@ -100,6 +105,7 @@ namespace mwmp
             ws.write(assignedGuid);
             ws.writeString(serverVersion);
             ws.writeString(rejectReason);
+            ws.write(actorSyncProtocolVersion);
 
             auto count = static_cast<uint32_t>(pluginMismatches.size());
             ws.write(count);
@@ -116,6 +122,7 @@ namespace mwmp
             rs.read(assignedGuid);
             serverVersion = rs.readString();
             rejectReason  = rs.readString();
+            rs.read(actorSyncProtocolVersion);
 
             uint32_t count = 0;
             rs.read(count);

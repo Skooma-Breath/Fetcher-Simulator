@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <cmath>
 #include <limits>
 #include <map>
@@ -15,8 +16,10 @@
 #include <components/misc/resourcehelpers.hpp>
 #include <components/openmw-mp/Packets/Actor/PacketActorList.hpp>
 #include <components/openmw-mp/Packets/Actor/PacketActorPosition.hpp>
+#include <components/openmw-mp/Packets/Actor/PacketActorPositionV2.hpp>
 #include <components/openmw-mp/Packets/Actor/PacketActorCombatRequest.hpp>
 #include <components/openmw-mp/Packets/Actor/PacketActorDeath.hpp>
+#include <components/openmw-mp/Packets/Actor/PacketActorIdentity.hpp>
 #include <components/openmw-mp/Packets/Actor/PacketActorStatsDynamic.hpp>
 #include <components/sceneutil/positionattitudetransform.hpp>
 #include <components/vfs/pathutil.hpp>
@@ -220,6 +223,24 @@ namespace
         return true;
     }
 
+    uint64_t currentClientTimeMs()
+    {
+        return static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now().time_since_epoch()).count());
+    }
+
+    bool isExteriorActorCellId(const std::string& cellId)
+    {
+        return cellId.rfind("EXT:", 0) == 0;
+    }
+
+    bool isZeroIdentityPosition(const mwmp::Position& position)
+    {
+        return std::abs(position.pos[0]) < 0.001f
+            && std::abs(position.pos[1]) < 0.001f
+            && std::abs(position.pos[2]) < 0.001f;
+    }
+
     bool isUnarmedAttack(const MWWorld::Ptr& attacker)
     {
         if (attacker.isEmpty() || !attacker.getClass().hasInventoryStore(attacker))
@@ -387,10 +408,100 @@ namespace mwmp
         mAuthority.clear();
         mMpNumsByLocalActor.clear();
         mServerSpawnedActorsByMpNum.clear();
+        mServerSpawnedActorLastTimestamps.clear();
+        mActorsByNetId.clear();
+        mCellActorIds.clear();
+        mActorNetIdsByKey.clear();
+        mActorV2DiagnosticsLastLogMs = 0;
+        mActorV2SnapshotsWindow = 0;
+        mActorV2MissingIdentityWindow = 0;
+        mActorV2StaleWindow = 0;
+        mActorV2IdentityTransformPreservedWindow = 0;
+        mActorV2IdentityZeroTransformSkippedWindow = 0;
+        mActorV2MissingIdentityByNetIdWindow.clear();
+    }
+
+    uint32_t ActorSync::actorNetIdForActorState(const BaseActor& actor) const
+    {
+        const auto mappedIt = mActorNetIdsByKey.find(makeActorKey(actor));
+        if (mappedIt != mActorNetIdsByKey.end())
+            return mappedIt->second;
+
+        // Server-spawned actors deliberately use mpNum as their v2 compact ID
+        // until a future persistent table needs to decouple the two.
+        return actor.mpNum;
+    }
+
+    void ActorSync::rememberActorNetId(uint32_t actorNetId, const BaseActor& actor)
+    {
+        if (actorNetId == 0)
+            return;
+
+        mActorNetIdsByKey[makeActorKey(actor)] = actorNetId;
+    }
+
+    void ActorSync::indexActorNetId(uint32_t actorNetId, const std::string& oldCellId, const std::string& newCellId)
+    {
+        if (actorNetId == 0)
+            return;
+
+        if (!oldCellId.empty() && oldCellId != newCellId)
+        {
+            auto oldIt = mCellActorIds.find(oldCellId);
+            if (oldIt != mCellActorIds.end())
+            {
+                oldIt->second.erase(actorNetId);
+                if (oldIt->second.empty())
+                    mCellActorIds.erase(oldIt);
+            }
+        }
+
+        if (!newCellId.empty())
+            mCellActorIds[newCellId].insert(actorNetId);
+    }
+
+    ActorSync::ActorRuntime* ActorSync::findPrimaryActorRuntime(const BaseActor& actor)
+    {
+        const uint32_t actorNetId = actorNetIdForActorState(actor);
+        if (actorNetId == 0)
+            return nullptr;
+
+        auto runtimeIt = mActorsByNetId.find(actorNetId);
+        if (runtimeIt == mActorsByNetId.end())
+            return nullptr;
+
+        return &runtimeIt->second;
+    }
+
+    ActorSync::ActorRuntime& ActorSync::runtimeForPacketActor(
+        const std::string& cellId, CellRuntime& cell, const BaseActor& actor)
+    {
+        if (ActorRuntime* runtime = findPrimaryActorRuntime(actor))
+            return *runtime;
+
+        ActorRuntime& runtime = cell.actors[makeActorKey(actor)];
+        runtime.actorNetId = actorNetIdForActorState(actor);
+        if (runtime.actorNetId != 0)
+            indexActorNetId(runtime.actorNetId, runtime.state.cellId, cellId);
+        return runtime;
     }
 
     void ActorSync::update(float dt)
     {
+        std::unordered_set<uint32_t> appliedPrimaryActors;
+        for (auto& [actorNetId, actor] : mActorsByNetId)
+        {
+            if (actor.state.cellId.empty() || hasAuthority(actor.state.cellId))
+                continue;
+            if (!actor.hasAuthoritativeTransform)
+                continue;
+
+            advanceSmoothing(actor, dt);
+            if (resolveActorBinding(actor.state.cellId, actor))
+                applyBoundActorState(actor);
+            appliedPrimaryActors.insert(actorNetId);
+        }
+
         for (auto& [cellId, cell] : mCells)
         {
             if (hasAuthority(cellId))
@@ -401,6 +512,9 @@ namespace mwmp
 
             for (auto& [actorKey, actor] : cell.actors)
             {
+                if (actor.actorNetId != 0 && appliedPrimaryActors.count(actor.actorNetId) != 0)
+                    continue;
+
                 advanceSmoothing(actor, dt);
                 if (resolveActorBinding(cellId, actor))
                     applyBoundActorState(actor);
@@ -499,6 +613,180 @@ namespace mwmp
         }
     }
 
+    void ActorSync::onActorIdentityUpdate(const ActorIdentityList& list)
+    {
+        if (list.protocolVersion != ActorSyncProtocolVersionV2)
+        {
+            Log(Debug::Warning) << "[MP] ActorSync: ignored unsupported ActorIdentity protocol="
+                                << list.protocolVersion;
+            return;
+        }
+
+        std::size_t removed = 0;
+        std::size_t migrated = 0;
+        std::size_t promoted = 0;
+        std::size_t baselineApplied = 0;
+        std::size_t transformPreserved = 0;
+        std::size_t zeroTransformSkipped = 0;
+        std::vector<uint32_t> ackedActorNetIds;
+        ackedActorNetIds.reserve(list.actors.size());
+        for (const ActorIdentityRecord& record : list.actors)
+        {
+            if (record.actorNetId == 0)
+                continue;
+
+            BaseActor actorState = record.actor;
+            if (actorState.cellId.empty())
+                actorState.cellId = list.cellId;
+            if (record.teleport)
+                actorState.position.isTeleporting = true;
+            rememberActorNetId(record.actorNetId, actorState);
+            ackedActorNetIds.push_back(record.actorNetId);
+
+            if (record.removed)
+            {
+                auto runtimeIt = mActorsByNetId.find(record.actorNetId);
+                if (runtimeIt != mActorsByNetId.end())
+                {
+                    indexActorNetId(record.actorNetId, runtimeIt->second.state.cellId, {});
+                    mActorsByNetId.erase(runtimeIt);
+                    ++removed;
+                }
+                continue;
+            }
+
+            ActorRuntime runtime;
+            bool hadRuntime = false;
+            auto primaryIt = mActorsByNetId.find(record.actorNetId);
+            if (primaryIt != mActorsByNetId.end())
+            {
+                runtime = std::move(primaryIt->second);
+                hadRuntime = true;
+            }
+            else
+            {
+                const std::string actorKey = makeActorKey(actorState);
+                auto cellIt = mCells.find(actorState.cellId);
+                if (cellIt != mCells.end())
+                {
+                    auto cellActorIt = cellIt->second.actors.find(actorKey);
+                    if (cellActorIt != cellIt->second.actors.end())
+                    {
+                        runtime = std::move(cellActorIt->second);
+                        cellIt->second.actors.erase(cellActorIt);
+                        hadRuntime = true;
+                        ++promoted;
+                    }
+                }
+
+                if (runtime.state.refId.empty() && actorState.mpNum != 0)
+                {
+                    hadRuntime = takeServerSpawnedRuntimeFromOtherCell(actorState.cellId, actorState,
+                        list.serverTimestamp, runtime);
+                    if (runtime.boundActor.isEmpty())
+                    {
+                        auto mappedIt = mServerSpawnedActorsByMpNum.find(actorState.mpNum);
+                        if (mappedIt != mServerSpawnedActorsByMpNum.end()
+                            && !mappedIt->second.isEmpty()
+                            && matchesActor(mappedIt->second, actorState))
+                        {
+                            runtime.boundActor = mappedIt->second;
+                            runtime.bindingLogged = false;
+                            hadRuntime = true;
+                        }
+                    }
+                }
+            }
+
+            const std::string oldCellId = runtime.state.cellId;
+            if (!oldCellId.empty() && oldCellId != actorState.cellId)
+                ++migrated;
+
+            runtime.actorNetId = record.actorNetId;
+            const bool explicitTransformReset = record.baselineReset || record.teleport;
+            const bool zeroIdentityTransform = record.serverSpawned
+                && isExteriorActorCellId(actorState.cellId)
+                && isZeroIdentityPosition(actorState.position)
+                && !explicitTransformReset;
+
+            if (hadRuntime && !explicitTransformReset)
+            {
+                runtime.state.refId = actorState.refId;
+                runtime.state.refNum = actorState.refNum;
+                runtime.state.mpNum = actorState.mpNum;
+                runtime.state.cellId = actorState.cellId;
+                ++transformPreserved;
+            }
+            else if (zeroIdentityTransform)
+            {
+                if (runtime.state.refId.empty())
+                {
+                    runtime.state.refId = actorState.refId;
+                    runtime.state.refNum = actorState.refNum;
+                    runtime.state.mpNum = actorState.mpNum;
+                    runtime.state.cellId = actorState.cellId;
+                    runtime.hasAuthoritativeTransform = false;
+                }
+                else
+                {
+                    runtime.state.refId = actorState.refId;
+                    runtime.state.refNum = actorState.refNum;
+                    runtime.state.mpNum = actorState.mpNum;
+                    runtime.state.cellId = actorState.cellId;
+                }
+                ++zeroTransformSkipped;
+                Log(Debug::Warning) << "[MP] ActorSync v2: skipped identity zero transform"
+                                    << " actorNetId=" << record.actorNetId
+                                    << " refId=" << actorState.refId
+                                    << " mpNum=" << actorState.mpNum
+                                    << " cell=" << actorState.cellId;
+            }
+            else
+            {
+                runtime.state = actorState;
+                if (actorState.isDead)
+                    runtime.deathFromRealtimePacket = false;
+
+                ActorList synthetic;
+                synthetic.cellId = actorState.cellId;
+                synthetic.authorityGuid = list.authorityGuid;
+                synthetic.authorityGeneration = list.authorityGeneration;
+                synthetic.snapshotSequence = list.sequence;
+                synthetic.serverTimestamp = list.serverTimestamp;
+                queueSnapshot(runtime, actorState, synthetic);
+                ++baselineApplied;
+            }
+            rememberServerSpawnedActorTimestamp(actorState.mpNum, list.serverTimestamp);
+            indexActorNetId(record.actorNetId, oldCellId, actorState.cellId);
+            mActorsByNetId[record.actorNetId] = std::move(runtime);
+        }
+
+        if (!ackedActorNetIds.empty())
+        {
+            ActorIdentityAck ack;
+            ack.cellId = list.cellId;
+            ack.sequence = list.sequence;
+            ack.actorNetIds = std::move(ackedActorNetIds);
+            PacketActorIdentityAck ackPacket;
+            ackPacket.setAck(&ack);
+            mClient.sendReliable(ackPacket.encode());
+        }
+
+        mActorV2IdentityTransformPreservedWindow += transformPreserved;
+        mActorV2IdentityZeroTransformSkippedWindow += zeroTransformSkipped;
+        Log(Debug::Info) << "[MP] ActorSync v2: identity"
+                         << " cell=" << list.cellId
+                         << " actors=" << list.actors.size()
+                         << " primary=" << mActorsByNetId.size()
+                         << " promoted=" << promoted
+                         << " migrated=" << migrated
+                         << " removed=" << removed
+                         << " baselineApplied=" << baselineApplied
+                         << " transformPreserved=" << transformPreserved
+                         << " zeroTransformSkipped=" << zeroTransformSkipped
+                         << " seq=" << list.sequence;
+    }
+
     void ActorSync::onActorListUpdate(const ActorList& list)
     {
         auto& cell = mCells[list.cellId];
@@ -510,6 +798,7 @@ namespace mwmp
         std::unordered_map<std::string, ActorRuntime> updatedActors;
         updatedActors.reserve(list.actors.size());
         std::unordered_set<uint32_t> incomingServerSpawnedMpNums;
+        std::unordered_set<uint32_t> incomingActorNetIds;
 
         for (const auto& actorState : list.actors)
         {
@@ -524,6 +813,9 @@ namespace mwmp
             }
 
             const std::string actorKey = makeActorKey(actorState);
+            const uint32_t knownActorNetId = actorNetIdForActorState(actorState);
+            if (knownActorNetId != 0)
+                incomingActorNetIds.insert(knownActorNetId);
             ActorRuntime runtime;
             if (actorState.mpNum != 0)
                 incomingServerSpawnedMpNums.insert(actorState.mpNum);
@@ -545,6 +837,55 @@ namespace mwmp
                         runtime.bindingLogged = false;
                     }
                 }
+            }
+
+            const uint32_t actorNetId = actorNetIdForActorState(actorState);
+            if (actorNetId != 0 && !hasAuthority(list.cellId))
+            {
+                auto primaryIt = mActorsByNetId.find(actorNetId);
+                const bool hadPrimaryRuntime = primaryIt != mActorsByNetId.end();
+                if (hadPrimaryRuntime)
+                    runtime = std::move(primaryIt->second);
+                const std::string oldCellId = runtime.state.cellId;
+                runtime.actorNetId = actorNetId;
+                const bool zeroActorListTransform = actorState.mpNum != 0
+                    && isExteriorActorCellId(list.cellId)
+                    && isZeroIdentityPosition(actorState.position)
+                    && !actorState.position.isTeleporting;
+                if (hadPrimaryRuntime)
+                {
+                    runtime.state.refId = actorState.refId;
+                    runtime.state.refNum = actorState.refNum;
+                    runtime.state.mpNum = actorState.mpNum;
+                    runtime.state.cellId = list.cellId;
+                    ++mActorV2IdentityTransformPreservedWindow;
+                }
+                else if (zeroActorListTransform)
+                {
+                    runtime.state.refId = actorState.refId;
+                    runtime.state.refNum = actorState.refNum;
+                    runtime.state.mpNum = actorState.mpNum;
+                    runtime.state.cellId = list.cellId;
+                    runtime.hasAuthoritativeTransform = false;
+                    ++mActorV2IdentityZeroTransformSkippedWindow;
+                    Log(Debug::Warning) << "[MP] ActorSync v2: skipped ActorList zero transform"
+                                        << " actorNetId=" << actorNetId
+                                        << " refId=" << actorState.refId
+                                        << " mpNum=" << actorState.mpNum
+                                        << " cell=" << list.cellId;
+                }
+                else
+                {
+                    runtime.state = actorState;
+                    if (actorState.isDead)
+                        runtime.deathFromRealtimePacket = false;
+                    queueSnapshot(runtime, actorState, list);
+                }
+                rememberServerSpawnedActorTimestamp(actorState.mpNum, list.serverTimestamp);
+                rememberActorNetId(actorNetId, runtime.state);
+                indexActorNetId(actorNetId, oldCellId, list.cellId);
+                mActorsByNetId[actorNetId] = std::move(runtime);
+                continue;
             }
 
             runtime.state = actorState;
@@ -577,6 +918,26 @@ namespace mwmp
         }
 
         cell.actors = std::move(updatedActors);
+
+        auto cellIndexIt = mCellActorIds.find(list.cellId);
+        if (cellIndexIt != mCellActorIds.end())
+        {
+            for (auto actorIdIt = cellIndexIt->second.begin(); actorIdIt != cellIndexIt->second.end();)
+            {
+                if (incomingActorNetIds.count(*actorIdIt) != 0)
+                {
+                    ++actorIdIt;
+                    continue;
+                }
+
+                auto runtimeIt = mActorsByNetId.find(*actorIdIt);
+                if (runtimeIt != mActorsByNetId.end() && runtimeIt->second.state.cellId == list.cellId)
+                    mActorsByNetId.erase(runtimeIt);
+                actorIdIt = cellIndexIt->second.erase(actorIdIt);
+            }
+            if (cellIndexIt->second.empty())
+                mCellActorIds.erase(cellIndexIt);
+        }
     }
 
     void ActorSync::onActorCellChange(const ActorList& list)
@@ -601,6 +962,23 @@ namespace mwmp
 
             const std::string actorKey = makeActorKey(actorState);
             const std::string& destCellId = actorState.cellId;
+            if (ActorRuntime* primaryRuntime = findPrimaryActorRuntime(actorState))
+            {
+                const std::string oldCellId = primaryRuntime->state.cellId;
+                primaryRuntime->state.cellId = destCellId;
+                mergeActorState(*primaryRuntime, actorState, true);
+                queueSnapshot(*primaryRuntime, actorState, list);
+                rememberServerSpawnedActorTimestamp(actorState.mpNum, list.serverTimestamp);
+                indexActorNetId(primaryRuntime->actorNetId, oldCellId, destCellId);
+                Log(Debug::Info) << "[MP] ActorSync v2: cell index change"
+                                 << " actorNetId=" << primaryRuntime->actorNetId
+                                 << " refId=" << actorState.refId
+                                 << " mpNum=" << actorState.mpNum
+                                 << " from=" << oldCellId
+                                 << " to=" << destCellId;
+                continue;
+            }
+
             ActorRuntime runtime;
             if (srcIt != mCells.end())
             {
@@ -667,6 +1045,14 @@ namespace mwmp
             }
 
             const std::string actorKey = makeActorKey(actorState);
+            if (ActorRuntime* primaryRuntime = findPrimaryActorRuntime(actorState))
+            {
+                mergeActorState(*primaryRuntime, actorState, true);
+                queueSnapshot(*primaryRuntime, actorState, list);
+                rememberServerSpawnedActorTimestamp(actorState.mpNum, list.serverTimestamp);
+                continue;
+            }
+
             auto runtimeIt = cell.actors.find(actorKey);
             if (runtimeIt == cell.actors.end() && actorState.mpNum != 0)
             {
@@ -696,6 +1082,99 @@ namespace mwmp
         }
     }
 
+    void ActorSync::onActorPositionV2Update(const ActorPositionV2List& list)
+    {
+        if (list.protocolVersion != ActorSyncProtocolVersionV2)
+        {
+            Log(Debug::Warning) << "[MP] ActorSync: ignored unsupported ActorPositionV2 protocol="
+                                << list.protocolVersion;
+            return;
+        }
+
+        std::size_t accepted = 0;
+        std::size_t missingIdentity = 0;
+        std::size_t stale = 0;
+        uint32_t firstMissingActorNetId = 0;
+        for (const CompactActorSnapshot& snapshot : list.snapshots)
+        {
+            auto runtimeIt = mActorsByNetId.find(snapshot.actorNetId);
+            if (runtimeIt == mActorsByNetId.end())
+            {
+                ++missingIdentity;
+                if (firstMissingActorNetId == 0)
+                    firstMissingActorNetId = snapshot.actorNetId;
+                ++mActorV2MissingIdentityByNetIdWindow[snapshot.actorNetId];
+                continue;
+            }
+
+            ActorRuntime& runtime = runtimeIt->second;
+            if (runtime.lastServerTimestamp != 0
+                && list.serverTimestamp != 0
+                && list.serverTimestamp < runtime.lastServerTimestamp)
+            {
+                ++stale;
+                continue;
+            }
+
+            BaseActor actorState = runtime.state;
+            actorState.position = snapshot.position;
+            actorState.velocity = snapshot.velocity;
+            actorState.animFlags.movementFlags = snapshot.movementFlags;
+            actorState.animFlags.animFwd = dequantizeActorAxis(snapshot.animFwd);
+            actorState.animFlags.animSide = dequantizeActorAxis(snapshot.animSide);
+            applyActorPresentationFlags(actorState, snapshot.presentationFlags);
+
+            ActorList synthetic;
+            synthetic.cellId = actorState.cellId;
+            synthetic.authorityGuid = list.authorityGuid;
+            synthetic.authorityGeneration = list.authorityGeneration;
+            synthetic.snapshotSequence = list.sequence;
+            synthetic.serverTimestamp = list.serverTimestamp;
+            mergeActorState(runtime, actorState, true);
+            queueSnapshot(runtime, actorState, synthetic);
+            rememberServerSpawnedActorTimestamp(actorState.mpNum, list.serverTimestamp);
+            ++accepted;
+        }
+
+        mActorV2SnapshotsWindow += accepted;
+        mActorV2MissingIdentityWindow += missingIdentity;
+        mActorV2StaleWindow += stale;
+        const uint64_t now = currentClientTimeMs();
+        if (mActorV2DiagnosticsLastLogMs == 0)
+            mActorV2DiagnosticsLastLogMs = now;
+        else if (now - mActorV2DiagnosticsLastLogMs >= 1000)
+        {
+            uint32_t noisiestMissingActorNetId = 0;
+            std::size_t noisiestMissingCount = 0;
+            for (const auto& [actorNetId, count] : mActorV2MissingIdentityByNetIdWindow)
+            {
+                if (count > noisiestMissingCount)
+                {
+                    noisiestMissingActorNetId = actorNetId;
+                    noisiestMissingCount = count;
+                }
+            }
+            Log(Debug::Info) << "[MP] ActorSync v2: position receive"
+                             << " snapshots=" << mActorV2SnapshotsWindow
+                             << " missingIdentity=" << mActorV2MissingIdentityWindow
+                             << " firstMissingActorNetId=" << firstMissingActorNetId
+                             << " noisiestMissingActorNetId=" << noisiestMissingActorNetId
+                             << " noisiestMissingCount=" << noisiestMissingCount
+                             << " stale=" << mActorV2StaleWindow
+                             << " identityTransformPreserved=" << mActorV2IdentityTransformPreservedWindow
+                             << " identityZeroTransformSkipped=" << mActorV2IdentityZeroTransformSkippedWindow
+                             << " primaryActors=" << mActorsByNetId.size()
+                             << " seq=" << list.sequence;
+            mActorV2DiagnosticsLastLogMs = now;
+            mActorV2SnapshotsWindow = 0;
+            mActorV2MissingIdentityWindow = 0;
+            mActorV2StaleWindow = 0;
+            mActorV2IdentityTransformPreservedWindow = 0;
+            mActorV2IdentityZeroTransformSkippedWindow = 0;
+            mActorV2MissingIdentityByNetIdWindow.clear();
+        }
+    }
+
     void ActorSync::onActorAnimFlagsUpdate(const ActorList& list)
     {
         auto& cell = mCells[list.cellId];
@@ -707,7 +1186,7 @@ namespace mwmp
 
         for (const auto& actorState : list.actors)
         {
-            auto& runtime = cell.actors[makeActorKey(actorState)];
+            auto& runtime = runtimeForPacketActor(list.cellId, cell, actorState);
             mergeActorState(runtime, actorState, false);
             runtime.state.animFlags = actorState.animFlags;
         }
@@ -724,7 +1203,7 @@ namespace mwmp
 
         for (const auto& actorState : list.actors)
         {
-            auto& runtime = cell.actors[makeActorKey(actorState)];
+            auto& runtime = runtimeForPacketActor(list.cellId, cell, actorState);
             mergeActorState(runtime, actorState, false);
             runtime.state.animPlay = actorState.animPlay;
             runtime.pendingAnimPlay = true;
@@ -744,7 +1223,7 @@ namespace mwmp
 
         for (const auto& actorState : list.actors)
         {
-            auto& runtime = cell.actors[makeActorKey(actorState)];
+            auto& runtime = runtimeForPacketActor(list.cellId, cell, actorState);
             mergeActorState(runtime, actorState, false);
             runtime.state.attack = actorState.attack;
             runtime.pendingAttack = true;
@@ -768,7 +1247,7 @@ namespace mwmp
 
         for (const auto& actorState : list.actors)
         {
-            auto& runtime = cell.actors[makeActorKey(actorState)];
+            auto& runtime = runtimeForPacketActor(list.cellId, cell, actorState);
             mergeActorState(runtime, actorState, false);
             runtime.state.cast = actorState.cast;
             runtime.pendingCast = true;
@@ -791,7 +1270,7 @@ namespace mwmp
 
         for (const auto& actorState : list.actors)
         {
-            auto& runtime = cell.actors[makeActorKey(actorState)];
+            auto& runtime = runtimeForPacketActor(list.cellId, cell, actorState);
             const bool wasDead = runtime.state.isDead || runtime.deathAlreadyApplied;
             const float previousHealth = runtime.state.dynamicStats.health.current;
             mergeActorState(runtime, actorState, false);
@@ -822,7 +1301,7 @@ namespace mwmp
 
         for (const auto& actorState : list.actors)
         {
-            auto& runtime = cell.actors[makeActorKey(actorState)];
+            auto& runtime = runtimeForPacketActor(list.cellId, cell, actorState);
             mergeActorState(runtime, actorState, false);
             runtime.state.equipment = actorState.equipment;
         }
@@ -839,7 +1318,7 @@ namespace mwmp
 
         for (const auto& actorState : list.actors)
         {
-            auto& runtime = cell.actors[makeActorKey(actorState)];
+            auto& runtime = runtimeForPacketActor(list.cellId, cell, actorState);
             mergeActorState(runtime, actorState, false);
             runtime.state.dynamicStats = actorState.dynamicStats;
             runtime.state.isDead = actorState.isDead;
@@ -861,7 +1340,7 @@ namespace mwmp
 
         for (const auto& actorState : list.actors)
         {
-            auto& runtime = cell.actors[makeActorKey(actorState)];
+            auto& runtime = runtimeForPacketActor(list.cellId, cell, actorState);
             mergeActorState(runtime, actorState, false);
             runtime.state.ai = actorState.ai;
         }
@@ -1350,6 +1829,7 @@ namespace mwmp
 
     void ActorSync::queueSnapshot(ActorRuntime& actor, const BaseActor& state, const ActorList& list)
     {
+        actor.hasAuthoritativeTransform = true;
         BufferedSnapshot snapshot;
         snapshot.position = state.position;
         snapshot.velocity = state.velocity;
@@ -1980,9 +2460,47 @@ namespace mwmp
             };
 
             auto sendPositionChunk = [&](ActorList& chunk) {
-                PacketActorPosition positionPacket;
-                positionPacket.setActorList(&chunk);
-                mClient.sendUnreliable(positionPacket.encode());
+                ActorPositionV2List compact;
+                compact.protocolVersion = ActorSyncProtocolVersionV2;
+                compact.authorityGuid = chunk.authorityGuid;
+                compact.authorityGeneration = chunk.authorityGeneration;
+                compact.sequence = chunk.snapshotSequence;
+                compact.serverTimestamp = chunk.serverTimestamp;
+                compact.snapshots.reserve(chunk.actors.size());
+
+                bool canUseCompact = !chunk.actors.empty();
+                for (const BaseActor& actor : chunk.actors)
+                {
+                    const uint32_t actorNetId = actorNetIdForActorState(actor);
+                    if (actorNetId == 0)
+                    {
+                        canUseCompact = false;
+                        break;
+                    }
+
+                    CompactActorSnapshot snapshot;
+                    snapshot.actorNetId = actorNetId;
+                    snapshot.position = actor.position;
+                    snapshot.velocity = actor.velocity;
+                    snapshot.movementFlags = static_cast<uint16_t>(actor.animFlags.movementFlags);
+                    snapshot.animFwd = quantizeActorAxis(actor.animFlags.animFwd);
+                    snapshot.animSide = quantizeActorAxis(actor.animFlags.animSide);
+                    snapshot.presentationFlags = makeActorPresentationFlags(actor);
+                    compact.snapshots.push_back(snapshot);
+                }
+
+                if (canUseCompact)
+                {
+                    PacketActorPositionV2 positionPacket;
+                    positionPacket.setPositionList(&compact);
+                    mClient.sendUnreliable(positionPacket.encode());
+                }
+                else
+                {
+                    PacketActorPosition positionPacket;
+                    positionPacket.setActorList(&chunk);
+                    mClient.sendUnreliable(positionPacket.encode());
+                }
                 ++chunksSent;
             };
 
@@ -2100,16 +2618,13 @@ namespace mwmp
                 cell.priorityPositionSendCursor = 0;
                 priorityCount = outgoing.actors.size();
                 sentActorCount = outgoing.actors.size();
-                chunksSent = 1;
                 for (const BaseActor& actor : outgoing.actors)
                 {
                     resetPositionSendAge(actor);
                     sentHeddvild = sentHeddvild || actor.refId == "heddvild";
                     sentMp2601 = sentMp2601 || actor.mpNum == 2601;
                 }
-                PacketActorPosition positionPacket;
-                positionPacket.setActorList(&outgoing);
-                mClient.sendUnreliable(positionPacket.encode());
+                sendPositionChunk(outgoing);
             }
 
             if (cell.positionDiagnosticsTimer >= 1.f)

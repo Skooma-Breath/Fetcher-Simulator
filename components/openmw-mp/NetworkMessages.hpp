@@ -94,6 +94,9 @@ namespace mwmp
         ActorSpellsActive   = 62,
         ActorStatsDynamic   = 63,
         ActorTest           = 64,
+        ActorIdentity       = 66,  // Reliable ActorSync v2 actorNetId/baseline map
+        ActorPositionV2     = 67,  // Compact ActorSync v2 movement snapshots
+        ActorIdentityAck    = 68,  // Client ack for ActorSync v2 identity bootstrap
         ActorCombatRequest  = 65,  // Non-authority client → server → authority: NPC hit event
 
         // --- Object ---

@@ -40,8 +40,10 @@
 #include <components/openmw-mp/Packets/Actor/PacketActorCombatRequest.hpp>
 #include <components/openmw-mp/Packets/Actor/PacketActorDeath.hpp>
 #include <components/openmw-mp/Packets/Actor/PacketActorEquipment.hpp>
+#include <components/openmw-mp/Packets/Actor/PacketActorIdentity.hpp>
 #include <components/openmw-mp/Packets/Actor/PacketActorList.hpp>
 #include <components/openmw-mp/Packets/Actor/PacketActorPosition.hpp>
+#include <components/openmw-mp/Packets/Actor/PacketActorPositionV2.hpp>
 #include <components/openmw-mp/Packets/Actor/PacketActorStatsDynamic.hpp>
 
 #include "network/Client.hpp"
@@ -312,6 +314,7 @@ void Main::onConnected()
     hs.playerName      = mPlayerName;
     hs.passwordHash    = mPasswordHash;
     hs.isRegistration  = mIsRegistration;
+    hs.actorSyncProtocolVersion = ActorSyncProtocolVersionV2;
     
     if (mUseKeypair)
     {
@@ -407,7 +410,8 @@ void Main::registerProtocolHandlers()
             mPlayerSync->localPlayer().guid = rsp.assignedGuid;
 
             Log(Debug::Info) << "[MP] Handshake accepted, guid=" << rsp.assignedGuid
-                             << " server=" << rsp.serverVersion;
+                             << " server=" << rsp.serverVersion
+                             << " actorSyncProtocol=" << rsp.actorSyncProtocolVersion;
             // mWorldReady is set when PacketCharacterList arrives.
         });
 
@@ -877,6 +881,16 @@ void Main::registerProtocolHandlers()
             mActorSync->onActorListUpdate(tmp);
         });
 
+    proto.registerHandler(PacketType::ActorIdentity,
+        [this](const uint8_t* data, size_t size)
+        {
+            ActorIdentityList tmp;
+            PacketActorIdentity pkt;
+            pkt.setIdentityList(&tmp);
+            if (!pkt.decode(data, size)) return;
+            mActorSync->onActorIdentityUpdate(tmp);
+        });
+
     proto.registerHandler(PacketType::ActorPosition,
         [this](const uint8_t* data, size_t size)
         {
@@ -885,6 +899,16 @@ void Main::registerProtocolHandlers()
             pkt.setActorList(&tmp);
             if (!pkt.decode(data, size)) return;
             mActorSync->onActorPositionUpdate(tmp);
+        });
+
+    proto.registerHandler(PacketType::ActorPositionV2,
+        [this](const uint8_t* data, size_t size)
+        {
+            ActorPositionV2List tmp;
+            PacketActorPositionV2 pkt;
+            pkt.setPositionList(&tmp);
+            if (!pkt.decode(data, size)) return;
+            mActorSync->onActorPositionV2Update(tmp);
         });
 
     proto.registerHandler(PacketType::ActorAnimFlags,

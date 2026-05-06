@@ -7,6 +7,7 @@
 #include <unordered_map>
 #include <unordered_set>
 #include <osg/Vec3f>
+#include <components/openmw-mp/Base/ActorSyncProtocol.hpp>
 #include <components/openmw-mp/Base/BaseActor.hpp>
 
 #include "../../mwworld/ptr.hpp"
@@ -37,8 +38,10 @@ namespace mwmp
 
         void onAuthorityUpdate(const ActorList& list);
 
+        void onActorIdentityUpdate(const ActorIdentityList& list);
         void onActorListUpdate(const ActorList& list);
         void onActorPositionUpdate(const ActorList& list);
+        void onActorPositionV2Update(const ActorPositionV2List& list);
         void onActorAnimFlagsUpdate(const ActorList& list);
         void onActorAnimPlay(const ActorList& list);
         void onActorAttack(const ActorList& list);
@@ -127,6 +130,8 @@ namespace mwmp
             // been emitted for the current boundActor.  Reset whenever a new
             // binding is established so the first confirmation is always logged.
             bool bindingLogged = false;
+            uint32_t actorNetId = 0;
+            bool hasAuthoritativeTransform = false;
         };
 
         struct CellRuntime
@@ -148,6 +153,11 @@ namespace mwmp
 
         void queueSnapshot(ActorRuntime& actor, const BaseActor& state, const ActorList& list);
         void mergeActorState(ActorRuntime& actor, const BaseActor& state, bool includeTransform);
+        uint32_t actorNetIdForActorState(const BaseActor& actor) const;
+        void rememberActorNetId(uint32_t actorNetId, const BaseActor& actor);
+        void indexActorNetId(uint32_t actorNetId, const std::string& oldCellId, const std::string& newCellId);
+        ActorRuntime* findPrimaryActorRuntime(const BaseActor& actor);
+        ActorRuntime& runtimeForPacketActor(const std::string& cellId, CellRuntime& cell, const BaseActor& actor);
         void advanceSmoothing(ActorRuntime& actor, float dt);
         void sendAuthoritativeActorUpdates(const std::string& cellId, CellRuntime& cell, float dt);
         bool shouldAcceptSnapshot(CellRuntime& cell, const ActorList& list, const char* packetName,
@@ -169,6 +179,16 @@ namespace mwmp
         std::unordered_map<std::string, uint32_t>    mMpNumsByLocalActor;
         std::unordered_map<uint32_t, MWWorld::Ptr>   mServerSpawnedActorsByMpNum;
         std::unordered_map<uint32_t, uint64_t>       mServerSpawnedActorLastTimestamps;
+        std::unordered_map<uint32_t, ActorRuntime>   mActorsByNetId;
+        std::unordered_map<std::string, std::unordered_set<uint32_t>> mCellActorIds;
+        std::unordered_map<std::string, uint32_t>    mActorNetIdsByKey;
+        uint64_t mActorV2DiagnosticsLastLogMs = 0;
+        std::size_t mActorV2SnapshotsWindow = 0;
+        std::size_t mActorV2MissingIdentityWindow = 0;
+        std::size_t mActorV2StaleWindow = 0;
+        std::size_t mActorV2IdentityTransformPreservedWindow = 0;
+        std::size_t mActorV2IdentityZeroTransformSkippedWindow = 0;
+        std::unordered_map<uint32_t, std::size_t> mActorV2MissingIdentityByNetIdWindow;
     };
 
 } // namespace mwmp

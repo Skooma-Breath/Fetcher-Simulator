@@ -20,6 +20,7 @@
 #include <components/openmw-mp/Base/BaseActor.hpp>
 #include <components/openmw-mp/Base/BaseObject.hpp>
 #include <components/openmw-mp/Base/BasePlayer.hpp>
+#include <components/openmw-mp/Base/ActorSyncProtocol.hpp>
 #include <components/openmw-mp/Base/DynamicRecord.hpp>
 #include <components/openmw-mp/NetworkMessages.hpp>
 #include <components/openmw-mp/Packets/Object/PacketDoorState.hpp>
@@ -60,6 +61,19 @@ struct ConnectedClient
 
     std::unordered_set<std::string> loadedActorCells; ///< empty falls back to player.cell
     uint32_t loadedActorCellsSequence = 0;
+    uint32_t actorSyncProtocolVersion = ActorSyncProtocolVersionV1;
+    std::unordered_set<uint32_t> actorV2IdentitySent;
+    std::unordered_set<uint32_t> actorV2IdentityAcked;
+    std::unordered_map<uint32_t, uint64_t> actorV2LastSentMs;
+    std::unordered_map<uint32_t, std::size_t> actorV2MissingIdentityByNetIdWindow;
+    uint64_t actorV2DiagnosticsLastLogMs = 0;
+    std::size_t actorV2IdentitySentWindow = 0;
+    std::size_t actorV2IdentityAckedWindow = 0;
+    std::size_t actorV2SnapshotsSentWindow = 0;
+    std::size_t actorV2BytesSentWindow = 0;
+    std::size_t actorV2DeferredWindow = 0;
+    std::size_t actorV2PositionSuppressedUntilIdentityKnownWindow = 0;
+    std::size_t actorV2TierCounts[5] = {};
 };
 
 // ---------------------------------------------------------------------------
@@ -220,6 +234,8 @@ private:
     void handleWeather          (ConnectedClient& c, const uint8_t* data, size_t size);
     void handleActorList        (ConnectedClient& c, const uint8_t* data, size_t size);
     void handleActorPosition    (ConnectedClient& c, const uint8_t* data, size_t size);
+    void handleActorPositionV2  (ConnectedClient& c, const uint8_t* data, size_t size);
+    void handleActorIdentityAck (ConnectedClient& c, const uint8_t* data, size_t size);
     void handleActorAnimFlags   (ConnectedClient& c, const uint8_t* data, size_t size);
     void handleActorAnimPlay    (ConnectedClient& c, const uint8_t* data, size_t size);
     void handleActorAttack      (ConnectedClient& c, const uint8_t* data, size_t size);
@@ -265,6 +281,7 @@ private:
     bool acceptPlacedObject(PlacedObject& object);
     bool grantInventoryItem(ConnectedClient& c, const std::string& refId, int count);
     struct ActorRegistryRecord;
+    struct CellActorState;
     bool worldMpNumInUse(uint32_t mpNum) const;
     std::optional<uint32_t> reserveWorldMpNum();
     void advanceWorldMpNumPast(uint32_t mpNum);
@@ -298,6 +315,12 @@ private:
     void sendActorAuthorityToClient(HSteamNetConnection conn, const std::string& cellId);
     void sendActorStateToClient(HSteamNetConnection conn, const std::string& cellId);
     void sendActorStateToInterestedClients(const std::string& cellId);
+    void sendActorIdentityToClient(HSteamNetConnection conn, const std::string& cellId, CellActorState& cellState);
+    void broadcastActorIdentityForCell(const std::string& cellId, CellActorState& cellState,
+        HSteamNetConnection except = k_HSteamNetConnection_Invalid);
+    void broadcastActorPositionV2ToCell(
+        const std::string& cellId, CellActorState& cellState, const ActorList& actorList,
+        HSteamNetConnection except = k_HSteamNetConnection_Invalid);
     void sendGameSettingsToClient(HSteamNetConnection conn, const std::string& cellId);
     bool validateActorUpdate(const ConnectedClient& c, const ActorList& actorList, const char* packetName);
     bool clientHasActorCellLoaded(const ConnectedClient& client, const std::string& cellId) const;
@@ -313,6 +336,7 @@ private:
         // has processed the spawn notification (timing race).
         uint64_t serverSpawnTime = 0;
         bool persistent = false;
+        uint32_t actorNetId = 0;
     };
 
     struct CellActorState
@@ -333,6 +357,12 @@ private:
         const std::string& destinationCellId,
         std::unordered_set<std::string>& changedCellIds);
     void broadcastActorListForCell(const std::string& cellId, CellActorState& cellState);
+    uint32_t assignActorNetId(const BaseActor& actor);
+    uint32_t ensureActorNetId(ActorRegistryRecord& record, const std::string& cellId);
+    ActorIdentityList buildActorIdentityList(
+        const std::string& cellId,
+        CellActorState& cellState,
+        std::unordered_map<std::string, ActorRegistryRecord>& actors);
     void upsertSpawnedActorDynamicRecordLinkIfNeeded(const BaseActor& actor);
     void rememberActorLocation(const BaseActor& actor, const std::string& cellId);
     void forgetActorLocation(const BaseActor& actor, const std::string& cellId = {});
@@ -401,9 +431,12 @@ private:
         std::unordered_map<std::string, StoredDynamicRecord> dynamicRecords;
         std::unordered_map<std::string, CellActorState> actorCells;
         std::unordered_map<std::string, std::string> actorLocations;
+        std::unordered_map<std::string, uint32_t> actorNetIdsByKey;
+        std::unordered_map<uint32_t, std::string> actorKeysByNetId;
         std::unordered_map<std::string, std::unordered_map<std::string, ActorRegistryRecord>> deadVanillaActorCells;
         uint64_t nextObjectMpNum = 1;
         uint64_t nextActorMpNum = 1;
+        uint32_t nextActorNetId = FirstServerAssignedActorNetId;
         uint64_t nextDynamicRecordSequence = 1;
 
         // Weather — reported by the host (guid 1) and relayed to others.
