@@ -1802,12 +1802,37 @@ bool MPServer::rejectStaleAliveVanillaActor(
     if (actor.mpNum != 0 || actor.refId.empty() || actor.isDead)
         return false;
 
+    const std::string actorKey = makeActorKey(actor);
+    for (const auto& [liveCellId, liveCellState] : mWorld.actorCells)
+    {
+        const auto liveIt = liveCellState.actors.find(actorKey);
+        if (liveIt == liveCellState.actors.end() || liveIt->second.actor.isDead)
+            continue;
+
+        if (std::strcmp(packetName, "ActorList") == 0
+            || std::strcmp(packetName, "ActorAttack") == 0
+            || std::strcmp(packetName, "ActorCellChange") == 0)
+        {
+            Log(Debug::Info) << "[Server] " << packetName
+                             << " allowed alive vanilla actor despite dead memory"
+                             << " from=" << sender.name
+                             << " refId=" << actor.refId
+                             << " refNum=" << actor.refNum
+                             << " incomingCell=" << incomingCellId
+                             << " liveCell=" << liveCellId;
+        }
+        return false;
+    }
+
     std::string deadCellId;
     const ActorRegistryRecord* deadRecord = findDeadVanillaActor(actor, &deadCellId);
     if (!deadRecord)
         return false;
 
-    Log(Debug::Verbose) << "[Server] " << packetName
+    const bool importantPacket = std::strcmp(packetName, "ActorList") == 0
+        || std::strcmp(packetName, "ActorAttack") == 0
+        || std::strcmp(packetName, "ActorCellChange") == 0;
+    Log(importantPacket ? Debug::Info : Debug::Verbose) << "[Server] " << packetName
                         << " ignored stale alive vanilla actor from " << sender.name
                         << " refId=" << actor.refId
                         << " refNum=" << actor.refNum

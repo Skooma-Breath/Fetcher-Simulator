@@ -124,6 +124,11 @@ namespace mwmp
             // Briefly suppress authoritative lower-body group sync so local hit/attack
             // transitions can finish without being immediately overwritten.
             float animGroupHoldTimer = 0.f;
+            // Non-authority attack replay holds. Attack packets are reliable events,
+            // while presentation/position are delayed streams; these short holds keep
+            // the visible weapon and stop pose stable through the replayed swing.
+            float attackDrawHoldTimer = 0.f;
+            float attackLocomotionHoldTimer = 0.f;
             // Authority side: seconds since this actor was last included in an
             // ActorPosition packet. Dense-cell scheduling uses this to avoid
             // starving active actors behind a large high-priority set.
@@ -172,6 +177,10 @@ namespace mwmp
         void indexActorNetId(uint32_t actorNetId, const std::string& oldCellId, const std::string& newCellId);
         ActorRuntime* findPrimaryActorRuntime(const BaseActor& actor);
         ActorRuntime& runtimeForPacketActor(const std::string& cellId, CellRuntime& cell, const BaseActor& actor);
+        MWWorld::Ptr resolvePacketActorBinding(const std::string& packetCellId, CellRuntime& cell,
+            const BaseActor& actor, const char* packetName);
+        void logWatchedBorderActor(const char* event, const std::string& packetCellId, const BaseActor& packetActor,
+            const ActorRuntime* runtime, const MWWorld::Ptr& resolvedPtr, const char* source) const;
         void advanceSmoothing(ActorRuntime& actor, float dt);
         void sendAuthoritativeActorUpdates(const std::string& cellId, CellRuntime& cell, float dt);
         bool shouldAcceptSnapshot(CellRuntime& cell, const ActorList& list, const char* packetName,

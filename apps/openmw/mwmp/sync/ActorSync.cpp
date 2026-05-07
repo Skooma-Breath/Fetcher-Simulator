@@ -190,9 +190,24 @@ namespace
             || group.find("knock") != std::string::npos;
     }
 
+    bool isWatchedBorderActor(const mwmp::BaseActor& actor, const std::string& packetCellId);
+
     bool isWatchedPresentationActor(const mwmp::BaseActor& actor, uint32_t actorNetId)
     {
-        return actor.refId == "heddvild" || actor.mpNum == 2601 || actorNetId == 2601;
+        return actor.refId == "heddvild" || actor.mpNum == 2601 || actorNetId == 2601
+            || isWatchedBorderActor(actor, actor.cellId);
+    }
+
+    bool isWatchedBorderCell(const std::string& cellId)
+    {
+        return cellId == "EXT:0,-7" || cellId == "EXT:-1,-7";
+    }
+
+    bool isWatchedBorderActor(const mwmp::BaseActor& actor, const std::string& packetCellId)
+    {
+        if (actor.refId.find("imperial guard") == std::string::npos)
+            return false;
+        return isWatchedBorderCell(packetCellId) || isWatchedBorderCell(actor.cellId);
     }
 
     mwmp::ActorPresentationSnapshot makePresentationSnapshot(const mwmp::BaseActor& actor, uint32_t actorNetId)
@@ -554,6 +569,82 @@ namespace mwmp
         return runtime;
     }
 
+    MWWorld::Ptr ActorSync::resolvePacketActorBinding(const std::string& packetCellId, CellRuntime& cell,
+        const BaseActor& actor, const char* packetName)
+    {
+        if (ActorRuntime* primaryRuntime = findPrimaryActorRuntime(actor))
+        {
+            const std::string targetCellId = primaryRuntime->state.cellId.empty()
+                ? packetCellId : primaryRuntime->state.cellId;
+            const bool resolved = resolveActorBinding(targetCellId, *primaryRuntime);
+            MWWorld::Ptr ptr = resolved ? primaryRuntime->boundActor : MWWorld::Ptr();
+            logWatchedBorderActor(packetName, packetCellId, actor, primaryRuntime, ptr,
+                resolved ? "primary" : "primary-unbound");
+            return ptr;
+        }
+
+        const std::string actorKey = makeActorKey(actor);
+        auto runtimeIt = cell.actors.find(actorKey);
+        if (runtimeIt != cell.actors.end())
+        {
+            const bool resolved = resolveActorBinding(packetCellId, runtimeIt->second);
+            MWWorld::Ptr ptr = resolved ? runtimeIt->second.boundActor : MWWorld::Ptr();
+            logWatchedBorderActor(packetName, packetCellId, actor, &runtimeIt->second, ptr,
+                resolved ? "cell-runtime" : "cell-runtime-unbound");
+            return ptr;
+        }
+
+        MWWorld::Ptr ptr;
+        if (MWBase::World* world = MWBase::Environment::get().getWorld())
+        {
+            try
+            {
+                ptr = world->getPtr(ESM::RefId::stringRefId(actor.refId), false);
+            }
+            catch (...) {}
+        }
+
+        logWatchedBorderActor(packetName, packetCellId, actor, nullptr, ptr,
+            ptr.isEmpty() ? "missing" : "world-refId");
+        return ptr;
+    }
+
+    void ActorSync::logWatchedBorderActor(const char* event, const std::string& packetCellId,
+        const BaseActor& packetActor, const ActorRuntime* runtime, const MWWorld::Ptr& resolvedPtr,
+        const char* source) const
+    {
+        if (!isWatchedBorderActor(packetActor, packetCellId)
+            && (runtime == nullptr || !isWatchedBorderActor(runtime->state, packetCellId)))
+            return;
+
+        const uint32_t actorNetId = runtime != nullptr && runtime->actorNetId != 0
+            ? runtime->actorNetId : actorNetIdForActorState(packetActor);
+        const std::string packetActorCell = packetActor.cellId.empty() ? packetCellId : packetActor.cellId;
+        const std::string runtimeCell = runtime != nullptr ? runtime->state.cellId : std::string();
+        const std::string boundCell = runtime != nullptr && !runtime->boundActor.isEmpty()
+            ? cellIdForPtr(runtime->boundActor) : std::string();
+        const std::string resolvedCell = !resolvedPtr.isEmpty() ? cellIdForPtr(resolvedPtr) : std::string();
+        const uint64_t latestPositionTimestamp = runtime != nullptr ? runtime->lastServerTimestamp : 0;
+        const uint64_t latestPresentationTimestamp = runtime != nullptr ? runtime->lastPresentationServerTimestamp : 0;
+
+        Log(Debug::Info) << "[MP] ActorSync border watch: " << event
+                         << " source=" << source
+                         << " actorNetId=" << actorNetId
+                         << " refId=" << packetActor.refId
+                         << " refNum=" << packetActor.refNum
+                         << " mpNum=" << packetActor.mpNum
+                         << " packetCell=" << packetCellId
+                         << " actorCell=" << packetActorCell
+                         << " runtimeCell=" << runtimeCell
+                         << " boundCell=" << boundCell
+                         << " resolvedCell=" << resolvedCell
+                         << " latestPositionTs=" << latestPositionTimestamp
+                         << " latestPresentationTs=" << latestPresentationTimestamp
+                         << " hasTransform=" << (runtime != nullptr && runtime->hasAuthoritativeTransform)
+                         << " boundEmpty=" << (runtime == nullptr || runtime->boundActor.isEmpty())
+                         << " resolvedEmpty=" << resolvedPtr.isEmpty();
+    }
+
     void ActorSync::update(float dt)
     {
         std::size_t primaryActors = 0;
@@ -733,6 +824,8 @@ namespace mwmp
                 auto runtimeIt = mActorsByNetId.find(record.actorNetId);
                 if (runtimeIt != mActorsByNetId.end())
                 {
+                    logWatchedBorderActor("identity-removed", list.cellId, actorState, &runtimeIt->second,
+                        runtimeIt->second.boundActor, "primary");
                     indexActorNetId(record.actorNetId, runtimeIt->second.state.cellId, {});
                     mActorsByNetId.erase(runtimeIt);
                     ++removed;
@@ -843,6 +936,9 @@ namespace mwmp
             }
             rememberServerSpawnedActorTimestamp(actorState.mpNum, list.serverTimestamp);
             indexActorNetId(record.actorNetId, oldCellId, actorState.cellId);
+            logWatchedBorderActor(!hadRuntime ? "identity-baseline"
+                    : (oldCellId != actorState.cellId ? "identity-migrated" : "identity-reused"),
+                list.cellId, actorState, &runtime, runtime.boundActor, "identity");
             mActorsByNetId[record.actorNetId] = std::move(runtime);
         }
 
@@ -969,6 +1065,8 @@ namespace mwmp
                 rememberServerSpawnedActorTimestamp(actorState.mpNum, list.serverTimestamp);
                 rememberActorNetId(actorNetId, runtime.state);
                 indexActorNetId(actorNetId, oldCellId, list.cellId);
+                logWatchedBorderActor(hadPrimaryRuntime ? "ActorList-primary-reused" : "ActorList-primary-promoted",
+                    list.cellId, actorState, &runtime, runtime.boundActor, "ActorList");
                 mActorsByNetId[actorNetId] = std::move(runtime);
                 continue;
             }
@@ -1220,6 +1318,23 @@ namespace mwmp
             mergeActorState(runtime, actorState, true);
             queueSnapshot(runtime, actorState, synthetic);
             rememberServerSpawnedActorTimestamp(actorState.mpNum, list.serverTimestamp);
+            if (isWatchedBorderActor(runtime.state, runtime.state.cellId))
+            {
+                Log(Debug::Verbose) << "[MP] ActorSync border watch: ActorPositionV2"
+                                    << " source=primary"
+                                    << " actorNetId=" << snapshot.actorNetId
+                                    << " refId=" << runtime.state.refId
+                                    << " refNum=" << runtime.state.refNum
+                                    << " mpNum=" << runtime.state.mpNum
+                                    << " runtimeCell=" << runtime.state.cellId
+                                    << " boundCell=" << cellIdForPtr(runtime.boundActor)
+                                    << " latestPositionTs=" << runtime.lastServerTimestamp
+                                    << " latestPresentationTs=" << runtime.lastPresentationServerTimestamp
+                                    << " pos=(" << runtime.state.position.pos[0]
+                                    << "," << runtime.state.position.pos[1]
+                                    << "," << runtime.state.position.pos[2] << ")"
+                                    << " seq=" << list.sequence;
+            }
             ++accepted;
         }
 
@@ -1353,13 +1468,17 @@ namespace mwmp
                 Log(Debug::Info) << "[MP] ActorSync v2: presentation apply"
                                  << " actorNetId=" << snapshot.actorNetId
                                  << " refId=" << runtime.state.refId
+                                 << " refNum=" << runtime.state.refNum
                                  << " mpNum=" << runtime.state.mpNum
+                                 << " cell=" << runtime.state.cellId
+                                 << " boundCell=" << cellIdForPtr(runtime.boundActor)
                                  << " moving=" << runtime.state.isMoving
                                  << " fwd=" << runtime.state.animFlags.animFwd
                                  << " side=" << runtime.state.animFlags.animSide
                                  << " movementFlags=" << runtime.state.animFlags.movementFlags
                                  << " group='" << runtime.state.animFlags.currentAnimGroup << "'"
                                  << " flags=" << static_cast<unsigned>(snapshot.presentationFlags)
+                                 << " latestPositionTs=" << runtime.lastServerTimestamp
                                  << " ts=" << list.serverTimestamp;
             }
 
@@ -1434,6 +1553,8 @@ namespace mwmp
         {
             auto& runtime = runtimeForPacketActor(list.cellId, cell, actorState);
             mergeActorState(runtime, actorState, false);
+            logWatchedBorderActor("ActorAttack", list.cellId, actorState, &runtime, runtime.boundActor,
+                runtime.actorNetId != 0 ? "primary-or-v2" : "cell-runtime");
             runtime.state.attack = actorState.attack;
             runtime.pendingAttack = true;
             // The authority already does edge detection, so each received packet
@@ -1582,23 +1703,8 @@ namespace mwmp
                 if (actorState.attack.damage <= 0.f)
                     continue;
 
-                MWWorld::Ptr attacker;
-                auto cellIt = mCells.find(list.cellId);
-                if (cellIt != mCells.end())
-                {
-                    const std::string actorKey = makeActorKey(actorState);
-                    auto runtimeIt = cellIt->second.actors.find(actorKey);
-                    if (runtimeIt != cellIt->second.actors.end() && resolveActorBinding(list.cellId, runtimeIt->second))
-                        attacker = runtimeIt->second.boundActor;
-                }
-                if (attacker.isEmpty())
-                {
-                    try
-                    {
-                        attacker = world->getPtr(ESM::RefId::stringRefId(actorState.refId), false);
-                    }
-                    catch (...) {}
-                }
+                MWWorld::Ptr attacker = resolvePacketActorBinding(list.cellId, cell, actorState,
+                    "CombatRequestDamage");
 
                 MWWorld::Ptr weapon = getEquippedWeapon(attacker);
                 const osg::Vec3f hitPos = resolveReplicatedHitPos(player,
@@ -1612,13 +1718,28 @@ namespace mwmp
                     ? MWMechanics::DamageSourceType::Ranged
                     : (actorState.attack.type == 1 ? MWMechanics::DamageSourceType::Magical
                                                    : MWMechanics::DamageSourceType::Melee);
+                if (attacker.isEmpty() && isMeleeAttackType(actorState.attack.type))
+                {
+                    Log(Debug::Warning) << "[MP] ActorSync: skipped NPC damage with missing melee attacker"
+                                        << " attacker=" << actorState.refId
+                                        << " refNum=" << actorState.refNum
+                                        << " mpNum=" << actorState.mpNum
+                                        << " actorNetId=" << actorNetIdForActorState(actorState)
+                                        << " packetCell=" << list.cellId;
+                    continue;
+                }
+
                 const float attackerDistanceSq = distanceSquared(attacker, player);
                 if (isMeleeAttackType(actorState.attack.type)
                     && attackerDistanceSq > kMaxReplicatedMeleeHitDistance * kMaxReplicatedMeleeHitDistance)
                 {
                     Log(Debug::Warning) << "[MP] ActorSync: skipped NPC damage outside melee range"
                                         << " attacker=" << actorState.refId
+                                        << " refNum=" << actorState.refNum
                                         << " mpNum=" << actorState.mpNum
+                                        << " actorNetId=" << actorNetIdForActorState(actorState)
+                                        << " packetCell=" << list.cellId
+                                        << " attackerCell=" << cellIdForPtr(attacker)
                                         << " distance=" << std::sqrt(attackerDistanceSq)
                                         << " max=" << kMaxReplicatedMeleeHitDistance;
                     continue;
@@ -1636,7 +1757,11 @@ namespace mwmp
                                  << " damage=" << actorState.attack.damage
                                  << " stat=" << (actorState.attack.healthDamage ? "health" : "fatigue")
                                  << " attacker=" << actorState.refId
+                                 << " attackerRefNum=" << actorState.refNum
                                  << " attackerMpNum=" << actorState.mpNum
+                                 << " actorNetId=" << actorNetIdForActorState(actorState)
+                                 << " packetCell=" << list.cellId
+                                 << " attackerCell=" << cellIdForPtr(attacker)
                                  << " distance=" << (attackerDistanceSq >= 0.f ? std::sqrt(attackerDistanceSq) : -1.f);
 
                 if (actorState.attack.healthDamage && actorState.attack.type != 1)
@@ -1704,24 +1829,8 @@ namespace mwmp
 
         for (const BaseActor& actorState : list.actors)
         {
-            MWWorld::Ptr victim;
-            auto cellIt = mCells.find(list.cellId);
-            if (cellIt != mCells.end())
-            {
-                const std::string actorKey = makeActorKey(actorState);
-                auto runtimeIt = cellIt->second.actors.find(actorKey);
-                if (runtimeIt != cellIt->second.actors.end() && resolveActorBinding(list.cellId, runtimeIt->second))
-                    victim = runtimeIt->second.boundActor;
-            }
-
-            if (victim.isEmpty())
-            {
-                try
-                {
-                    victim = world->getPtr(ESM::RefId::stringRefId(actorState.refId), false);
-                }
-                catch (...) {}
-            }
+            MWWorld::Ptr victim = resolvePacketActorBinding(list.cellId, cell, actorState,
+                "CombatRequestVictim");
 
             if (victim.isEmpty())
                 continue;
@@ -2076,7 +2185,9 @@ namespace mwmp
         actor.state.refId = state.refId;
         actor.state.refNum = state.refNum;
         actor.state.mpNum = state.mpNum;
-        actor.state.cellId = state.cellId;
+        // V2 identity/position own cross-cell placement; reliable events may arrive from the previous cell.
+        if (includeTransform || actor.actorNetId == 0 || actor.state.cellId.empty())
+            actor.state.cellId = state.cellId;
 
         if (includeTransform)
         {
@@ -2373,6 +2484,8 @@ namespace mwmp
         actor.lastAttackPressed = false;
         actor.pendingAttack = false;
         actor.animGroupHoldTimer = 0.f;
+        actor.attackDrawHoldTimer = 0.f;
+        actor.attackLocomotionHoldTimer = 0.f;
         actor.deathAlreadyApplied = true;
         actor.deathFromRealtimePacket = false;
     }
@@ -3232,8 +3345,13 @@ namespace mwmp
             return false;
 
         const bool expectsServerSpawn = actor.state.mpNum != 0;
+        const bool expectsV2VanillaCrossCellMove = actor.actorNetId != 0
+            && actor.state.mpNum == 0
+            && actor.state.refNum != 0;
+        const bool canMoveBoundActorAcrossCells = expectsServerSpawn || expectsV2VanillaCrossCellMove;
         const bool logTrackedActor = actor.state.refId == "fargoth"
-            || actor.state.refId.find("spawner_") != std::string::npos;
+            || actor.state.refId.find("spawner_") != std::string::npos
+            || isWatchedBorderActor(actor.state, cellId);
 
         MWWorld::World& worldImp = static_cast<MWWorld::World&>(*world);
         MWWorld::CellStore* targetCell = findActiveCellById(worldImp, cellId);
@@ -3249,6 +3367,9 @@ namespace mwmp
                 return false;
 
             const std::string currentBoundCellId = cellIdForPtr(actor.boundActor);
+            if (!canMoveBoundActorAcrossCells)
+                return false;
+
             if (expectsServerSpawn && actor.lastServerTimestamp != 0)
             {
                 const auto latestTimestampIt = mServerSpawnedActorLastTimestamps.find(actor.state.mpNum);
@@ -3293,12 +3414,18 @@ namespace mwmp
                 return false;
 
             actor.bindingLogged = false;
-            rememberServerSpawnedActor(cellId, actor.boundActor, actor.state.mpNum);
+            if (expectsServerSpawn)
+                rememberServerSpawnedActor(cellId, actor.boundActor, actor.state.mpNum);
             applyBootstrapDeathState(actor);
             Log(Debug::Info) << "[MP] ActorSync: moved bound actor between cells"
                              << " cell=" << cellId
                              << " refId=" << actor.state.refId
+                             << " refNum=" << actor.state.refNum
                              << " mpNum=" << actor.state.mpNum
+                             << " actorNetId=" << actor.actorNetId
+                             << " from=" << currentBoundCellId
+                             << " runtimeTs=" << actor.lastServerTimestamp
+                             << " presentationTs=" << actor.lastPresentationServerTimestamp
                              << " pos=(" << movePos.pos[0] << "," << movePos.pos[1] << "," << movePos.pos[2] << ")";
             return true;
         };
@@ -3306,9 +3433,10 @@ namespace mwmp
         if (!actor.boundActor.isEmpty() && matchesActor(actor.boundActor, actor.state))
         {
             const std::string boundCellId = cellIdForPtr(actor.boundActor);
-            if (expectsServerSpawn && !boundCellId.empty() && boundCellId != cellId)
+            if (canMoveBoundActorAcrossCells && !boundCellId.empty() && boundCellId != cellId)
             {
-                rememberServerSpawnedActor(boundCellId, actor.boundActor, actor.state.mpNum);
+                if (expectsServerSpawn)
+                    rememberServerSpawnedActor(boundCellId, actor.boundActor, actor.state.mpNum);
                 return moveBoundActorToTargetCell();
             }
 
@@ -3422,6 +3550,8 @@ namespace mwmp
             }
             else
             {
+                if (canMoveBoundActorAcrossCells)
+                    return moveBoundActorToTargetCell();
                 if (expectsServerSpawn)
                     rememberServerSpawnedActor(boundCellId, actor.boundActor, actor.state.mpNum);
                 return false;
@@ -3525,7 +3655,10 @@ namespace mwmp
         MWBase::World* world = MWBase::Environment::get().getWorld();
         if (!world)
             return;
-        actor.animGroupHoldTimer = std::max(0.f, actor.animGroupHoldTimer - MWBase::Environment::get().getFrameDuration());
+        const float frameDuration = MWBase::Environment::get().getFrameDuration();
+        actor.animGroupHoldTimer = std::max(0.f, actor.animGroupHoldTimer - frameDuration);
+        actor.attackDrawHoldTimer = std::max(0.f, actor.attackDrawHoldTimer - frameDuration);
+        actor.attackLocomotionHoldTimer = std::max(0.f, actor.attackLocomotionHoldTimer - frameDuration);
 
         // Mark this actor as a network-driven puppet so other systems
         // (e.g. updateContinuousVfx) can skip magnitude-based checks
@@ -3559,7 +3692,9 @@ namespace mwmp
         // Only drive movement positions when there is a real locomotion input.
         const float fwdMag  = std::abs(actor.state.animFlags.animFwd);
         const float sideMag = std::abs(actor.state.animFlags.animSide);
+        const bool suppressAttackLocomotion = actor.attackLocomotionHoldTimer > 0.f || actor.pendingAttack;
         const bool shouldDriveLocomotion = !actor.state.isDead
+            && !suppressAttackLocomotion
             && actor.state.isMoving
             && (fwdMag > 0.1f || sideMag > 0.1f);
         movement.mPosition[0] = shouldDriveLocomotion ? actor.state.animFlags.animSide : 0.f;
@@ -3716,8 +3851,9 @@ namespace mwmp
         // packets — an NPC entering combat after the first snapshot would stay invisible.
         // hasWeaponDrawn / hasSpellReadied come from every 20 Hz position packet and
         // directly mirror stats.getDrawState() on the authority.
+        const bool forceAttackWeapon = actor.attackDrawHoldTimer > 0.f || actor.pendingAttack;
         MWMechanics::DrawState drawState = MWMechanics::DrawState::Nothing;
-        if (actor.state.hasWeaponDrawn)
+        if (actor.state.hasWeaponDrawn || forceAttackWeapon)
             drawState = MWMechanics::DrawState::Weapon;
         else if (actor.state.hasSpellReadied)
             drawState = MWMechanics::DrawState::Spell;
@@ -3925,6 +4061,8 @@ namespace mwmp
             actor.lastAttackPressed = false;
             actor.pendingAttack = false;
             actor.animGroupHoldTimer = 0.f;
+            actor.attackDrawHoldTimer = 0.f;
+            actor.attackLocomotionHoldTimer = 0.f;
             actor.deathAlreadyApplied = true;
             actor.deathFromRealtimePacket = false;
         }
@@ -3938,6 +4076,8 @@ namespace mwmp
             actor.appliedDeathAnimGroup.clear();
             actor.pendingAttack = false;
             actor.animGroupHoldTimer = 0.f;
+            actor.attackDrawHoldTimer = 0.f;
+            actor.attackLocomotionHoldTimer = 0.f;
         }
 
         const bool suppressLowerBodyGroupSync = hitFlags != 0 || actor.animGroupHoldTimer > 0.f || actor.pendingAttack || actor.pendingCast;
@@ -4075,6 +4215,14 @@ namespace mwmp
                 {
                     if (stats.getDrawState() != MWMechanics::DrawState::Weapon)
                         stats.setDrawState(MWMechanics::DrawState::Weapon);
+                    actor.attackDrawHoldTimer = std::max(actor.attackDrawHoldTimer, 0.85f);
+                    actor.attackLocomotionHoldTimer = std::max(actor.attackLocomotionHoldTimer, 0.35f);
+                    if (!actor.lastWeaponVisible)
+                    {
+                        actor.lastWeaponVisible = true;
+                        if (auto* npcAnim = dynamic_cast<MWRender::NpcAnimation*>(world->getAnimation(actor.boundActor)))
+                            npcAnim->equipmentChanged();
+                    }
 
                     if (MWRender::Animation* animation = world->getAnimation(actor.boundActor))
                     {
