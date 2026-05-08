@@ -67,8 +67,12 @@ namespace MWMechanics
         {
             if (!MWBase::Environment::get().getWorld()->getLOS(target, actor))
                 return false;
-            MWBase::Environment::get().getWindowManager()->pushGuiMode(
-                MWGui::GM_Dialogue, actor); // Arrest player when reached
+
+            MWBase::WindowManager* windowManager = MWBase::Environment::get().getWindowManager();
+            if (windowManager->containsMode(MWGui::GM_Dialogue))
+                return false;
+
+            windowManager->pushGuiMode(MWGui::GM_Dialogue, actor); // Arrest player when reached
             return true;
         }
 

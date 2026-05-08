@@ -1152,8 +1152,9 @@ namespace MWMechanics
 
         const auto mechanicsManager = MWBase::Environment::get().getMechanicsManager();
         const auto world = MWBase::Environment::get().getWorld();
+        const bool dialogueOpen = MWBase::Environment::get().getWindowManager()->containsMode(MWGui::GM_Dialogue);
 
-        if (actorClass.isClass(ptr, "Guard") && !creatureStats.getAiSequence().isInPursuit()
+        if (!dialogueOpen && actorClass.isClass(ptr, "Guard") && !creatureStats.getAiSequence().isInPursuit()
             && !creatureStats.getAiSequence().isInCombat()
             && creatureStats.getMagicEffects().getOrDefault(ESM::MagicEffect::CalmHumanoid).getMagnitude() == 0)
         {
