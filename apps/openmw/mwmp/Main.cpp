@@ -34,6 +34,7 @@
 #include <components/openmw-mp/Packets/Actor/PacketActorAnimFlags.hpp>
 #include <components/openmw-mp/Packets/Actor/PacketActorAnimPlay.hpp>
 #include <components/openmw-mp/Packets/Actor/PacketActorAttack.hpp>
+#include <components/openmw-mp/Packets/Actor/PacketActorAttackV2.hpp>
 #include <components/openmw-mp/Packets/Actor/PacketActorAuthority.hpp>
 #include <components/openmw-mp/Packets/Actor/PacketActorCast.hpp>
 #include <components/openmw-mp/Packets/Actor/PacketActorCellChange.hpp>
@@ -194,7 +195,11 @@ Main::Main()
 Main::~Main()
 {
     if (mClient && mClient->isConnected())
+    {
+        if (mPlayerSync)
+            mPlayerSync->flushPersistentStats();
         mClient->disconnect("Client shutdown");
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -385,7 +390,11 @@ bool Main::isConnected()
 void Main::disconnect(const std::string& reason)
 {
     if (mClient && mClient->isConnected())
+    {
+        if (mPlayerSync)
+            mPlayerSync->flushPersistentStats();
         mClient->disconnect(reason);
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -512,18 +521,36 @@ void Main::registerProtocolHandlers()
             mRestoredClassName = cd.className;
             mRestoredBirthSign = cd.birthSign;
             mRestoredClassData = cd.classData;
+            BasePlayer& localPlayer = mPlayerSync->localPlayer();
+            localPlayer.hasSavedStats = cd.hasSavedStats;
+            localPlayer.dynamicStats = cd.dynamicStats;
+            localPlayer.attributes = cd.attributes;
+            localPlayer.skills = cd.skills;
+            localPlayer.level = cd.level;
+            localPlayer.levelProgress = cd.levelProgress;
+            if (cd.hasSavedStats)
+            {
+                BasePlayer restoredStats;
+                restoredStats.hasSavedStats = true;
+                restoredStats.dynamicStats = cd.dynamicStats;
+                restoredStats.attributes = cd.attributes;
+                restoredStats.skills = cd.skills;
+                restoredStats.level = cd.level;
+                restoredStats.levelProgress = cd.levelProgress;
+                mPlayerSync->queueRestoredStats(restoredStats);
+            }
 
             if (!cd.classData.empty())
             {
                 std::istringstream ss(cd.classData);
                 char sep;
-                auto& d = mPlayerSync->localPlayer().charClass.mData;
+                auto& d = localPlayer.charClass.mData;
                 ss >> d.mSpecialization;
                 for (auto& v : d.mAttribute)  { ss >> sep >> v; }
                 for (auto& row : d.mSkills)   for (auto& v : row) { ss >> sep >> v; }
                 ss >> sep >> d.mIsPlayable;
                 ss >> sep >> d.mServices;
-                mPlayerSync->localPlayer().charClass.mName = cd.className;
+                localPlayer.charClass.mName = cd.className;
             }
 
             Log(Debug::Info) << "[MP] CharacterData received: newChar="
@@ -950,6 +977,16 @@ void Main::registerProtocolHandlers()
             pkt.setActorList(&tmp);
             if (!pkt.decode(data, size)) return;
             mActorSync->onActorAttack(tmp);
+        });
+
+    proto.registerHandler(PacketType::ActorAttackV2,
+        [this](const uint8_t* data, size_t size)
+        {
+            ActorAttackV2List tmp;
+            PacketActorAttackV2 pkt;
+            pkt.setAttackList(&tmp);
+            if (!pkt.decode(data, size)) return;
+            mActorSync->onActorAttackV2(tmp);
         });
 
     proto.registerHandler(PacketType::ActorCast,

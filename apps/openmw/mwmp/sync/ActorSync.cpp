@@ -50,6 +50,7 @@
 #include "PlayerSync.hpp"
 #include "RemotePlayer.hpp"
 #include <components/openmw-mp/Packets/Actor/PacketActorAttack.hpp>
+#include <components/openmw-mp/Packets/Actor/PacketActorAttackV2.hpp>
 #include <components/openmw-mp/Packets/Actor/PacketActorEquipment.hpp>
 #include "../../mwworld/inventorystore.hpp"
 #include "../../mwrender/npcanimation.hpp"
@@ -106,6 +107,14 @@ namespace
     float lerpAngle(float current, float target, float alpha)
     {
         return current + shortestAngleDelta(target, current) * alpha;
+    }
+
+    bool isNewerEventId(uint32_t incoming, uint32_t previous)
+    {
+        if (incoming == 0 || previous == 0)
+            return true;
+
+        return static_cast<int32_t>(incoming - previous) > 0;
     }
 
     mwmp::Position interpolatePosition(const mwmp::Position& from, const mwmp::Position& to, float alpha)
@@ -493,14 +502,21 @@ namespace mwmp
         mActorV2SnapshotsWindow = 0;
         mActorV2MissingIdentityWindow = 0;
         mActorV2StaleWindow = 0;
+        mActorV2DeadLiveSuppressedWindow = 0;
         mActorV2IdentityTransformPreservedWindow = 0;
         mActorV2IdentityZeroTransformSkippedWindow = 0;
         mActorV2PresentationSentWindow = 0;
         mActorV2PresentationAppliedWindow = 0;
         mActorV2PresentationMissingIdentityWindow = 0;
         mActorV2PresentationStaleWindow = 0;
+        mActorV2PresentationDeadLiveSuppressedWindow = 0;
         mActorV2PresentationStopForcedWindow = 0;
         mActorV2PresentationGroupChangedWindow = 0;
+        mActorV2AttackSentWindow = 0;
+        mActorV2AttackAppliedWindow = 0;
+        mActorV2AttackMissingIdentityWindow = 0;
+        mActorV2AttackDuplicateWindow = 0;
+        mActorV2AttackDeadSuppressedWindow = 0;
         mActorV2MissingIdentityByNetIdWindow.clear();
     }
 
@@ -627,7 +643,19 @@ namespace mwmp
         const uint64_t latestPositionTimestamp = runtime != nullptr ? runtime->lastServerTimestamp : 0;
         const uint64_t latestPresentationTimestamp = runtime != nullptr ? runtime->lastPresentationServerTimestamp : 0;
 
-        Log(Debug::Info) << "[MP] ActorSync border watch: " << event
+        const std::string eventName = event != nullptr ? event : "";
+        const std::string sourceName = source != nullptr ? source : "";
+        const bool cellMismatch = (!runtimeCell.empty() && !boundCell.empty() && runtimeCell != boundCell)
+            || (!runtimeCell.empty() && !resolvedCell.empty() && runtimeCell != resolvedCell);
+        const bool important = cellMismatch
+            || eventName.find("Attack") != std::string::npos
+            || eventName.find("Combat") != std::string::npos
+            || eventName.find("migrated") != std::string::npos
+            || eventName.find("removed") != std::string::npos
+            || sourceName.find("unbound") != std::string::npos
+            || sourceName == "missing";
+
+        Log(important ? Debug::Info : Debug::Verbose) << "[MP] ActorSync border watch: " << event
                          << " source=" << source
                          << " actorNetId=" << actorNetId
                          << " refId=" << packetActor.refId
@@ -651,8 +679,34 @@ namespace mwmp
         for (auto& [actorNetId, actor] : mActorsByNetId)
         {
 
-            if (actor.state.cellId.empty() || hasAuthority(actor.state.cellId))
+            if (actor.state.cellId.empty())
                 continue;
+
+            if (hasAuthority(actor.state.cellId))
+            {
+                const bool needsAuthorityBootstrapBinding = actor.boundActor.isEmpty()
+                    && actor.hasAuthoritativeTransform
+                    && (actor.state.mpNum != 0 || actor.state.isDead);
+                const bool needsAuthorityDeathApply = actor.state.isDead
+                    && !actor.boundActor.isEmpty()
+                    && (!actor.deathAlreadyApplied || actor.deathFromRealtimePacket);
+                if (needsAuthorityBootstrapBinding || needsAuthorityDeathApply)
+                {
+                    advanceSmoothing(actor, dt);
+                    if (resolveActorBinding(actor.state.cellId, actor))
+                    {
+                        applyBoundActorState(actor);
+                        Log(Debug::Info) << "[MP] ActorSync v2: authority bootstrap applied actor"
+                                         << " actorNetId=" << actorNetId
+                                         << " refId=" << actor.state.refId
+                                         << " mpNum=" << actor.state.mpNum
+                                         << " isDead=" << actor.state.isDead
+                                         << " cell=" << actor.state.cellId;
+                    }
+                }
+                continue;
+            }
+
             if (!actor.hasAuthoritativeTransform)
                 continue;
 
@@ -806,6 +860,21 @@ namespace mwmp
         std::size_t zeroTransformSkipped = 0;
         std::vector<uint32_t> ackedActorNetIds;
         ackedActorNetIds.reserve(list.actors.size());
+        auto forgetLocalMpNumMappings = [this](uint32_t mpNum)
+        {
+            if (mpNum == 0)
+                return;
+
+            for (auto it = mMpNumsByLocalActor.begin(); it != mMpNumsByLocalActor.end();)
+            {
+                if (it->second == mpNum)
+                    it = mMpNumsByLocalActor.erase(it);
+                else
+                    ++it;
+            }
+            mServerSpawnedActorsByMpNum.erase(mpNum);
+        };
+
         for (const ActorIdentityRecord& record : list.actors)
         {
             if (record.actorNetId == 0)
@@ -824,11 +893,41 @@ namespace mwmp
                 auto runtimeIt = mActorsByNetId.find(record.actorNetId);
                 if (runtimeIt != mActorsByNetId.end())
                 {
-                    logWatchedBorderActor("identity-removed", list.cellId, actorState, &runtimeIt->second,
-                        runtimeIt->second.boundActor, "primary");
-                    indexActorNetId(record.actorNetId, runtimeIt->second.state.cellId, {});
+                    ActorRuntime& runtime = runtimeIt->second;
+                    const BaseActor previousState = runtime.state;
+                    logWatchedBorderActor("identity-removed", list.cellId, actorState, &runtime,
+                        runtime.boundActor, "primary");
+
+                    const uint32_t removedMpNum = previousState.mpNum != 0 ? previousState.mpNum : actorState.mpNum;
+                    if ((record.serverSpawned || removedMpNum != 0) && !runtime.boundActor.isEmpty())
+                    {
+                        const std::string boundCellId = cellIdForPtr(runtime.boundActor);
+                        const std::string mappingCellId = !boundCellId.empty() ? boundCellId : previousState.cellId;
+                        forgetServerSpawnedActor(mappingCellId, runtime.boundActor, removedMpNum);
+                        MWBase::Environment::get().getWorld()->deleteObject(runtime.boundActor);
+                    }
+                    if (removedMpNum != 0)
+                        forgetLocalMpNumMappings(removedMpNum);
+
+                    const std::string previousKey = makeActorKey(previousState);
+                    const std::string packetKey = makeActorKey(actorState);
+                    for (auto& [cellId, cellRuntime] : mCells)
+                    {
+                        cellRuntime.actors.erase(previousKey);
+                        cellRuntime.actors.erase(packetKey);
+                    }
+
+                    indexActorNetId(record.actorNetId, previousState.cellId, {});
+                    mActorNetIdsByKey.erase(previousKey);
+                    mActorNetIdsByKey.erase(packetKey);
                     mActorsByNetId.erase(runtimeIt);
                     ++removed;
+                }
+                else
+                {
+                    mActorNetIdsByKey.erase(makeActorKey(actorState));
+                    if (actorState.mpNum != 0)
+                        forgetLocalMpNumMappings(actorState.mpNum);
                 }
                 continue;
             }
@@ -923,7 +1022,11 @@ namespace mwmp
             {
                 runtime.state = actorState;
                 if (actorState.isDead)
+                {
                     runtime.deathFromRealtimePacket = false;
+                    runtime.deathAlreadyApplied = true;
+                    runtime.deathPacketSent = true;
+                }
 
                 ActorList synthetic;
                 synthetic.cellId = actorState.cellId;
@@ -935,6 +1038,12 @@ namespace mwmp
                 ++baselineApplied;
             }
             rememberServerSpawnedActorTimestamp(actorState.mpNum, list.serverTimestamp);
+            if (runtime.state.isDead)
+            {
+                runtime.deathFromRealtimePacket = false;
+                runtime.deathAlreadyApplied = true;
+                runtime.deathPacketSent = true;
+            }
             indexActorNetId(record.actorNetId, oldCellId, actorState.cellId);
             logWatchedBorderActor(!hadRuntime ? "identity-baseline"
                     : (oldCellId != actorState.cellId ? "identity-migrated" : "identity-reused"),
@@ -1283,6 +1392,7 @@ namespace mwmp
         std::size_t accepted = 0;
         std::size_t missingIdentity = 0;
         std::size_t stale = 0;
+        std::size_t deadLiveSuppressed = 0;
         uint32_t firstMissingActorNetId = 0;
         for (const CompactActorSnapshot& snapshot : list.snapshots)
         {
@@ -1302,6 +1412,14 @@ namespace mwmp
                 && list.serverTimestamp < runtime.lastServerTimestamp)
             {
                 ++stale;
+                continue;
+            }
+
+            const bool runtimeIsDead = runtime.state.isDead || runtime.deathAlreadyApplied;
+            const bool snapshotIsDead = (snapshot.presentationFlags & ActorPresentationDead) != 0;
+            if (runtimeIsDead && !snapshotIsDead)
+            {
+                ++deadLiveSuppressed;
                 continue;
             }
 
@@ -1341,6 +1459,7 @@ namespace mwmp
         mActorV2SnapshotsWindow += accepted;
         mActorV2MissingIdentityWindow += missingIdentity;
         mActorV2StaleWindow += stale;
+        mActorV2DeadLiveSuppressedWindow += deadLiveSuppressed;
         const uint64_t now = currentClientTimeMs();
         if (mActorV2DiagnosticsLastLogMs == 0)
             mActorV2DiagnosticsLastLogMs = now;
@@ -1363,28 +1482,43 @@ namespace mwmp
                              << " noisiestMissingActorNetId=" << noisiestMissingActorNetId
                              << " noisiestMissingCount=" << noisiestMissingCount
                              << " stale=" << mActorV2StaleWindow
+                             << " deadLiveSuppressed=" << mActorV2DeadLiveSuppressedWindow
                              << " identityTransformPreserved=" << mActorV2IdentityTransformPreservedWindow
                              << " identityZeroTransformSkipped=" << mActorV2IdentityZeroTransformSkippedWindow
                              << " presentationSent=" << mActorV2PresentationSentWindow
                              << " presentationApplied=" << mActorV2PresentationAppliedWindow
                              << " presentationMissingIdentity=" << mActorV2PresentationMissingIdentityWindow
                              << " presentationStale=" << mActorV2PresentationStaleWindow
+                             << " presentationDeadLiveSuppressed="
+                             << mActorV2PresentationDeadLiveSuppressedWindow
                              << " presentationStopForced=" << mActorV2PresentationStopForcedWindow
                              << " presentationGroupChanged=" << mActorV2PresentationGroupChangedWindow
+                             << " attackSent=" << mActorV2AttackSentWindow
+                             << " attackApplied=" << mActorV2AttackAppliedWindow
+                             << " attackMissingIdentity=" << mActorV2AttackMissingIdentityWindow
+                             << " attackDuplicate=" << mActorV2AttackDuplicateWindow
+                             << " attackDeadSuppressed=" << mActorV2AttackDeadSuppressedWindow
                              << " primaryActors=" << mActorsByNetId.size()
                              << " seq=" << list.sequence;
             mActorV2DiagnosticsLastLogMs = now;
             mActorV2SnapshotsWindow = 0;
             mActorV2MissingIdentityWindow = 0;
             mActorV2StaleWindow = 0;
+            mActorV2DeadLiveSuppressedWindow = 0;
             mActorV2IdentityTransformPreservedWindow = 0;
             mActorV2IdentityZeroTransformSkippedWindow = 0;
             mActorV2PresentationSentWindow = 0;
             mActorV2PresentationAppliedWindow = 0;
             mActorV2PresentationMissingIdentityWindow = 0;
             mActorV2PresentationStaleWindow = 0;
+            mActorV2PresentationDeadLiveSuppressedWindow = 0;
             mActorV2PresentationStopForcedWindow = 0;
             mActorV2PresentationGroupChangedWindow = 0;
+            mActorV2AttackSentWindow = 0;
+            mActorV2AttackAppliedWindow = 0;
+            mActorV2AttackMissingIdentityWindow = 0;
+            mActorV2AttackDuplicateWindow = 0;
+            mActorV2AttackDeadSuppressedWindow = 0;
             mActorV2MissingIdentityByNetIdWindow.clear();
         }
     }
@@ -1401,6 +1535,7 @@ namespace mwmp
         std::size_t applied = 0;
         std::size_t missingIdentity = 0;
         std::size_t stale = 0;
+        std::size_t deadLiveSuppressed = 0;
         std::size_t stopForced = 0;
         std::size_t groupChanged = 0;
         uint32_t firstMissingActorNetId = 0;
@@ -1426,6 +1561,14 @@ namespace mwmp
                 continue;
             }
 
+            const bool snapshotIsDead = snapshot.isDead || ((snapshot.presentationFlags & ActorPresentationDead) != 0);
+            const bool runtimeIsDead = runtime.state.isDead || runtime.deathAlreadyApplied;
+            if (runtimeIsDead && !snapshotIsDead)
+            {
+                ++deadLiveSuppressed;
+                continue;
+            }
+
             const bool wasMoving = runtime.state.isMoving
                 || std::abs(runtime.state.animFlags.animFwd) > 0.1f
                 || std::abs(runtime.state.animFlags.animSide) > 0.1f;
@@ -1438,7 +1581,7 @@ namespace mwmp
             runtime.state.isAttackingOrCasting = snapshot.isAttackingOrCasting;
             runtime.state.hasWeaponDrawn = snapshot.hasWeaponDrawn;
             runtime.state.hasSpellReadied = snapshot.hasSpellReadied;
-            runtime.state.isDead = snapshot.isDead;
+            runtime.state.isDead = snapshotIsDead;
             runtime.state.animFlags.movementFlags = snapshot.movementFlags;
             runtime.state.animFlags.animFwd = dequantizeActorAxis(snapshot.animFwd);
             runtime.state.animFlags.animSide = dequantizeActorAxis(snapshot.animSide);
@@ -1455,6 +1598,15 @@ namespace mwmp
                 runtime.state.isMoving = false;
                 if (wasMoving || hadLocomotionGroup)
                     ++stopForced;
+            }
+            if (snapshotIsDead)
+            {
+                runtime.state.isMoving = false;
+                runtime.state.isAttackingOrCasting = false;
+                runtime.state.velocity = Velocity {};
+                runtime.state.animFlags.animFwd = 0.f;
+                runtime.state.animFlags.animSide = 0.f;
+                runtime.state.animFlags.movementFlags = 0;
             }
 
             if (runtime.state.animFlags.currentAnimGroup != previousGroup)
@@ -1488,10 +1640,11 @@ namespace mwmp
         mActorV2PresentationAppliedWindow += applied;
         mActorV2PresentationMissingIdentityWindow += missingIdentity;
         mActorV2PresentationStaleWindow += stale;
+        mActorV2PresentationDeadLiveSuppressedWindow += deadLiveSuppressed;
         mActorV2PresentationStopForcedWindow += stopForced;
         mActorV2PresentationGroupChangedWindow += groupChanged;
 
-        if (missingIdentity != 0 || stale != 0)
+        if (missingIdentity != 0 || stale != 0 || deadLiveSuppressed != 0)
         {
             Log(Debug::Verbose) << "[MP] ActorSync v2: presentation filtered"
                                 << " snapshots=" << list.snapshots.size()
@@ -1499,6 +1652,7 @@ namespace mwmp
                                 << " missingIdentity=" << missingIdentity
                                 << " firstMissingActorNetId=" << firstMissingActorNetId
                                 << " stale=" << stale
+                                << " deadLiveSuppressed=" << deadLiveSuppressed
                                 << " seq=" << list.sequence;
         }
     }
@@ -1564,6 +1718,78 @@ namespace mwmp
         }
     }
 
+    void ActorSync::onActorAttackV2(const ActorAttackV2List& list)
+    {
+        if (list.protocolVersion != ActorSyncProtocolVersionV2)
+        {
+            Log(Debug::Warning) << "[MP] ActorSync: ignored unsupported ActorAttackV2 protocol="
+                                << list.protocolVersion;
+            return;
+        }
+
+        std::size_t applied = 0;
+        std::size_t missingIdentity = 0;
+        std::size_t duplicate = 0;
+        std::size_t deadSuppressed = 0;
+        uint32_t firstMissingActorNetId = 0;
+
+        for (const ActorAttackV2Event& event : list.events)
+        {
+            auto runtimeIt = mActorsByNetId.find(event.actorNetId);
+            if (event.actorNetId == 0 || runtimeIt == mActorsByNetId.end())
+            {
+                ++missingIdentity;
+                if (firstMissingActorNetId == 0)
+                    firstMissingActorNetId = event.actorNetId;
+                ++mActorV2MissingIdentityByNetIdWindow[event.actorNetId];
+                continue;
+            }
+
+            ActorRuntime& runtime = runtimeIt->second;
+            if (runtime.state.isDead || runtime.deathAlreadyApplied)
+            {
+                ++deadSuppressed;
+                continue;
+            }
+
+            if (!isNewerEventId(event.eventId, runtime.lastReceivedAttackEventId))
+            {
+                ++duplicate;
+                continue;
+            }
+
+            runtime.state.attack = event.attack;
+            runtime.pendingAttack = true;
+            runtime.lastAttackPressed = false;
+            runtime.lastReceivedAttackEventId = event.eventId;
+            if (list.serverTimestamp != 0)
+                runtime.lastPresentationServerTimestamp = std::max(runtime.lastPresentationServerTimestamp,
+                    list.serverTimestamp);
+            logWatchedBorderActor("ActorAttackV2", list.cellId, runtime.state, &runtime, runtime.boundActor,
+                "actorNetId");
+            ++applied;
+        }
+
+        mActorV2AttackAppliedWindow += applied;
+        mActorV2AttackMissingIdentityWindow += missingIdentity;
+        mActorV2AttackDuplicateWindow += duplicate;
+        mActorV2AttackDeadSuppressedWindow += deadSuppressed;
+
+        if (missingIdentity != 0 || duplicate != 0 || deadSuppressed != 0 || applied != 0)
+        {
+            Log((missingIdentity != 0 || duplicate != 0 || deadSuppressed != 0) ? Debug::Info : Debug::Verbose)
+                << "[MP] ActorSync v2: attack receive"
+                << " packetCell=" << list.cellId
+                << " events=" << list.events.size()
+                << " applied=" << applied
+                << " missingIdentity=" << missingIdentity
+                << " firstMissingActorNetId=" << firstMissingActorNetId
+                << " duplicate=" << duplicate
+                << " deadSuppressed=" << deadSuppressed
+                << " seq=" << list.sequence;
+        }
+    }
+
     void ActorSync::onActorCast(const ActorList& list)
     {
         auto& cell = mCells[list.cellId];
@@ -1610,7 +1836,7 @@ namespace mwmp
             if (!actorState.deathAnimGroup.empty())
                 runtime.state.deathAnimGroup = actorState.deathAnimGroup;
             runtime.state.dynamicStats.health.current = actorState.dynamicStats.health.current;
-            runtime.deathFromRealtimePacket = true;
+            runtime.deathFromRealtimePacket = actorState.isDead && !wasDead && !actorState.isInstantDeath;
             Log(actorState.isDead && !wasDead ? Debug::Info : Debug::Verbose)
                 << "[MP] ActorSync: Death received for " << actorState.refId
                 << " mpNum=" << actorState.mpNum
@@ -2988,6 +3214,14 @@ namespace mwmp
         attackUpdate.isAuthority = true;
         attackUpdate.authorityGuid = outgoing.authorityGuid;
 
+        ActorAttackV2List attackV2Update;
+        attackV2Update.protocolVersion = ActorSyncProtocolVersionV2;
+        attackV2Update.cellId = outgoing.cellId;
+        attackV2Update.authorityGuid = outgoing.authorityGuid;
+        attackV2Update.authorityGeneration = outgoing.authorityGeneration;
+        attackV2Update.sequence = outgoing.snapshotSequence;
+        attackV2Update.serverTimestamp = outgoing.serverTimestamp;
+
         ActorList castUpdate;
         castUpdate.cellId = outgoing.cellId;
         castUpdate.isAuthority = true;
@@ -3039,7 +3273,17 @@ namespace mwmp
                 const bool alreadySent = (prevIt != cell.actors.end())
                     && (prevIt->second.deathPacketSent
                         || (prevIt->second.state.isDead && prevIt->second.deathAlreadyApplied));
-                if (actor.isDead && !alreadySent)
+                const bool primaryAlreadyAppliedDead = [&]() {
+                    if (!actor.isDead)
+                        return false;
+                    ActorRuntime* primary = findPrimaryActorRuntime(actor);
+                    return primary != nullptr
+                        && primary->state.isDead
+                        && (primary->deathPacketSent || primary->deathAlreadyApplied)
+                        && !primary->deathFromRealtimePacket;
+                }();
+                const bool firstSeenDead = actor.isDead && prevIt == cell.actors.end();
+                if (actor.isDead && !firstSeenDead && !alreadySent && !primaryAlreadyAppliedDead)
                 {
                     // Read the death anim group from the base node.
                     std::string deathGroup = actor.deathAnimGroup;
@@ -3111,6 +3355,20 @@ namespace mwmp
                 }
 
                 attackUpdate.actors.push_back(atkActor);
+                const uint32_t actorNetId = actorNetIdForActorState(actor);
+                if (actorNetId != 0)
+                {
+                    ActorRuntime& runtime = cell.actors[key];
+                    runtime.actorNetId = actorNetId;
+                    ActorAttackV2Event event;
+                    event.actorNetId = actorNetId;
+                    event.eventId = runtime.nextAttackEventId++;
+                    if (event.eventId == 0)
+                        event.eventId = runtime.nextAttackEventId++;
+                    event.attack = atkActor.attack;
+                    attackV2Update.events.push_back(event);
+                    attackUpdate.actors.pop_back();
+                }
             }
 
             // --- Cast start edge detection ---
@@ -3269,6 +3527,15 @@ namespace mwmp
             Log(Debug::Info) << "[MP] ActorSync: sent ActorDeath packet with " << deathUpdate.actors.size() << " actors";
         }
 
+        if (!attackV2Update.events.empty())
+        {
+            PacketActorAttackV2 attackPkt;
+            attackPkt.setAttackList(&attackV2Update);
+            mClient.sendReliable(attackPkt.encode());
+            mActorV2AttackSentWindow += attackV2Update.events.size();
+            Log(Debug::Info) << "[MP] ActorSync: sent ActorAttackV2 packet with " << attackV2Update.events.size() << " events";
+        }
+
         if (!attackUpdate.actors.empty())
         {
             PacketActorAttack attackPkt;
@@ -3308,14 +3575,24 @@ namespace mwmp
                 currentKeys.insert(key);
                 if (actorState.mpNum != 0)
                     currentServerSpawnedMpNums.insert(actorState.mpNum);
-                cell.actors[key].state = actorState;
-                cell.actors[key].lastAttackingOrCasting = actorState.isAttackingOrCasting;
+                const bool firstSeenInCell = cell.actors.find(key) == cell.actors.end();
+                auto& runtime = cell.actors[key];
+                runtime.state = actorState;
+                runtime.lastAttackingOrCasting = actorState.isAttackingOrCasting;
                 // Mark deathPacketSent if we sent a death packet for this actor
-                if (deathSentKeys.count(key))
-                    cell.actors[key].deathPacketSent = true;
+                if (deathSentKeys.count(key) || (firstSeenInCell && actorState.isDead))
+                {
+                    runtime.deathPacketSent = true;
+                    runtime.deathAlreadyApplied = true;
+                    runtime.deathFromRealtimePacket = false;
+                }
                 // Reset deathPacketSent if the actor is no longer dead (resurrected)
                 if (!actorState.isDead)
-                    cell.actors[key].deathPacketSent = false;
+                {
+                    runtime.deathPacketSent = false;
+                    runtime.deathAlreadyApplied = false;
+                    runtime.deathFromRealtimePacket = false;
+                }
             }
             for (auto it = cell.actors.begin(); it != cell.actors.end(); )
             {

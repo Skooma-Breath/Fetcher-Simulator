@@ -130,6 +130,24 @@ namespace mwmp
         std::vector<ActorPresentationSnapshot> snapshots;
     };
 
+    struct ActorAttackV2Event
+    {
+        uint32_t actorNetId = 0;
+        uint32_t eventId = 0;
+        Attack attack;
+    };
+
+    struct ActorAttackV2List
+    {
+        uint32_t protocolVersion = ActorSyncProtocolVersionV2;
+        std::string cellId;
+        uint32_t authorityGuid = 0;
+        uint32_t authorityGeneration = 0;
+        uint32_t sequence = 0;
+        uint64_t serverTimestamp = 0;
+        std::vector<ActorAttackV2Event> events;
+    };
+
     inline int8_t quantizeActorAxis(float value)
     {
         value = std::clamp(value, -1.f, 1.f);

@@ -62,6 +62,7 @@ namespace mwmp
         std::string nickname;  ///< cosmetic display name; empty = use slot name
         bool        hasSavedInventory = false;
         bool        hasSavedEquipment = false;
+        bool        hasSavedStats = false;
     };
 
     struct PersistedDynamicRecord
@@ -204,6 +205,12 @@ namespace mwmp
         /// Replace the persisted equipment snapshot for a character.
         void saveCharacterEquipment(
             int64_t characterId, const std::vector<EquipmentItem>& equipment, bool touchLastSeen = true);
+
+        /// Load persisted player stats into the supplied player. Returns false if no saved stats exist.
+        bool loadCharacterStats(int64_t characterId, BasePlayer& player);
+
+        /// Replace the persisted player stats snapshot for a character.
+        void saveCharacterStats(int64_t characterId, const BasePlayer& player, bool touchLastSeen = true);
 
         /// Load persisted multiplayer-placed world objects.
         std::vector<PlacedObject> loadWorldObjects();

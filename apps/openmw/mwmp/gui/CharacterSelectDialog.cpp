@@ -586,43 +586,25 @@ void CharacterSelectDialog::enterWorld()
     setVisible(false);
     MWBase::Environment::get().getWindowManager()->removeGuiMode(MWGui::GM_MainMenu);
 
+    Main& mp = Main::get();
     const bool        isNew     = Main::get().isNewCharacter();
     const std::string spawnCell = Main::get().getSpawnCell();
-    const std::string charName  = Main::get().getCharacterName();
-    const std::string loginName = Main::get().getPlayerName();
-    const std::string worldName = charName.empty() ? loginName : charName;
+    const std::string worldName = Main::get().getCharacterName().empty()
+        ? mp.getPlayerSync().localPlayer().name
+        : Main::get().getCharacterName();
 
     if (isNew)
     {
-        Log(Debug::Info) << "[MP] New character — spawning in: " << spawnCell;
+        Log(Debug::Info) << "[MP] New character - spawning in: " << spawnCell;
         MWBase::Environment::get().getStateManager()->newGame(true);
-
+        MWBase::Environment::get().getWindowManager()->updatePlayer();
         if (!worldName.empty())
             MWBase::Environment::get().getMechanicsManager()->setPlayerName(worldName);
-
-        const std::string targetCell = spawnCell.empty() ? "toddtest" : spawnCell;
-        MWBase::World* world = MWBase::Environment::get().getWorld();
-        ESM::Position pos{};
-        const auto intId = world->findInteriorPosition(targetCell, pos);
-        if (!intId.empty())
-            world->changeToCell(intId, pos, true);
-        else
-        {
-            ESM::Position extPos{};
-            const auto extId = world->findExteriorPosition(targetCell, extPos);
-            if (!extId.empty())
-                world->changeToCell(extId, extPos, true);
-            else
-                world->changeToInteriorCell(targetCell, pos, true);
-        }
-
-        MWBase::Environment::get().getWindowManager()->setNewGame(true);
-        MWBase::Environment::get().getWindowManager()->startCharGen();
         MWBase::Environment::get().getWindowManager()->setCharGenCompleteCallback(
             []() {
                 if (Main::isInitialised())
                 {
-                    Log(Debug::Info) << "[MP] Chargen complete — arming watcher";
+                    Log(Debug::Info) << "[MP] Chargen complete - arming watcher";
                     Main::get().startWatchingCharGen();
                 }
                 MWBase::Environment::get().getWindowManager()->setNewGame(false);
@@ -631,7 +613,7 @@ void CharacterSelectDialog::enterWorld()
     }
     else
     {
-        Log(Debug::Info) << "[MP] Returning player — restoring in: " << spawnCell;
+        Log(Debug::Info) << "[MP] Returning player - restoring in: " << spawnCell;
         MWBase::Environment::get().getStateManager()->newGame(true);
         MWBase::Environment::get().getWindowManager()->updatePlayer();
 
@@ -672,21 +654,6 @@ void CharacterSelectDialog::enterWorld()
             Log(Debug::Warning) << "[MP] Chargen restore error: " << e.what();
         }
 
-        // Race/head/hair are now written into the player NPC record.
-        // Send BaseInfo to all peers so they can build the correct-looking
-        // remote NPC. This must happen here, AFTER setPlayerRace(), not in
-        // the CharacterData handler where the NPC record is still blank.
-        //
-        // Do not include inventory/equipment here for returning players.
-        // The server sends authoritative saved inventory/equipment immediately
-        // after CharacterData, and sending the local template inventory first
-        // can overwrite the saved snapshot with default spawn clothing.
-        if (Main::isInitialised())
-        {
-            Log(Debug::Info) << "[MP] Returning player restore complete — sending full sync";
-            Main::get().getPlayerSync().forceFullSync(false);
-        }
-
         const std::string targetCell = (spawnCell.empty() ? "toddtest" : spawnCell);
         const float sx = Main::get().getSpawnX(),    sy = Main::get().getSpawnY(),
                     sz = Main::get().getSpawnZ();
@@ -715,6 +682,13 @@ void CharacterSelectDialog::enterWorld()
             }
             else
                 world->changeToInteriorCell(targetCell, dest, true);
+        }
+
+        if (Main::isInitialised())
+        {
+            Main::get().getPlayerSync().applyRestoredStatsToPlayer();
+            Log(Debug::Info) << "[MP] Returning player restore complete - sending full sync";
+            Main::get().getPlayerSync().forceFullSync(false);
         }
     }
 }

@@ -2,6 +2,7 @@
 #define OPENMW_MP_PACKETSYSTEMHANDSHAKE_HPP
 
 #include <components/openmw-mp/Base/ActorSyncProtocol.hpp>
+#include <components/openmw-mp/Base/BasePlayer.hpp>
 #include <components/openmw-mp/Packets/BasePacket.hpp>
 #include <string>
 #include <vector>
@@ -252,10 +253,57 @@ namespace mwmp
         std::string birthSign;
         std::string classData; ///< CLDTstruct as 15 comma-separated ints
         std::string characterName; ///< the character slot name (shown in-world as player name)
+        bool hasSavedStats = false;
+        DynamicStats dynamicStats;
+        std::array<Attribute, BasePlayer::NUM_ATTRIBUTES> attributes;
+        std::array<Skill, BasePlayer::NUM_SKILLS> skills;
+        int level = 1;
+        float levelProgress = 0.f;
 
         PacketCharacterData() : BasePacket(PacketType::CharacterData) {}
 
     protected:
+        void packStat(WriteStream& ws, const DynamicStat& s)
+        {
+            ws.write(s.base);
+            ws.write(s.current);
+            ws.write(s.mod);
+        }
+        void unpackStat(ReadStream& rs, DynamicStat& s)
+        {
+            rs.read(s.base);
+            rs.read(s.current);
+            rs.read(s.mod);
+        }
+        void packAttribute(WriteStream& ws, const Attribute& s)
+        {
+            ws.write(s.base);
+            ws.write(s.mod);
+            ws.write(s.damage);
+        }
+        void unpackAttribute(ReadStream& rs, Attribute& s)
+        {
+            rs.read(s.base);
+            rs.read(s.mod);
+            rs.read(s.damage);
+        }
+        void packSkill(WriteStream& ws, const Skill& s)
+        {
+            ws.write(s.base);
+            ws.write(s.mod);
+            ws.write(s.damage);
+            ws.write(s.progress);
+            ws.write(s.increases);
+        }
+        void unpackSkill(ReadStream& rs, Skill& s)
+        {
+            rs.read(s.base);
+            rs.read(s.mod);
+            rs.read(s.damage);
+            rs.read(s.progress);
+            rs.read(s.increases);
+        }
+
         void pack(WriteStream& ws) override
         {
             ws.write(isNewCharacter);
@@ -271,6 +319,16 @@ namespace mwmp
             ws.writeString(birthSign);
             ws.writeString(classData);
             ws.writeString(characterName);
+            ws.write(hasSavedStats);
+            packStat(ws, dynamicStats.health);
+            packStat(ws, dynamicStats.magicka);
+            packStat(ws, dynamicStats.fatigue);
+            ws.write(level);
+            ws.write(levelProgress);
+            for (const auto& attribute : attributes)
+                packAttribute(ws, attribute);
+            for (const auto& skill : skills)
+                packSkill(ws, skill);
         }
 
         void unpack(ReadStream& rs) override
@@ -288,6 +346,16 @@ namespace mwmp
             birthSign  = rs.readString();
             classData  = rs.readString();
             characterName = rs.readString();
+            rs.read(hasSavedStats);
+            unpackStat(rs, dynamicStats.health);
+            unpackStat(rs, dynamicStats.magicka);
+            unpackStat(rs, dynamicStats.fatigue);
+            rs.read(level);
+            rs.read(levelProgress);
+            for (auto& attribute : attributes)
+                unpackAttribute(rs, attribute);
+            for (auto& skill : skills)
+                unpackSkill(rs, skill);
         }
     };
 

@@ -50,6 +50,10 @@ struct ConnectedClient
     bool                charSelectComplete   = false; ///< player chose a character, in-world
     int64_t             dbAccountId          = 0;   ///< PlayerDatabase accounts.id
     int64_t             dbCharacterId        = 0;   ///< PlayerDatabase characters.id, 0 if not set
+    BasePlayer          restoredStatsSnapshot;
+    bool                hasRestoredStatsSnapshot = false;
+    bool                acceptedPlayerStatsThisSession = false;
+    uint64_t            playerStatsRestoreGuardUntilMs = 0;
 
     // Ed25519 challenge-response state (valid between receiving PacketHandshake
     // with a publicKey and receiving PacketChallengeResponse)
@@ -73,6 +77,8 @@ struct ConnectedClient
     std::size_t actorV2BytesSentWindow = 0;
     std::size_t actorV2PresentationSentWindow = 0;
     std::size_t actorV2PresentationBytesSentWindow = 0;
+    std::size_t actorV2AttackSentWindow = 0;
+    std::size_t actorV2AttackSuppressedUntilIdentityKnownWindow = 0;
     std::size_t actorV2PresentationSuppressedUntilIdentityKnownWindow = 0;
     std::size_t actorV2DeferredWindow = 0;
     std::size_t actorV2PositionSuppressedUntilIdentityKnownWindow = 0;
@@ -243,6 +249,7 @@ private:
     void handleActorAnimFlags   (ConnectedClient& c, const uint8_t* data, size_t size);
     void handleActorAnimPlay    (ConnectedClient& c, const uint8_t* data, size_t size);
     void handleActorAttack      (ConnectedClient& c, const uint8_t* data, size_t size);
+    void handleActorAttackV2    (ConnectedClient& c, const uint8_t* data, size_t size);
     void handleActorCast        (ConnectedClient& c, const uint8_t* data, size_t size);
     void handleActorCellChange  (ConnectedClient& c, const uint8_t* data, size_t size);
     void handleActorDeath       (ConnectedClient& c, const uint8_t* data, size_t size);
@@ -366,10 +373,15 @@ private:
     void broadcastActorListForCell(const std::string& cellId, CellActorState& cellState);
     uint32_t assignActorNetId(const BaseActor& actor);
     uint32_t ensureActorNetId(ActorRegistryRecord& record, const std::string& cellId);
+    void forgetActorNetId(uint32_t actorNetId, const BaseActor& actor);
     ActorIdentityList buildActorIdentityList(
         const std::string& cellId,
         CellActorState& cellState,
         std::unordered_map<std::string, ActorRegistryRecord>& actors);
+    void broadcastActorIdentityRemovalForCell(
+        const std::string& cellId,
+        CellActorState& cellState,
+        const std::vector<ActorRegistryRecord>& records);
     void upsertSpawnedActorDynamicRecordLinkIfNeeded(const BaseActor& actor);
     void rememberActorLocation(const BaseActor& actor, const std::string& cellId);
     void forgetActorLocation(const BaseActor& actor, const std::string& cellId = {});

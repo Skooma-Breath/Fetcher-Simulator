@@ -46,6 +46,7 @@ namespace mwmp
         void onActorAnimFlagsUpdate(const ActorList& list);
         void onActorAnimPlay(const ActorList& list);
         void onActorAttack(const ActorList& list);
+        void onActorAttackV2(const ActorAttackV2List& list);
         void onActorCast(const ActorList& list);
         void onActorDeath(const ActorList& list);
         void onActorEquipment(const ActorList& list);
@@ -121,6 +122,8 @@ namespace mwmp
             // Non-authority side: remember the last synced attack press state so we
             // can mirror both press and release without replaying the wind-up every frame.
             bool lastAttackPressed = false;
+            uint32_t nextAttackEventId = 1;
+            uint32_t lastReceivedAttackEventId = 0;
             // Briefly suppress authoritative lower-body group sync so local hit/attack
             // transitions can finish without being immediately overwritten.
             float animGroupHoldTimer = 0.f;
@@ -209,14 +212,21 @@ namespace mwmp
         std::size_t mActorV2SnapshotsWindow = 0;
         std::size_t mActorV2MissingIdentityWindow = 0;
         std::size_t mActorV2StaleWindow = 0;
+        std::size_t mActorV2DeadLiveSuppressedWindow = 0;
         std::size_t mActorV2IdentityTransformPreservedWindow = 0;
         std::size_t mActorV2IdentityZeroTransformSkippedWindow = 0;
         std::size_t mActorV2PresentationSentWindow = 0;
         std::size_t mActorV2PresentationAppliedWindow = 0;
         std::size_t mActorV2PresentationMissingIdentityWindow = 0;
         std::size_t mActorV2PresentationStaleWindow = 0;
+        std::size_t mActorV2PresentationDeadLiveSuppressedWindow = 0;
         std::size_t mActorV2PresentationStopForcedWindow = 0;
         std::size_t mActorV2PresentationGroupChangedWindow = 0;
+        std::size_t mActorV2AttackSentWindow = 0;
+        std::size_t mActorV2AttackAppliedWindow = 0;
+        std::size_t mActorV2AttackMissingIdentityWindow = 0;
+        std::size_t mActorV2AttackDuplicateWindow = 0;
+        std::size_t mActorV2AttackDeadSuppressedWindow = 0;
         std::unordered_map<uint32_t, std::size_t> mActorV2MissingIdentityByNetIdWindow;
     };
 

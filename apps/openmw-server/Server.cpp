@@ -60,6 +60,7 @@
 #include <components/openmw-mp/Packets/Actor/PacketActorAnimFlags.hpp>
 #include <components/openmw-mp/Packets/Actor/PacketActorAnimPlay.hpp>
 #include <components/openmw-mp/Packets/Actor/PacketActorAttack.hpp>
+#include <components/openmw-mp/Packets/Actor/PacketActorAttackV2.hpp>
 #include <components/openmw-mp/Packets/Actor/PacketActorAuthority.hpp>
 #include <components/openmw-mp/Packets/Actor/PacketActorCast.hpp>
 #include <components/openmw-mp/Packets/Actor/PacketActorCellChange.hpp>
@@ -615,6 +616,87 @@ namespace
         return sameDynamicStat(a.health, b.health)
             && sameDynamicStat(a.magicka, b.magicka)
             && sameDynamicStat(a.fatigue, b.fatigue);
+    }
+
+    bool sameStatFloat(float a, float b)
+    {
+        return std::abs(a - b) <= 0.001f;
+    }
+
+    bool samePersistentAttribute(const mwmp::Attribute& a, const mwmp::Attribute& b)
+    {
+        return a.base == b.base
+            && sameStatFloat(a.mod, b.mod)
+            && sameStatFloat(a.damage, b.damage);
+    }
+
+    bool samePersistentSkill(const mwmp::Skill& a, const mwmp::Skill& b)
+    {
+        return sameStatFloat(a.base, b.base)
+            && sameStatFloat(a.mod, b.mod)
+            && sameStatFloat(a.damage, b.damage)
+            && sameStatFloat(a.progress, b.progress)
+            && a.increases == b.increases;
+    }
+
+    bool samePersistentPlayerStats(const mwmp::BasePlayer& a, const mwmp::BasePlayer& b)
+    {
+        if (!sameDynamicStats(a.dynamicStats, b.dynamicStats)
+            || a.level != b.level
+            || !sameStatFloat(a.levelProgress, b.levelProgress))
+            return false;
+
+        for (std::size_t i = 0; i < a.attributes.size(); ++i)
+        {
+            if (!samePersistentAttribute(a.attributes[i], b.attributes[i]))
+                return false;
+        }
+
+        for (std::size_t i = 0; i < a.skills.size(); ++i)
+        {
+            if (!samePersistentSkill(a.skills[i], b.skills[i]))
+                return false;
+        }
+
+        return true;
+    }
+
+    bool looksLikeRestoredStatsRegression(const mwmp::BasePlayer& incoming, const mwmp::BasePlayer& restored)
+    {
+        for (std::size_t i = 0; i < incoming.attributes.size(); ++i)
+        {
+            if (restored.attributes[i].base > 100
+                && incoming.attributes[i].base <= 100
+                && incoming.attributes[i].base < restored.attributes[i].base)
+                return true;
+        }
+
+        for (std::size_t i = 0; i < incoming.skills.size(); ++i)
+        {
+            if (restored.skills[i].base > 100.f
+                && incoming.skills[i].base <= 100.f
+                && incoming.skills[i].base < restored.skills[i].base)
+                return true;
+        }
+
+        return false;
+    }
+
+    void copyPersistentPlayerStats(mwmp::BasePlayer& dst, const mwmp::BasePlayer& src)
+    {
+        dst.dynamicStats = src.dynamicStats;
+        dst.attributes = src.attributes;
+        dst.skills = src.skills;
+        dst.level = src.level;
+        dst.levelProgress = src.levelProgress;
+        dst.hasSavedStats = src.hasSavedStats;
+    }
+
+    bool isZeroActorPosition(const mwmp::Position& position)
+    {
+        return std::abs(position.pos[0]) <= 0.001f
+            && std::abs(position.pos[1]) <= 0.001f
+            && std::abs(position.pos[2]) <= 0.001f;
     }
 
     bool sameDeadVanillaActorState(const mwmp::BaseActor& a, const mwmp::BaseActor& b)
@@ -1225,10 +1307,12 @@ void MPServer::onClientDisconnected(HSteamNetConnection conn, const std::string&
                                     client.player.cell.cellName,
                                     pos.pos[0], pos.pos[1], pos.pos[2],
                                     pos.rot[0], pos.rot[1], pos.rot[2]);
+            // PlayerStatsDynamic is persisted on receipt. Avoid a blind disconnect
+            // rewrite from a partially restored/template player during join/quit.
         }
         catch (const std::exception& e)
         {
-            Log(Debug::Warning) << "[PlayerDB] savePosition error: " << e.what();
+            Log(Debug::Warning) << "[PlayerDB] disconnect save error: " << e.what();
         }
     }
 
@@ -1545,6 +1629,68 @@ void MPServer::broadcastActorIdentityForCell(
     }
 }
 
+void MPServer::broadcastActorIdentityRemovalForCell(
+    const std::string& cellId,
+    CellActorState& cellState,
+    const std::vector<ActorRegistryRecord>& records)
+{
+    if (records.empty())
+        return;
+
+    ActorIdentityList identityList;
+    identityList.protocolVersion = ActorSyncProtocolVersionV2;
+    identityList.cellId = cellId;
+    identityList.authorityGuid = cellState.authorityGuid;
+    identityList.authorityGeneration = cellState.authorityGeneration;
+    identityList.sequence = cellState.nextSnapshotSequence++;
+    identityList.serverTimestamp = currentServerTimeMs();
+    identityList.actors.reserve(records.size());
+
+    for (const ActorRegistryRecord& record : records)
+    {
+        const uint32_t actorNetId = record.actorNetId != 0 ? record.actorNetId : record.actor.mpNum;
+        if (actorNetId == 0)
+            continue;
+
+        ActorIdentityRecord identity;
+        identity.actorNetId = actorNetId;
+        identity.persistent = record.persistent;
+        identity.serverSpawned = record.actor.mpNum != 0;
+        identity.removed = true;
+        identity.actor = record.actor;
+        identity.actor.cellId = cellId;
+        identityList.actors.push_back(std::move(identity));
+    }
+
+    if (identityList.actors.empty())
+        return;
+
+    PacketActorIdentity pkt;
+    pkt.setIdentityList(&identityList);
+    const std::vector<uint8_t> encoded = pkt.encode();
+    std::size_t sentClients = 0;
+    for (auto& [conn, client] : mClients)
+    {
+        if (!clientHasActorCellLoaded(client, cellId)
+            || client.actorSyncProtocolVersion < ActorSyncProtocolVersionV2)
+            continue;
+
+        sendTo(conn, encoded);
+        ++sentClients;
+        for (const ActorIdentityRecord& record : identityList.actors)
+        {
+            if (client.actorV2IdentitySent.insert(record.actorNetId).second)
+                ++client.actorV2IdentitySentWindow;
+        }
+    }
+
+    Log(Debug::Info) << "[Server] ActorSync v2 identity removed"
+                     << " cell=" << cellId
+                     << " actors=" << identityList.actors.size()
+                     << " sentClients=" << sentClients
+                     << " seq=" << identityList.sequence;
+}
+
 // ---------------------------------------------------------------------------
 bool MPServer::clientHasActorCellLoaded(const ConnectedClient& client, const std::string& cellId) const
 {
@@ -1802,28 +1948,6 @@ bool MPServer::rejectStaleAliveVanillaActor(
     if (actor.mpNum != 0 || actor.refId.empty() || actor.isDead)
         return false;
 
-    const std::string actorKey = makeActorKey(actor);
-    for (const auto& [liveCellId, liveCellState] : mWorld.actorCells)
-    {
-        const auto liveIt = liveCellState.actors.find(actorKey);
-        if (liveIt == liveCellState.actors.end() || liveIt->second.actor.isDead)
-            continue;
-
-        if (std::strcmp(packetName, "ActorList") == 0
-            || std::strcmp(packetName, "ActorAttack") == 0
-            || std::strcmp(packetName, "ActorCellChange") == 0)
-        {
-            Log(Debug::Info) << "[Server] " << packetName
-                             << " allowed alive vanilla actor despite dead memory"
-                             << " from=" << sender.name
-                             << " refId=" << actor.refId
-                             << " refNum=" << actor.refNum
-                             << " incomingCell=" << incomingCellId
-                             << " liveCell=" << liveCellId;
-        }
-        return false;
-    }
-
     std::string deadCellId;
     const ActorRegistryRecord* deadRecord = findDeadVanillaActor(actor, &deadCellId);
     if (!deadRecord)
@@ -1900,6 +2024,32 @@ uint32_t MPServer::ensureActorNetId(ActorRegistryRecord& record, const std::stri
     if (record.actorNetId == 0)
         record.actorNetId = assignActorNetId(record.actor);
     return record.actorNetId;
+}
+
+void MPServer::forgetActorNetId(uint32_t actorNetId, const BaseActor& actor)
+{
+    if (actorNetId == 0)
+        return;
+
+    const auto keyIt = mWorld.actorKeysByNetId.find(actorNetId);
+    if (keyIt != mWorld.actorKeysByNetId.end())
+    {
+        mWorld.actorNetIdsByKey.erase(keyIt->second);
+        mWorld.actorKeysByNetId.erase(keyIt);
+    }
+    else
+    {
+        mWorld.actorNetIdsByKey.erase(makeActorKey(actor));
+    }
+
+    for (auto& clientEntry : mClients)
+    {
+        ConnectedClient& client = clientEntry.second;
+        client.actorV2IdentitySent.erase(actorNetId);
+        client.actorV2IdentityAcked.erase(actorNetId);
+        client.actorV2LastSentMs.erase(actorNetId);
+        client.actorV2MissingIdentityByNetIdWindow.erase(actorNetId);
+    }
 }
 
 ActorIdentityList MPServer::buildActorIdentityList(
@@ -2167,6 +2317,8 @@ void MPServer::broadcastActorPositionV2ToCell(
                              << " bytes=" << client.actorV2BytesSentWindow
                              << " presentationSent=" << client.actorV2PresentationSentWindow
                              << " presentationBytes=" << client.actorV2PresentationBytesSentWindow
+                             << " attackSent=" << client.actorV2AttackSentWindow
+                             << " attackSuppressedUntilIdentityKnown=" << client.actorV2AttackSuppressedUntilIdentityKnownWindow
                              << " budget=" << kBudgetBytes
                              << " deferred=" << client.actorV2DeferredWindow
                              << " positionSuppressedUntilIdentityKnown=" << client.actorV2PositionSuppressedUntilIdentityKnownWindow
@@ -2185,6 +2337,8 @@ void MPServer::broadcastActorPositionV2ToCell(
             client.actorV2BytesSentWindow = 0;
             client.actorV2PresentationSentWindow = 0;
             client.actorV2PresentationBytesSentWindow = 0;
+            client.actorV2AttackSentWindow = 0;
+            client.actorV2AttackSuppressedUntilIdentityKnownWindow = 0;
             client.actorV2DeferredWindow = 0;
             client.actorV2PositionSuppressedUntilIdentityKnownWindow = 0;
             client.actorV2PresentationSuppressedUntilIdentityKnownWindow = 0;
@@ -2363,6 +2517,7 @@ void MPServer::onClientMessage(ConnectedClient& client,
         case PacketType::ActorAnimFlags:   handleActorAnimFlags(client, data, size);     break;
         case PacketType::ActorAnimPlay:    handleActorAnimPlay(client, data, size);      break;
         case PacketType::ActorAttack:      handleActorAttack(client, data, size);        break;
+        case PacketType::ActorAttackV2:    handleActorAttackV2(client, data, size);      break;
         case PacketType::ActorCast:        handleActorCast(client, data, size);          break;
         case PacketType::ActorCellChange:  handleActorCellChange(client, data, size);    break;
         case PacketType::ActorDeath:       handleActorDeath(client, data, size);         break;
@@ -3286,6 +3441,9 @@ void MPServer::handleCharacterSelect(ConnectedClient& c, const uint8_t* data, si
     cdPkt.spawnCell = mDefaultSpawnCell;
     bool sendSavedInventory = false;
     bool sendSavedEquipment = false;
+    c.hasRestoredStatsSnapshot = false;
+    c.acceptedPlayerStatsThisSession = false;
+    c.playerStatsRestoreGuardUntilMs = 0;
 
     for (int slot = 0; slot < BasePlayer::NUM_EQUIPMENT_SLOTS; ++slot)
         c.player.equipment[slot].slot = slot;
@@ -3392,6 +3550,31 @@ void MPServer::handleCharacterSelect(ConnectedClient& c, const uint8_t* data, si
                             c.player.equipment[entry.slot] = entry;
                         }
                         sendSavedEquipment = true;
+                    }
+
+                    if (rec->hasSavedStats && mPlayerDb->loadCharacterStats(rec->characterId, c.player))
+                    {
+                        cdPkt.hasSavedStats = true;
+                        cdPkt.dynamicStats = c.player.dynamicStats;
+                        cdPkt.attributes = c.player.attributes;
+                        cdPkt.skills = c.player.skills;
+                        cdPkt.level = c.player.level;
+                        cdPkt.levelProgress = c.player.levelProgress;
+                        c.restoredStatsSnapshot = c.player;
+                        c.hasRestoredStatsSnapshot = true;
+                        c.playerStatsRestoreGuardUntilMs = currentServerTimeMs() + 5000;
+                        const Attribute& strength = c.player.attributes[0];
+                        const Skill& blunt = c.player.skills[4];
+                        if (strength.base > 100 || blunt.base > 100.f)
+                        {
+                            Log(Debug::Info) << "[PlayerDB] loaded persistent player stats"
+                                             << " charId=" << rec->characterId
+                                             << " name=" << sel.charName
+                                             << " strength=" << strength.base
+                                             << " blunt=" << blunt.base
+                                             << " hp=" << c.player.dynamicStats.health.current
+                                             << "/" << c.player.dynamicStats.health.base;
+                        }
                     }
                 }
                 cdPkt.characterName  = sel.charName;
@@ -3844,9 +4027,73 @@ void MPServer::handlePlayerInventory(ConnectedClient& c, const uint8_t* data, si
 // ---------------------------------------------------------------------------
 void MPServer::handlePlayerStatsDynamic(ConnectedClient& c, const uint8_t* data, size_t size)
 {
+    BasePlayer incoming = c.player;
     PacketPlayerStatsDynamic pkt;
-    pkt.setPlayer(&c.player);
+    pkt.setPlayer(&incoming);
     if (!pkt.decode(data, size)) return;
+
+    const uint64_t nowMs = currentServerTimeMs();
+    if (c.hasRestoredStatsSnapshot
+        && !c.acceptedPlayerStatsThisSession
+        && nowMs < c.playerStatsRestoreGuardUntilMs
+        && !samePersistentPlayerStats(incoming, c.restoredStatsSnapshot)
+        && looksLikeRestoredStatsRegression(incoming, c.restoredStatsSnapshot))
+    {
+        const Attribute& incomingStrength = incoming.attributes[0];
+        const Skill& incomingBlunt = incoming.skills[4];
+        const Attribute& restoredStrength = c.restoredStatsSnapshot.attributes[0];
+        const Skill& restoredBlunt = c.restoredStatsSnapshot.skills[4];
+        Log(Debug::Info) << "[PlayerDB] ignored startup player stats overwrite"
+                         << " charId=" << c.dbCharacterId
+                         << " name=" << c.slotName
+                         << " incomingStrength=" << incomingStrength.base
+                         << " incomingBlunt=" << incomingBlunt.base
+                         << " restoredStrength=" << restoredStrength.base
+                         << " restoredBlunt=" << restoredBlunt.base;
+
+        BasePlayer correction = c.restoredStatsSnapshot;
+        correction.guid = c.guid;
+        PacketPlayerStatsDynamic correctionPkt;
+        correctionPkt.setPlayer(&correction);
+        sendTo(c.conn, correctionPkt.encode());
+        return;
+    }
+
+    const bool hadPreviousStats = c.hasRestoredStatsSnapshot;
+    const BasePlayer previousStats = c.restoredStatsSnapshot;
+    copyPersistentPlayerStats(c.player, incoming);
+    c.player.hasSavedStats = true;
+    c.acceptedPlayerStatsThisSession = true;
+    c.restoredStatsSnapshot = c.player;
+    c.hasRestoredStatsSnapshot = true;
+    c.playerStatsRestoreGuardUntilMs = 0;
+
+    if (mPlayerDb && c.dbCharacterId != 0 && c.charSelectComplete)
+    {
+        try
+        {
+            mPlayerDb->saveCharacterStats(c.dbCharacterId, c.player);
+            const Attribute& strength = c.player.attributes[0];
+            const Skill& blunt = c.player.skills[4];
+            const bool loggedTrackedStatsChanged = !hadPreviousStats
+                || strength.base != previousStats.attributes[0].base
+                || !sameStatFloat(blunt.base, previousStats.skills[4].base);
+            if ((strength.base > 100 || blunt.base > 100.f) && loggedTrackedStatsChanged)
+            {
+                Log(Debug::Info) << "[PlayerDB] saved persistent player stats"
+                                 << " charId=" << c.dbCharacterId
+                                 << " name=" << c.slotName
+                                 << " strength=" << strength.base
+                                 << " blunt=" << blunt.base
+                                 << " hp=" << c.player.dynamicStats.health.current
+                                 << "/" << c.player.dynamicStats.health.base;
+            }
+        }
+        catch (const std::exception& e)
+        {
+            Log(Debug::Warning) << "[PlayerDB] saveCharacterStats error: " << e.what();
+        }
+    }
     syncLuaSnapshot();
     broadcastToAll(std::vector<uint8_t>(data, data + size), c.conn);
 }
@@ -3924,11 +4171,68 @@ void MPServer::handleActorList(ConnectedClient& c, const uint8_t* data, size_t s
 
     std::unordered_set<uint32_t> currentSpawnedActorMpNums;
     std::unordered_set<std::string> migratedActorCells;
+    std::size_t staleDeadVanillaCorrections = 0;
     cellState.actors.clear();
     for (auto& actor : incoming.actors)
     {
         actor.cellId = incoming.cellId;
         normalizeActorIdentity(actor);
+
+        if (actor.mpNum == 0 && !actor.isDead && !actor.refId.empty())
+        {
+            std::string deadCellId;
+            if (const ActorRegistryRecord* deadRecord = findDeadVanillaActor(actor, &deadCellId))
+            {
+                ActorRegistryRecord overlay = *deadRecord;
+                overlay.actor.refId = actor.refId;
+                overlay.actor.refNum = actor.refNum;
+                overlay.actor.mpNum = 0;
+                overlay.actor.cellId = incoming.cellId;
+                overlay.actor.isDead = true;
+                overlay.actor.isInstantDeath = true;
+                overlay.actor.isMoving = false;
+                overlay.actor.isAttackingOrCasting = false;
+                overlay.actor.velocity = Velocity {};
+                overlay.actor.animFlags.animFwd = 0.f;
+                overlay.actor.animFlags.animSide = 0.f;
+                overlay.actor.animFlags.movementFlags = 0;
+                if (overlay.actor.dynamicStats.health.current > 0.f)
+                    overlay.actor.dynamicStats.health.current = 0.f;
+                const bool repairedZeroTransform = isZeroActorPosition(overlay.actor.position)
+                    && !isZeroActorPosition(actor.position);
+                if (repairedZeroTransform)
+                    overlay.actor.position = actor.position;
+                overlay.lastSnapshotTime = incoming.serverTimestamp;
+                ensureActorNetId(overlay, incoming.cellId);
+
+                const std::string overlayKey = makeActorKey(overlay.actor);
+                const auto previousDeadIt = previousDeadVanillaActorRecords.find(overlayKey);
+                const bool overlayAlreadyCurrent = previousDeadIt != previousDeadVanillaActorRecords.end()
+                    && sameDeadVanillaActorState(previousDeadIt->second.actor, overlay.actor);
+                cellState.actors[overlayKey] = overlay;
+                rememberActorLocation(overlay.actor, incoming.cellId);
+                if (deadCellId != incoming.cellId || repairedZeroTransform)
+                    rememberDeadVanillaActor(overlay);
+
+                if (!overlayAlreadyCurrent || deadCellId != incoming.cellId || repairedZeroTransform)
+                {
+                    ++staleDeadVanillaCorrections;
+                    Log(Debug::Info) << "[Server] ActorList restored stale live vanilla actor as dead"
+                                     << " from=" << c.name
+                                     << " refId=" << overlay.actor.refId
+                                     << " refNum=" << overlay.actor.refNum
+                                     << " incomingCell=" << incoming.cellId
+                                     << " deadCell=" << deadCellId
+                                     << " repairedZeroTransform=" << repairedZeroTransform
+                                     << " pos=(" << overlay.actor.position.pos[0]
+                                     << "," << overlay.actor.position.pos[1]
+                                     << "," << overlay.actor.position.pos[2] << ")"
+                                     << " deathAnim='" << overlay.actor.deathAnimGroup << "'";
+                }
+                continue;
+            }
+        }
+
         if (rejectStaleAliveVanillaActor(actor, incoming.cellId, c, "ActorList"))
             continue;
 
@@ -3981,7 +4285,6 @@ void MPServer::handleActorList(ConnectedClient& c, const uint8_t* data, size_t s
             it->second.serverSpawnTime = migratedRecord->serverSpawnTime;
         persistSpawnedActorIfNeeded(it->second);
         rememberActorLocation(it->second.actor, incoming.cellId);
-        rememberDeadVanillaActor(it->second);
         if (migratedRecord && it->second.actor.mpNum != 0)
             upsertSpawnedActorDynamicRecordLinkIfNeeded(it->second.actor);
 
@@ -4118,6 +4421,13 @@ void MPServer::handleActorList(ConnectedClient& c, const uint8_t* data, size_t s
     out.setActorList(&deduped);
     broadcastActorIdentityForCell(incoming.cellId, cellState);
     broadcastActorToCell(incoming.cellId, out.encode(), c.conn);
+    if (staleDeadVanillaCorrections != 0)
+    {
+        Log(Debug::Info) << "[Server] ActorList replaying dead vanilla overlay state"
+                         << " toInterestedClients cell=" << incoming.cellId
+                         << " count=" << staleDeadVanillaCorrections;
+        sendActorStateToInterestedClients(incoming.cellId);
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -4212,6 +4522,8 @@ void MPServer::handleActorIdentityAck(ConnectedClient& c, const uint8_t* data, s
     {
         if (actorNetId == 0)
             continue;
+        if (c.actorV2IdentitySent.count(actorNetId) == 0)
+            continue;
         if (c.actorV2IdentityAcked.insert(actorNetId).second)
         {
             ++newlyAcked;
@@ -4249,7 +4561,9 @@ void MPServer::handleActorPositionV2(ConnectedClient& c, const uint8_t* data, si
     std::size_t accepted = 0;
     std::size_t missingIdentity = 0;
     std::size_t wrongAuthority = 0;
+    std::size_t deadVanillaSuppressed = 0;
     uint32_t firstMissingActorNetId = 0;
+    uint32_t firstDeadVanillaActorNetId = 0;
 
     for (const CompactActorSnapshot& snapshot : incoming.snapshots)
     {
@@ -4313,6 +4627,31 @@ void MPServer::handleActorPositionV2(ConnectedClient& c, const uint8_t* data, si
             continue;
         }
 
+        if (record->actor.mpNum == 0)
+        {
+            std::string deadCellId;
+            if (const ActorRegistryRecord* deadRecord = findDeadVanillaActor(record->actor, &deadCellId))
+            {
+                BaseActor& actor = record->actor;
+                actor = deadRecord->actor;
+                actor.cellId = cellId;
+                actor.isDead = true;
+                actor.isInstantDeath = true;
+                actor.isMoving = false;
+                actor.isAttackingOrCasting = false;
+                actor.velocity = Velocity {};
+                actor.animFlags.animFwd = 0.f;
+                actor.animFlags.animSide = 0.f;
+                actor.animFlags.movementFlags = 0;
+                record->lastSnapshotTime = timestamp;
+                ensureActorNetId(*record, cellId);
+                ++deadVanillaSuppressed;
+                if (firstDeadVanillaActorNetId == 0)
+                    firstDeadVanillaActorNetId = snapshot.actorNetId;
+                continue;
+            }
+        }
+
         BaseActor& actor = record->actor;
         actor.position = snapshot.position;
         actor.velocity = snapshot.velocity;
@@ -4343,7 +4682,7 @@ void MPServer::handleActorPositionV2(ConnectedClient& c, const uint8_t* data, si
         broadcastActorPositionV2ToCell(cellId, cellIt->second, actorList, c.conn);
     }
 
-    if (missingIdentity != 0 || wrongAuthority != 0)
+    if (missingIdentity != 0 || wrongAuthority != 0 || deadVanillaSuppressed != 0)
     {
         Log(Debug::Verbose) << "[Server] ActorPositionV2 filtered"
                             << " from=" << c.name
@@ -4351,7 +4690,9 @@ void MPServer::handleActorPositionV2(ConnectedClient& c, const uint8_t* data, si
                             << " accepted=" << accepted
                             << " missingIdentity=" << missingIdentity
                             << " firstMissingActorNetId=" << firstMissingActorNetId
-                            << " wrongAuthority=" << wrongAuthority;
+                            << " wrongAuthority=" << wrongAuthority
+                            << " deadVanillaSuppressed=" << deadVanillaSuppressed
+                            << " firstDeadVanillaActorNetId=" << firstDeadVanillaActorNetId;
     }
 }
 
@@ -4374,7 +4715,9 @@ void MPServer::handleActorPresentationV2(ConnectedClient& c, const uint8_t* data
     std::size_t accepted = 0;
     std::size_t missingIdentity = 0;
     std::size_t wrongAuthority = 0;
+    std::size_t deadVanillaSuppressed = 0;
     uint32_t firstMissingActorNetId = 0;
+    uint32_t firstDeadVanillaActorNetId = 0;
 
     for (const ActorPresentationSnapshot& snapshot : incoming.snapshots)
     {
@@ -4438,13 +4781,39 @@ void MPServer::handleActorPresentationV2(ConnectedClient& c, const uint8_t* data
             continue;
         }
 
+        if (record->actor.mpNum == 0)
+        {
+            std::string deadCellId;
+            if (const ActorRegistryRecord* deadRecord = findDeadVanillaActor(record->actor, &deadCellId))
+            {
+                BaseActor& actor = record->actor;
+                actor = deadRecord->actor;
+                actor.cellId = cellId;
+                actor.isDead = true;
+                actor.isInstantDeath = true;
+                actor.isMoving = false;
+                actor.isAttackingOrCasting = false;
+                actor.velocity = Velocity {};
+                actor.animFlags.animFwd = 0.f;
+                actor.animFlags.animSide = 0.f;
+                actor.animFlags.movementFlags = 0;
+                record->lastSnapshotTime = timestamp;
+                ensureActorNetId(*record, cellId);
+                ++deadVanillaSuppressed;
+                if (firstDeadVanillaActorNetId == 0)
+                    firstDeadVanillaActorNetId = snapshot.actorNetId;
+                continue;
+            }
+        }
+
         BaseActor& actor = record->actor;
+        const bool snapshotIsDead = snapshot.isDead || ((snapshot.presentationFlags & ActorPresentationDead) != 0);
         applyActorPresentationFlags(actor, snapshot.presentationFlags);
         actor.isMoving = snapshot.isMoving;
         actor.isAttackingOrCasting = snapshot.isAttackingOrCasting;
         actor.hasWeaponDrawn = snapshot.hasWeaponDrawn;
         actor.hasSpellReadied = snapshot.hasSpellReadied;
-        actor.isDead = snapshot.isDead;
+        actor.isDead = snapshotIsDead;
         actor.animFlags.movementFlags = snapshot.movementFlags;
         actor.animFlags.animFwd = dequantizeActorAxis(snapshot.animFwd);
         actor.animFlags.animSide = dequantizeActorAxis(snapshot.animSide);
@@ -4456,6 +4825,15 @@ void MPServer::handleActorPresentationV2(ConnectedClient& c, const uint8_t* data
         {
             actor.animFlags.animFwd = 0.f;
             actor.animFlags.animSide = 0.f;
+        }
+        if (snapshotIsDead)
+        {
+            actor.isMoving = false;
+            actor.isAttackingOrCasting = false;
+            actor.velocity = Velocity {};
+            actor.animFlags.animFwd = 0.f;
+            actor.animFlags.animSide = 0.f;
+            actor.animFlags.movementFlags = 0;
         }
         actor.cellId = cellId;
         record->lastSnapshotTime = timestamp;
@@ -4483,7 +4861,7 @@ void MPServer::handleActorPresentationV2(ConnectedClient& c, const uint8_t* data
         broadcastActorPresentationV2ToCell(cellId, cellIt->second, actorList, c.conn);
     }
 
-    if (missingIdentity != 0 || wrongAuthority != 0)
+    if (missingIdentity != 0 || wrongAuthority != 0 || deadVanillaSuppressed != 0)
     {
         Log(Debug::Verbose) << "[Server] ActorPresentationV2 filtered"
                             << " from=" << c.name
@@ -4491,7 +4869,9 @@ void MPServer::handleActorPresentationV2(ConnectedClient& c, const uint8_t* data
                             << " accepted=" << accepted
                             << " missingIdentity=" << missingIdentity
                             << " firstMissingActorNetId=" << firstMissingActorNetId
-                            << " wrongAuthority=" << wrongAuthority;
+                            << " wrongAuthority=" << wrongAuthority
+                            << " deadVanillaSuppressed=" << deadVanillaSuppressed
+                            << " firstDeadVanillaActorNetId=" << firstDeadVanillaActorNetId;
     }
 }
 
@@ -4675,6 +5055,204 @@ void MPServer::handleActorAttack(ConnectedClient& c, const uint8_t* data, size_t
     broadcastActorToCell(filtered.cellId, out.encode(), c.conn);
     Log(Debug::Info) << "[Server] Broadcast ActorAttack to cell=" << filtered.cellId
                      << " actors=" << filtered.actors.size();
+}
+
+// ---------------------------------------------------------------------------
+void MPServer::handleActorAttackV2(ConnectedClient& c, const uint8_t* data, size_t size)
+{
+    ActorAttackV2List incoming;
+    PacketActorAttackV2 pkt;
+    pkt.setAttackList(&incoming);
+    if (!pkt.decode(data, size))
+        return;
+    if (incoming.protocolVersion != ActorSyncProtocolVersionV2)
+    {
+        Log(Debug::Warning) << "[Server] Rejecting ActorAttackV2 from " << c.name
+                            << " unsupported protocol=" << incoming.protocolVersion;
+        return;
+    }
+
+    const uint64_t timestamp = currentServerTimeMs();
+    std::unordered_map<std::string, ActorAttackV2List> updatesByCell;
+    std::size_t accepted = 0;
+    std::size_t missingIdentity = 0;
+    std::size_t wrongAuthority = 0;
+    std::size_t unloadedCell = 0;
+    std::size_t deadVanillaSuppressed = 0;
+    uint32_t firstMissingActorNetId = 0;
+    uint32_t firstDeadVanillaActorNetId = 0;
+
+    for (const ActorAttackV2Event& event : incoming.events)
+    {
+        auto keyIt = mWorld.actorKeysByNetId.find(event.actorNetId);
+        if (event.actorNetId == 0 || keyIt == mWorld.actorKeysByNetId.end())
+        {
+            ++missingIdentity;
+            if (firstMissingActorNetId == 0)
+                firstMissingActorNetId = event.actorNetId;
+            continue;
+        }
+
+        const std::string& actorKey = keyIt->second;
+        std::string cellId;
+        CellActorState* cellState = nullptr;
+        ActorRegistryRecord* record = nullptr;
+
+        auto locationIt = mWorld.actorLocations.find(actorKey);
+        if (locationIt != mWorld.actorLocations.end())
+        {
+            auto cellIt = mWorld.actorCells.find(locationIt->second);
+            if (cellIt != mWorld.actorCells.end())
+            {
+                auto actorIt = cellIt->second.actors.find(actorKey);
+                if (actorIt != cellIt->second.actors.end())
+                {
+                    cellId = cellIt->first;
+                    cellState = &cellIt->second;
+                    record = &actorIt->second;
+                }
+            }
+        }
+
+        if (!record)
+        {
+            for (auto& [candidateCellId, candidateCellState] : mWorld.actorCells)
+            {
+                auto actorIt = candidateCellState.actors.find(actorKey);
+                if (actorIt == candidateCellState.actors.end())
+                    continue;
+
+                cellId = candidateCellId;
+                cellState = &candidateCellState;
+                record = &actorIt->second;
+                rememberActorLocation(record->actor, cellId);
+                break;
+            }
+        }
+
+        if (!record || !cellState)
+        {
+            ++missingIdentity;
+            if (firstMissingActorNetId == 0)
+                firstMissingActorNetId = event.actorNetId;
+            continue;
+        }
+
+        if (!clientHasActorCellLoaded(c, cellId))
+        {
+            ++unloadedCell;
+            continue;
+        }
+
+        if (cellState->authorityGuid != c.guid)
+        {
+            ++wrongAuthority;
+            continue;
+        }
+
+        if (record->actor.mpNum == 0)
+        {
+            std::string deadCellId;
+            if (const ActorRegistryRecord* deadRecord = findDeadVanillaActor(record->actor, &deadCellId))
+            {
+                BaseActor& actor = record->actor;
+                actor = deadRecord->actor;
+                actor.cellId = cellId;
+                actor.isDead = true;
+                actor.isInstantDeath = true;
+                actor.isMoving = false;
+                actor.isAttackingOrCasting = false;
+                actor.velocity = Velocity {};
+                actor.animFlags.animFwd = 0.f;
+                actor.animFlags.animSide = 0.f;
+                actor.animFlags.movementFlags = 0;
+                record->lastSnapshotTime = timestamp;
+                ensureActorNetId(*record, cellId);
+                ++deadVanillaSuppressed;
+                if (firstDeadVanillaActorNetId == 0)
+                    firstDeadVanillaActorNetId = event.actorNetId;
+                continue;
+            }
+        }
+
+        BaseActor& actor = record->actor;
+        actor.attack = event.attack;
+        actor.cellId = cellId;
+        record->lastSnapshotTime = timestamp;
+        const uint32_t actorNetId = ensureActorNetId(*record, cellId);
+        persistSpawnedActorIfNeeded(*record);
+
+        ActorAttackV2List& outgoing = updatesByCell[cellId];
+        if (outgoing.events.empty())
+        {
+            outgoing.protocolVersion = ActorSyncProtocolVersionV2;
+            outgoing.cellId = cellId;
+            outgoing.authorityGuid = cellState->authorityGuid;
+            outgoing.authorityGeneration = cellState->authorityGeneration;
+            outgoing.sequence = cellState->nextSnapshotSequence++;
+            outgoing.serverTimestamp = timestamp;
+        }
+
+        ActorAttackV2Event outgoingEvent = event;
+        outgoingEvent.actorNetId = actorNetId;
+        outgoing.events.push_back(outgoingEvent);
+        ++accepted;
+    }
+
+    std::size_t sent = 0;
+    std::size_t suppressedUntilIdentityKnown = 0;
+    for (auto& [cellId, attackList] : updatesByCell)
+    {
+        for (auto& [conn, client] : mClients)
+        {
+            if (conn == c.conn
+                || !clientHasActorCellLoaded(client, cellId)
+                || client.actorSyncProtocolVersion < ActorSyncProtocolVersionV2)
+                continue;
+
+            ActorAttackV2List filtered = attackList;
+            filtered.events.clear();
+            filtered.events.reserve(attackList.events.size());
+            for (const ActorAttackV2Event& event : attackList.events)
+            {
+                if (client.actorV2IdentitySent.count(event.actorNetId) == 0
+                    || client.actorV2IdentityAcked.count(event.actorNetId) == 0)
+                {
+                    ++suppressedUntilIdentityKnown;
+                    ++client.actorV2AttackSuppressedUntilIdentityKnownWindow;
+                    ++client.actorV2MissingIdentityByNetIdWindow[event.actorNetId];
+                    continue;
+                }
+
+                filtered.events.push_back(event);
+            }
+
+            if (filtered.events.empty())
+                continue;
+
+            PacketActorAttackV2 out;
+            out.setAttackList(&filtered);
+            sendTo(conn, out.encode(), /*reliable=*/true);
+            client.actorV2AttackSentWindow += filtered.events.size();
+            sent += filtered.events.size();
+        }
+    }
+
+    Log((missingIdentity != 0 || wrongAuthority != 0 || unloadedCell != 0
+            || deadVanillaSuppressed != 0 || suppressedUntilIdentityKnown != 0) ? Debug::Info : Debug::Verbose)
+        << "[Server] ActorAttackV2"
+        << " from=" << c.name
+        << " packetCell=" << incoming.cellId
+        << " events=" << incoming.events.size()
+        << " accepted=" << accepted
+        << " sent=" << sent
+        << " missingIdentity=" << missingIdentity
+        << " firstMissingActorNetId=" << firstMissingActorNetId
+        << " wrongAuthority=" << wrongAuthority
+        << " unloadedCell=" << unloadedCell
+        << " deadVanillaSuppressed=" << deadVanillaSuppressed
+        << " firstDeadVanillaActorNetId=" << firstDeadVanillaActorNetId
+        << " suppressedUntilIdentityKnown=" << suppressedUntilIdentityKnown;
 }
 
 // ---------------------------------------------------------------------------
@@ -4912,10 +5490,28 @@ void MPServer::handleActorDeath(ConnectedClient& c, const uint8_t* data, size_t 
                          << " persistent=" << stored->persistent
                          << " wasDead=" << wasDead
                          << " prevHp=" << stored->actor.dynamicStats.health.current;
+        const bool alreadyRememberedDeadVanilla = actor.mpNum == 0 && findDeadVanillaActor(actor) != nullptr;
+        const bool duplicateAlreadyDead = wasDead
+            && actor.isDead
+            && (alreadyRememberedDeadVanilla
+                || (actor.mpNum != 0 && !stored->actor.deathAnimGroup.empty()));
+        if (duplicateAlreadyDead)
+        {
+            Log(Debug::Verbose) << "[Server] ActorDeath ignored duplicate already-dead actor"
+                                << " refId=" << stored->actor.refId
+                                << " refNum=" << stored->actor.refNum
+                                << " mpNum=" << stored->actor.mpNum
+                                << " cell=" << incoming.cellId;
+            continue;
+        }
         stored->actor.refId = actor.refId;
         stored->actor.refNum = actor.refNum;
         stored->actor.mpNum = actor.mpNum;
         stored->actor.cellId = incoming.cellId;
+        // ActorDeath currently carries identity/death fields only; keep the
+        // latest transform from ActorPosition/ActorPositionV2 instead of
+        // overwriting corpse persistence with packet-default zeroes.
+        stored->actor.velocity = Velocity {};
         stored->actor.deathState = actor.deathState;
         stored->actor.isDead = actor.isDead;
         stored->actor.isInstantDeath = actor.isInstantDeath;
@@ -4924,7 +5520,17 @@ void MPServer::handleActorDeath(ConnectedClient& c, const uint8_t* data, size_t 
         stored->lastSnapshotTime = incoming.serverTimestamp;
         persistSpawnedActorIfNeeded(*stored);
         if (stored->actor.mpNum == 0 && stored->actor.isDead)
+        {
+            Log(Debug::Info) << "[Server] ActorDeath preserved vanilla corpse transform"
+                             << " refId=" << stored->actor.refId
+                             << " refNum=" << stored->actor.refNum
+                             << " cell=" << incoming.cellId
+                             << " pos=(" << stored->actor.position.pos[0]
+                             << "," << stored->actor.position.pos[1]
+                             << "," << stored->actor.position.pos[2] << ")"
+                             << " deathAnim='" << stored->actor.deathAnimGroup << "'";
             rememberDeadVanillaActor(*stored);
+        }
         else if (wasDead)
             forgetDeadVanillaActor(stored->actor, incoming.cellId);
         if (actor.isDead && !wasDead)
@@ -5028,9 +5634,7 @@ void MPServer::handleActorStatsDynamic(ConnectedClient& c, const uint8_t* data, 
         stored->actor.isDead = actor.isDead;
         stored->lastSnapshotTime = incoming.serverTimestamp;
         persistSpawnedActorIfNeeded(*stored);
-        if (stored->actor.mpNum == 0 && stored->actor.isDead)
-            rememberDeadVanillaActor(*stored);
-        else if (wasDead)
+        if (wasDead && !stored->actor.isDead)
             forgetDeadVanillaActor(stored->actor, incoming.cellId);
         if (actor.isDead && !wasDead)
             sendActorLifecycleEvent("death", stored->actor, stored->persistent);
@@ -5889,10 +6493,13 @@ bool MPServer::removeActor(uint32_t mpNum, const std::string& cellId)
 
     auto& actors = cellIt->second.actors;
     bool removed = false;
+    std::vector<ActorRegistryRecord> removedRecords;
     for (auto it = actors.begin(); it != actors.end();)
     {
         if (it->second.actor.mpNum == mpNum)
         {
+            ensureActorNetId(it->second, resolvedCellId);
+            removedRecords.push_back(it->second);
             forgetActorLocation(it->second.actor, resolvedCellId);
             it = actors.erase(it);
             removed = true;
@@ -5905,6 +6512,11 @@ bool MPServer::removeActor(uint32_t mpNum, const std::string& cellId)
 
     if (!removed)
         return false;
+
+    broadcastActorIdentityRemovalForCell(resolvedCellId, cellIt->second, removedRecords);
+
+    for (const ActorRegistryRecord& record : removedRecords)
+        forgetActorNetId(record.actorNetId, record.actor);
 
     for (auto it = mWorld.containers.begin(); it != mWorld.containers.end();)
     {

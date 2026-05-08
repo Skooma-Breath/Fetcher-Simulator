@@ -62,6 +62,7 @@ namespace mwmp
 
         int   level       = 1;
         float levelProgress = 0.f;
+        bool  hasSavedStats = false;
 
         // ------------------------------------------------------------------
         // Combat / animation

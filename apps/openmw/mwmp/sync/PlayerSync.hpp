@@ -36,6 +36,7 @@ namespace mwmp
 
         // Force-flush all state immediately (e.g. just after connect)
         void forceFullSync(bool includeInventoryAndEquipment = true);
+        void flushPersistentStats();
         void notifyLocalHit(const MWWorld::Ptr& victim, float damage, bool healthDamage, bool knocked,
             const osg::Vec3f& hitPos, int attackType = 0, float attackStrength = 0.f);
         void notifyLocalCastRelease(
@@ -46,6 +47,8 @@ namespace mwmp
         void applyServerCellChange(const BasePlayer& authoritative);
         void queueAuthoritativeEquipment(const BasePlayer& authoritative);
         void queueAuthoritativeInventory(const BasePlayer& authoritative);
+        void queueRestoredStats(const BasePlayer& restored);
+        void applyRestoredStatsToPlayer();
 
         // Accessors used by Networking dispatcher
         BasePlayer& localPlayer() { return mLocal; }
@@ -85,6 +88,7 @@ namespace mwmp
         void snapshotEquipment();
         void snapshotInventory();
         void snapshotDynamicStats();
+        void capturePersistentStats(const MWWorld::Ptr& player);
         void captureEquipment(const MWWorld::Ptr& player);
         void captureInventory(const MWWorld::Ptr& player);
         std::vector<std::string> collectLoadedActorCellIds() const;
@@ -98,6 +102,10 @@ namespace mwmp
 
         BasePlayer     mLocal;          // live mirror of local player state
         bool           mPlayerReady = false;
+        BasePlayer     mPendingRestoredStats;
+        bool           mHasPendingRestoredStats = false;
+        int            mLastLoggedPersistentStrength = -1;
+        float          mLastLoggedPersistentBlunt = -1.f;
 
         // --- send-rate accumulators ---
         float mPositionTimer    = 0.f;
@@ -106,7 +114,7 @@ namespace mwmp
         //60 Hz breaks footstep cadence...need to test with Lerping
         //static constexpr float POSITION_RATE = 0.166f; // 60 Hz
         static constexpr float POSITION_RATE = 0.033f; // 30 Hz
-        static constexpr float STATS_RATE    = 1.0f;   // 1 Hz
+        static constexpr float STATS_RATE    = 0.25f;  // 4 Hz on change
 
         // --- last-sent snapshots for delta detection ---
         struct PositionSnapshot { float pos[3]; float rot[3]; float velocity[3]; };
@@ -120,7 +128,14 @@ namespace mwmp
         std::array<EquipmentItem, BasePlayer::NUM_EQUIPMENT_SLOTS> mLastEquip{};
         std::vector<Item> mLastInventory;
 
-        struct StatsSnapshot { float hCur, mCur, fCur; };
+        struct StatsSnapshot
+        {
+            DynamicStats dynamicStats;
+            std::array<Attribute, BasePlayer::NUM_ATTRIBUTES> attributes;
+            std::array<Skill, BasePlayer::NUM_SKILLS> skills;
+            int level = 1;
+            float levelProgress = 0.f;
+        };
         StatsSnapshot mLastStats{};
 
         AnimFlags mLastAnimFlags{};

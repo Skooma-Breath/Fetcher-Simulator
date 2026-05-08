@@ -52,6 +52,7 @@
 #include "../../mwworld/player.hpp"
 #include "../../mwworld/livecellref.hpp"
 #include <components/esm3/loadnpc.hpp>
+#include <components/esm3/loadskil.hpp>
 #include <components/esm3/loadweap.hpp>
 #include "../../mwmechanics/movement.hpp"
 #include <components/openmw-mp/Packets/Player/PacketPlayerAnimFlags.hpp>
@@ -81,6 +82,41 @@ namespace
     bool sameEquipment(const EquipmentItem& left, const EquipmentItem& right)
     {
         return left.slot == right.slot && sameItem(left.item, right.item);
+    }
+
+    bool sameDynamicStat(const DynamicStat& left, const DynamicStat& right)
+    {
+        constexpr float eps = 0.01f;
+        return std::abs(left.base - right.base) <= eps
+            && std::abs(left.current - right.current) <= eps
+            && std::abs(left.mod - right.mod) <= eps;
+    }
+
+    bool sameAttribute(const Attribute& left, const Attribute& right)
+    {
+        constexpr float eps = 0.01f;
+        return left.base == right.base
+            && std::abs(left.mod - right.mod) <= eps
+            && std::abs(left.damage - right.damage) <= eps;
+    }
+
+    bool sameSkill(const Skill& left, const Skill& right)
+    {
+        constexpr float eps = 0.01f;
+        return std::abs(left.base - right.base) <= eps
+            && std::abs(left.mod - right.mod) <= eps
+            && std::abs(left.damage - right.damage) <= eps
+            && std::abs(left.progress - right.progress) <= eps
+            && left.increases == right.increases;
+    }
+
+    MWMechanics::DynamicStat<float> toMechanicsDynamicStat(const DynamicStat& stat)
+    {
+        MWMechanics::DynamicStat<float> value;
+        value.setBase(stat.base);
+        value.setModifier(stat.mod);
+        value.setCurrent(stat.current, true, true);
+        return value;
     }
 
     std::string cellIdFromCell(const CellId& cell)
@@ -273,6 +309,7 @@ void PlayerSync::forceFullSync(bool includeInventoryAndEquipment)
 
             captureEquipment(player);
             captureInventory(player);
+            capturePersistentStats(player);
         }
     }
 
@@ -292,6 +329,29 @@ void PlayerSync::forceFullSync(bool includeInventoryAndEquipment)
     snapshotInventory();
     snapshotDynamicStats();
     Log(Debug::Info) << "[MP] PlayerSync: full sync sent (guid=" << mLocal.guid << ")";
+}
+
+void PlayerSync::flushPersistentStats()
+{
+    MWBase::World* world = MWBase::Environment::get().getWorld();
+    MWWorld::Ptr player = world ? world->getPlayerPtr() : MWWorld::Ptr{};
+    if (!world || player.isEmpty() || !player.getClass().isNpc())
+        return;
+
+    const auto& liveStats = player.getClass().getCreatureStats(player);
+    mLocal.dynamicStats.health.base = liveStats.getHealth().getBase();
+    mLocal.dynamicStats.health.current = liveStats.getHealth().getCurrent();
+    mLocal.dynamicStats.health.mod = liveStats.getHealth().getModifier();
+    mLocal.dynamicStats.magicka.base = liveStats.getMagicka().getBase();
+    mLocal.dynamicStats.magicka.current = liveStats.getMagicka().getCurrent();
+    mLocal.dynamicStats.magicka.mod = liveStats.getMagicka().getModifier();
+    mLocal.dynamicStats.fatigue.base = liveStats.getFatigue().getBase();
+    mLocal.dynamicStats.fatigue.current = liveStats.getFatigue().getCurrent();
+    mLocal.dynamicStats.fatigue.mod = liveStats.getFatigue().getModifier();
+    capturePersistentStats(player);
+
+    sendDynamicStats();
+    snapshotDynamicStats();
 }
 
 // ---------------------------------------------------------------------------
@@ -420,6 +480,32 @@ void PlayerSync::queueAuthoritativeInventory(const BasePlayer& authoritative)
         applyPendingAuthoritativeState(player);
 }
 
+void PlayerSync::queueRestoredStats(const BasePlayer& restored)
+{
+    mPendingRestoredStats = restored;
+    mPendingRestoredStats.hasSavedStats = true;
+    mHasPendingRestoredStats = true;
+
+    mLocal.hasSavedStats = true;
+    mLocal.dynamicStats = restored.dynamicStats;
+    mLocal.attributes = restored.attributes;
+    mLocal.skills = restored.skills;
+    mLocal.level = restored.level;
+    mLocal.levelProgress = restored.levelProgress;
+
+    const Attribute& strength = restored.attributes[0];
+    const Skill& blunt = restored.skills[ESM::Skill::refIdToIndex(ESM::Skill::BluntWeapon)];
+    if (strength.base > 100 || blunt.base > 100.f)
+    {
+        Log(Debug::Info) << "[MP] PlayerSync: queued restored persistent stats"
+                         << " level=" << restored.level
+                         << " strength=" << strength.base
+                         << " blunt=" << blunt.base
+                         << " hp=" << restored.dynamicStats.health.current
+                         << "/" << restored.dynamicStats.health.base;
+    }
+}
+
 // ---------------------------------------------------------------------------
 void PlayerSync::update(float dt)
 {
@@ -503,10 +589,15 @@ void PlayerSync::update(float dt)
     const auto& liveStats = player.getClass().getCreatureStats(player);
     mLocal.dynamicStats.health.base    = liveStats.getHealth().getBase();
     mLocal.dynamicStats.health.current = liveStats.getHealth().getCurrent();
+    mLocal.dynamicStats.health.mod     = liveStats.getHealth().getModifier();
     mLocal.dynamicStats.magicka.base   = liveStats.getMagicka().getBase();
     mLocal.dynamicStats.magicka.current= liveStats.getMagicka().getCurrent();
+    mLocal.dynamicStats.magicka.mod    = liveStats.getMagicka().getModifier();
     mLocal.dynamicStats.fatigue.base   = liveStats.getFatigue().getBase();
     mLocal.dynamicStats.fatigue.current= liveStats.getFatigue().getCurrent();
+    mLocal.dynamicStats.fatigue.mod    = liveStats.getFatigue().getModifier();
+    if (!mHasPendingRestoredStats)
+        capturePersistentStats(player);
 
     if (!liveStats.isDead() && mLastWasDead)
     {
@@ -675,6 +766,19 @@ void PlayerSync::sendDynamicStats()
     PacketPlayerStatsDynamic pkt;
     pkt.setPlayer(&mLocal);
     mClient.sendReliable(pkt.encode(mSeqCounter++));
+    const Attribute& strength = mLocal.attributes[0];
+    const Skill& blunt = mLocal.skills[ESM::Skill::refIdToIndex(ESM::Skill::BluntWeapon)];
+    if ((strength.base > 100 || blunt.base > 100.f)
+        && (strength.base != mLastLoggedPersistentStrength
+            || std::abs(blunt.base - mLastLoggedPersistentBlunt) > 0.01f))
+    {
+        Log(Debug::Info) << "[MP] PlayerSync: sent persistent stats"
+                         << " strength=" << strength.base
+                         << " blunt=" << blunt.base
+                         << " hp=" << mLocal.dynamicStats.health.current << "/" << mLocal.dynamicStats.health.base;
+        mLastLoggedPersistentStrength = strength.base;
+        mLastLoggedPersistentBlunt = blunt.base;
+    }
 }
 
 void PlayerSync::sendAnimPlay()
@@ -1487,10 +1591,24 @@ bool PlayerSync::inventoryChanged() const
 
 bool PlayerSync::dynamicStatsChanged() const
 {
-    constexpr float eps = 0.01f;
-    return std::abs(mLocal.dynamicStats.health.current  - mLastStats.hCur) > eps
-        || std::abs(mLocal.dynamicStats.magicka.current - mLastStats.mCur) > eps
-        || std::abs(mLocal.dynamicStats.fatigue.current - mLastStats.fCur) > eps;
+    if (!sameDynamicStat(mLocal.dynamicStats.health, mLastStats.dynamicStats.health)
+        || !sameDynamicStat(mLocal.dynamicStats.magicka, mLastStats.dynamicStats.magicka)
+        || !sameDynamicStat(mLocal.dynamicStats.fatigue, mLastStats.dynamicStats.fatigue)
+        || mLocal.level != mLastStats.level
+        || std::abs(mLocal.levelProgress - mLastStats.levelProgress) > 0.01f)
+        return true;
+
+    for (std::size_t i = 0; i < mLocal.attributes.size(); ++i)
+    {
+        if (!sameAttribute(mLocal.attributes[i], mLastStats.attributes[i]))
+            return true;
+    }
+    for (std::size_t i = 0; i < mLocal.skills.size(); ++i)
+    {
+        if (!sameSkill(mLocal.skills[i], mLastStats.skills[i]))
+            return true;
+    }
+    return false;
 }
 
 bool PlayerSync::animFlagsChanged() const
@@ -1526,9 +1644,95 @@ void PlayerSync::snapshotInventory()
 }
 void PlayerSync::snapshotDynamicStats()
 {
-    mLastStats = { mLocal.dynamicStats.health.current,
-                   mLocal.dynamicStats.magicka.current,
-                   mLocal.dynamicStats.fatigue.current };
+    mLastStats.dynamicStats = mLocal.dynamicStats;
+    mLastStats.attributes = mLocal.attributes;
+    mLastStats.skills = mLocal.skills;
+    mLastStats.level = mLocal.level;
+    mLastStats.levelProgress = mLocal.levelProgress;
+}
+
+void PlayerSync::applyRestoredStatsToPlayer()
+{
+    if (!mHasPendingRestoredStats && !mLocal.hasSavedStats)
+        return;
+
+    MWBase::World* world = MWBase::Environment::get().getWorld();
+    MWWorld::Ptr player = world ? world->getPlayerPtr() : MWWorld::Ptr{};
+    if (!world || player.isEmpty() || !player.getClass().isNpc())
+        return;
+
+    const BasePlayer& source = mHasPendingRestoredStats ? mPendingRestoredStats : mLocal;
+    MWMechanics::NpcStats& stats = player.getClass().getNpcStats(player);
+    for (std::size_t i = 0; i < source.attributes.size(); ++i)
+    {
+        const Attribute& saved = source.attributes[i];
+        MWMechanics::AttributeValue value;
+        value.setBase(static_cast<float>(saved.base), true);
+        value.setModifier(saved.mod);
+        if (saved.damage > 0.f)
+            value.damage(saved.damage);
+        stats.setAttribute(ESM::Attribute::indexToRefId(static_cast<int>(i)), value);
+    }
+
+    for (std::size_t i = 0; i < source.skills.size(); ++i)
+    {
+        const Skill& saved = source.skills[i];
+        MWMechanics::SkillValue value;
+        value.setBase(saved.base, true);
+        value.setModifier(saved.mod);
+        if (saved.damage > 0.f)
+            value.damage(saved.damage);
+        value.setProgress(saved.progress);
+        stats.setSkill(ESM::Skill::indexToRefId(static_cast<int>(i)), value);
+    }
+
+    stats.setLevel(std::max(1, source.level));
+    stats.setLevelProgress(static_cast<int>(std::max(0.f, source.levelProgress)));
+    stats.setHealth(toMechanicsDynamicStat(source.dynamicStats.health));
+    stats.setMagicka(toMechanicsDynamicStat(source.dynamicStats.magicka));
+    stats.setFatigue(toMechanicsDynamicStat(source.dynamicStats.fatigue));
+
+    mHasPendingRestoredStats = false;
+    capturePersistentStats(player);
+    const Attribute& strength = mLocal.attributes[0];
+    const Skill& blunt = mLocal.skills[ESM::Skill::refIdToIndex(ESM::Skill::BluntWeapon)];
+    Log(Debug::Info) << "[MP] PlayerSync: restored persistent player stats"
+                     << " level=" << mLocal.level
+                     << " strength=" << strength.base
+                     << " blunt=" << blunt.base
+                     << " hp=" << mLocal.dynamicStats.health.current << "/" << mLocal.dynamicStats.health.base;
+}
+
+void PlayerSync::capturePersistentStats(const MWWorld::Ptr& player)
+{
+    if (player.isEmpty() || !player.getClass().isNpc())
+        return;
+
+    MWMechanics::NpcStats& stats = player.getClass().getNpcStats(player);
+    mLocal.level = stats.getLevel();
+    mLocal.levelProgress = static_cast<float>(stats.getLevelProgress());
+    mLocal.hasSavedStats = true;
+
+    for (std::size_t i = 0; i < mLocal.attributes.size(); ++i)
+    {
+        const MWMechanics::AttributeValue& value
+            = stats.getAttribute(ESM::Attribute::indexToRefId(static_cast<int>(i)));
+        Attribute& out = mLocal.attributes[i];
+        out.base = static_cast<int>(std::lround(value.getBase()));
+        out.mod = value.getModifier();
+        out.damage = value.getDamage();
+    }
+
+    for (std::size_t i = 0; i < mLocal.skills.size(); ++i)
+    {
+        const MWMechanics::SkillValue& value = stats.getSkill(ESM::Skill::indexToRefId(static_cast<int>(i)));
+        Skill& out = mLocal.skills[i];
+        out.base = value.getBase();
+        out.mod = value.getModifier();
+        out.damage = value.getDamage();
+        out.progress = value.getProgress();
+        out.increases = 0;
+    }
 }
 
 void PlayerSync::captureEquipment(const MWWorld::Ptr& player)

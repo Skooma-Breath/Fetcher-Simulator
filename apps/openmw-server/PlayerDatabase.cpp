@@ -50,7 +50,10 @@ CREATE TABLE IF NOT EXISTS characters (
     class_data  TEXT    NOT NULL DEFAULT '',
     nickname    TEXT    NOT NULL DEFAULT '',
     inventory_saved INTEGER NOT NULL DEFAULT 0,
-    equipment_saved INTEGER NOT NULL DEFAULT 0
+    equipment_saved INTEGER NOT NULL DEFAULT 0,
+    stats_saved INTEGER NOT NULL DEFAULT 0,
+    level INTEGER NOT NULL DEFAULT 1,
+    level_progress REAL NOT NULL DEFAULT 0
 );
 
 CREATE INDEX IF NOT EXISTS idx_chars_account ON characters(account_id);
@@ -249,6 +252,39 @@ CREATE TABLE IF NOT EXISTS character_equipment (
     PRIMARY KEY(character_id, slot)
 );
 
+CREATE TABLE IF NOT EXISTS character_dynamic_stats (
+    character_id          INTEGER PRIMARY KEY REFERENCES characters(id) ON DELETE CASCADE,
+    health_base           REAL    NOT NULL DEFAULT 0,
+    health_current        REAL    NOT NULL DEFAULT 0,
+    health_mod            REAL    NOT NULL DEFAULT 0,
+    magicka_base          REAL    NOT NULL DEFAULT 0,
+    magicka_current       REAL    NOT NULL DEFAULT 0,
+    magicka_mod           REAL    NOT NULL DEFAULT 0,
+    fatigue_base          REAL    NOT NULL DEFAULT 0,
+    fatigue_current       REAL    NOT NULL DEFAULT 0,
+    fatigue_mod           REAL    NOT NULL DEFAULT 0
+);
+
+CREATE TABLE IF NOT EXISTS character_attributes (
+    character_id          INTEGER NOT NULL REFERENCES characters(id) ON DELETE CASCADE,
+    attribute_index       INTEGER NOT NULL,
+    base                  INTEGER NOT NULL DEFAULT 0,
+    mod                   REAL    NOT NULL DEFAULT 0,
+    damage                REAL    NOT NULL DEFAULT 0,
+    PRIMARY KEY(character_id, attribute_index)
+);
+
+CREATE TABLE IF NOT EXISTS character_skills (
+    character_id          INTEGER NOT NULL REFERENCES characters(id) ON DELETE CASCADE,
+    skill_index           INTEGER NOT NULL,
+    base                  REAL    NOT NULL DEFAULT 0,
+    mod                   REAL    NOT NULL DEFAULT 0,
+    damage                REAL    NOT NULL DEFAULT 0,
+    progress              REAL    NOT NULL DEFAULT 0,
+    increases             INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY(character_id, skill_index)
+);
+
 CREATE TABLE IF NOT EXISTS character_marks (
     character_id          INTEGER NOT NULL REFERENCES characters(id) ON DELETE CASCADE,
     mark_name             TEXT    NOT NULL,
@@ -291,6 +327,9 @@ CREATE INDEX IF NOT EXISTS idx_character_marks_character
         "ALTER TABLE characters ADD COLUMN nickname TEXT NOT NULL DEFAULT ''",
         "ALTER TABLE characters ADD COLUMN inventory_saved INTEGER NOT NULL DEFAULT 0",
         "ALTER TABLE characters ADD COLUMN equipment_saved INTEGER NOT NULL DEFAULT 0",
+        "ALTER TABLE characters ADD COLUMN stats_saved INTEGER NOT NULL DEFAULT 0",
+        "ALTER TABLE characters ADD COLUMN level INTEGER NOT NULL DEFAULT 1",
+        "ALTER TABLE characters ADD COLUMN level_progress REAL NOT NULL DEFAULT 0",
         "CREATE TABLE IF NOT EXISTS character_inventory ("
         "  character_id INTEGER NOT NULL REFERENCES characters(id) ON DELETE CASCADE,"
         "  item_index INTEGER NOT NULL,"
@@ -309,6 +348,33 @@ CREATE INDEX IF NOT EXISTS idx_character_marks_character
         "  enchantment_charge REAL NOT NULL DEFAULT -1,"
         "  soul TEXT NOT NULL DEFAULT '',"
         "  PRIMARY KEY(character_id, slot))",
+        "CREATE TABLE IF NOT EXISTS character_dynamic_stats ("
+        "  character_id INTEGER PRIMARY KEY REFERENCES characters(id) ON DELETE CASCADE,"
+        "  health_base REAL NOT NULL DEFAULT 0,"
+        "  health_current REAL NOT NULL DEFAULT 0,"
+        "  health_mod REAL NOT NULL DEFAULT 0,"
+        "  magicka_base REAL NOT NULL DEFAULT 0,"
+        "  magicka_current REAL NOT NULL DEFAULT 0,"
+        "  magicka_mod REAL NOT NULL DEFAULT 0,"
+        "  fatigue_base REAL NOT NULL DEFAULT 0,"
+        "  fatigue_current REAL NOT NULL DEFAULT 0,"
+        "  fatigue_mod REAL NOT NULL DEFAULT 0)",
+        "CREATE TABLE IF NOT EXISTS character_attributes ("
+        "  character_id INTEGER NOT NULL REFERENCES characters(id) ON DELETE CASCADE,"
+        "  attribute_index INTEGER NOT NULL,"
+        "  base INTEGER NOT NULL DEFAULT 0,"
+        "  mod REAL NOT NULL DEFAULT 0,"
+        "  damage REAL NOT NULL DEFAULT 0,"
+        "  PRIMARY KEY(character_id, attribute_index))",
+        "CREATE TABLE IF NOT EXISTS character_skills ("
+        "  character_id INTEGER NOT NULL REFERENCES characters(id) ON DELETE CASCADE,"
+        "  skill_index INTEGER NOT NULL,"
+        "  base REAL NOT NULL DEFAULT 0,"
+        "  mod REAL NOT NULL DEFAULT 0,"
+        "  damage REAL NOT NULL DEFAULT 0,"
+        "  progress REAL NOT NULL DEFAULT 0,"
+        "  increases INTEGER NOT NULL DEFAULT 0,"
+        "  PRIMARY KEY(character_id, skill_index))",
         "CREATE TABLE IF NOT EXISTS character_marks ("
         "  character_id INTEGER NOT NULL REFERENCES characters(id) ON DELETE CASCADE,"
         "  mark_name TEXT NOT NULL,"
@@ -438,6 +504,9 @@ CREATE INDEX IF NOT EXISTS idx_character_marks_character
             { "world_dynamic_record_links", "record_id, link_kind, owner_a, owner_b, owner_c, owner_index" },
             { "character_inventory", "character_id, item_index" },
             { "character_equipment", "character_id, slot" },
+            { "character_dynamic_stats", "character_id" },
+            { "character_attributes", "character_id, attribute_index" },
+            { "character_skills", "character_id, skill_index" },
             { "character_marks", "character_id, mark_name" },
         };
 
@@ -623,7 +692,7 @@ CREATE INDEX IF NOT EXISTS idx_character_marks_character
         sqlite3_stmt* s = prepare(
             "SELECT id, name, cell, pos_x, pos_y, pos_z, rot_x, rot_y, rot_z, is_new,"
             " race, head_mesh, hair_mesh, is_male, class_id, class_name, birth_sign, class_data, nickname,"
-            " inventory_saved, equipment_saved"
+            " inventory_saved, equipment_saved, stats_saved"
             " FROM characters WHERE account_id = ?1 AND name = ?2 LIMIT 1");
         sqlite3_bind_int64(s, 1, accountId);
         sqlite3_bind_text(s, 2, charName.data(), static_cast<int>(charName.size()), SQLITE_STATIC);
@@ -661,6 +730,7 @@ CREATE INDEX IF NOT EXISTS idx_character_marks_character
         rec.nickname = col(18);
         rec.hasSavedInventory = sqlite3_column_int(s, 19) != 0;
         rec.hasSavedEquipment = sqlite3_column_int(s, 20) != 0;
+        rec.hasSavedStats = sqlite3_column_int(s, 21) != 0;
         sqlite3_finalize(s);
         return rec;
     }
@@ -1049,6 +1119,187 @@ CREATE INDEX IF NOT EXISTS idx_character_marks_character
                 sqlite3_bind_int64(mark, 1, characterId);
             }
             checkSqlite(sqlite3_step(mark), mDb, "markCharacterEquipmentSaved");
+            sqlite3_finalize(mark);
+
+            exec("COMMIT");
+        }
+        catch (...)
+        {
+            try
+            {
+                exec("ROLLBACK");
+            }
+            catch (...)
+            {
+            }
+            throw;
+        }
+    }
+
+    bool PlayerDatabase::loadCharacterStats(int64_t characterId, BasePlayer& player)
+    {
+        sqlite3_stmt* meta = prepare("SELECT stats_saved, level, level_progress FROM characters WHERE id=?1 LIMIT 1");
+        sqlite3_bind_int64(meta, 1, characterId);
+        const int metaRc = sqlite3_step(meta);
+        if (metaRc != SQLITE_ROW || sqlite3_column_int(meta, 0) == 0)
+        {
+            sqlite3_finalize(meta);
+            return false;
+        }
+        player.level = sqlite3_column_int(meta, 1);
+        player.levelProgress = static_cast<float>(sqlite3_column_double(meta, 2));
+        sqlite3_finalize(meta);
+
+        sqlite3_stmt* dyn = prepare(
+            "SELECT health_base, health_current, health_mod, magicka_base, magicka_current, magicka_mod,"
+            " fatigue_base, fatigue_current, fatigue_mod"
+            " FROM character_dynamic_stats WHERE character_id=?1 LIMIT 1");
+        sqlite3_bind_int64(dyn, 1, characterId);
+        if (sqlite3_step(dyn) == SQLITE_ROW)
+        {
+            player.dynamicStats.health.base = static_cast<float>(sqlite3_column_double(dyn, 0));
+            player.dynamicStats.health.current = static_cast<float>(sqlite3_column_double(dyn, 1));
+            player.dynamicStats.health.mod = static_cast<float>(sqlite3_column_double(dyn, 2));
+            player.dynamicStats.magicka.base = static_cast<float>(sqlite3_column_double(dyn, 3));
+            player.dynamicStats.magicka.current = static_cast<float>(sqlite3_column_double(dyn, 4));
+            player.dynamicStats.magicka.mod = static_cast<float>(sqlite3_column_double(dyn, 5));
+            player.dynamicStats.fatigue.base = static_cast<float>(sqlite3_column_double(dyn, 6));
+            player.dynamicStats.fatigue.current = static_cast<float>(sqlite3_column_double(dyn, 7));
+            player.dynamicStats.fatigue.mod = static_cast<float>(sqlite3_column_double(dyn, 8));
+        }
+        sqlite3_finalize(dyn);
+
+        sqlite3_stmt* attrs = prepare(
+            "SELECT attribute_index, base, mod, damage"
+            " FROM character_attributes WHERE character_id=?1 ORDER BY attribute_index");
+        sqlite3_bind_int64(attrs, 1, characterId);
+        while (sqlite3_step(attrs) == SQLITE_ROW)
+        {
+            const int index = sqlite3_column_int(attrs, 0);
+            if (index < 0 || index >= BasePlayer::NUM_ATTRIBUTES)
+                continue;
+            Attribute& attribute = player.attributes[static_cast<std::size_t>(index)];
+            attribute.base = sqlite3_column_int(attrs, 1);
+            attribute.mod = static_cast<float>(sqlite3_column_double(attrs, 2));
+            attribute.damage = static_cast<float>(sqlite3_column_double(attrs, 3));
+        }
+        sqlite3_finalize(attrs);
+
+        sqlite3_stmt* skills = prepare(
+            "SELECT skill_index, base, mod, damage, progress, increases"
+            " FROM character_skills WHERE character_id=?1 ORDER BY skill_index");
+        sqlite3_bind_int64(skills, 1, characterId);
+        while (sqlite3_step(skills) == SQLITE_ROW)
+        {
+            const int index = sqlite3_column_int(skills, 0);
+            if (index < 0 || index >= BasePlayer::NUM_SKILLS)
+                continue;
+            Skill& skill = player.skills[static_cast<std::size_t>(index)];
+            skill.base = static_cast<float>(sqlite3_column_double(skills, 1));
+            skill.mod = static_cast<float>(sqlite3_column_double(skills, 2));
+            skill.damage = static_cast<float>(sqlite3_column_double(skills, 3));
+            skill.progress = static_cast<float>(sqlite3_column_double(skills, 4));
+            skill.increases = sqlite3_column_int(skills, 5);
+        }
+        sqlite3_finalize(skills);
+
+        player.hasSavedStats = true;
+        return true;
+    }
+
+    void PlayerDatabase::saveCharacterStats(int64_t characterId, const BasePlayer& player, bool touchLastSeen)
+    {
+        exec("BEGIN");
+        try
+        {
+            sqlite3_stmt* dyn = prepare(
+                "INSERT INTO character_dynamic_stats(character_id, health_base, health_current, health_mod,"
+                " magicka_base, magicka_current, magicka_mod, fatigue_base, fatigue_current, fatigue_mod)"
+                " VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)"
+                " ON CONFLICT(character_id) DO UPDATE SET"
+                " health_base=excluded.health_base,"
+                " health_current=excluded.health_current,"
+                " health_mod=excluded.health_mod,"
+                " magicka_base=excluded.magicka_base,"
+                " magicka_current=excluded.magicka_current,"
+                " magicka_mod=excluded.magicka_mod,"
+                " fatigue_base=excluded.fatigue_base,"
+                " fatigue_current=excluded.fatigue_current,"
+                " fatigue_mod=excluded.fatigue_mod");
+            sqlite3_bind_int64(dyn, 1, characterId);
+            sqlite3_bind_double(dyn, 2, player.dynamicStats.health.base);
+            sqlite3_bind_double(dyn, 3, player.dynamicStats.health.current);
+            sqlite3_bind_double(dyn, 4, player.dynamicStats.health.mod);
+            sqlite3_bind_double(dyn, 5, player.dynamicStats.magicka.base);
+            sqlite3_bind_double(dyn, 6, player.dynamicStats.magicka.current);
+            sqlite3_bind_double(dyn, 7, player.dynamicStats.magicka.mod);
+            sqlite3_bind_double(dyn, 8, player.dynamicStats.fatigue.base);
+            sqlite3_bind_double(dyn, 9, player.dynamicStats.fatigue.current);
+            sqlite3_bind_double(dyn, 10, player.dynamicStats.fatigue.mod);
+            checkSqlite(sqlite3_step(dyn), mDb, "upsertCharacterDynamicStats");
+            sqlite3_finalize(dyn);
+
+            sqlite3_stmt* clearAttrs = prepare("DELETE FROM character_attributes WHERE character_id=?1");
+            sqlite3_bind_int64(clearAttrs, 1, characterId);
+            checkSqlite(sqlite3_step(clearAttrs), mDb, "clearCharacterAttributes");
+            sqlite3_finalize(clearAttrs);
+
+            sqlite3_stmt* insertAttr = prepare(
+                "INSERT INTO character_attributes(character_id, attribute_index, base, mod, damage)"
+                " VALUES(?1, ?2, ?3, ?4, ?5)");
+            for (std::size_t i = 0; i < player.attributes.size(); ++i)
+            {
+                const Attribute& attribute = player.attributes[i];
+                sqlite3_bind_int64(insertAttr, 1, characterId);
+                sqlite3_bind_int(insertAttr, 2, static_cast<int>(i));
+                sqlite3_bind_int(insertAttr, 3, attribute.base);
+                sqlite3_bind_double(insertAttr, 4, attribute.mod);
+                sqlite3_bind_double(insertAttr, 5, attribute.damage);
+                checkSqlite(sqlite3_step(insertAttr), mDb, "insertCharacterAttribute");
+                sqlite3_reset(insertAttr);
+                sqlite3_clear_bindings(insertAttr);
+            }
+            sqlite3_finalize(insertAttr);
+
+            sqlite3_stmt* clearSkills = prepare("DELETE FROM character_skills WHERE character_id=?1");
+            sqlite3_bind_int64(clearSkills, 1, characterId);
+            checkSqlite(sqlite3_step(clearSkills), mDb, "clearCharacterSkills");
+            sqlite3_finalize(clearSkills);
+
+            sqlite3_stmt* insertSkill = prepare(
+                "INSERT INTO character_skills(character_id, skill_index, base, mod, damage, progress, increases)"
+                " VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7)");
+            for (std::size_t i = 0; i < player.skills.size(); ++i)
+            {
+                const Skill& skill = player.skills[i];
+                sqlite3_bind_int64(insertSkill, 1, characterId);
+                sqlite3_bind_int(insertSkill, 2, static_cast<int>(i));
+                sqlite3_bind_double(insertSkill, 3, skill.base);
+                sqlite3_bind_double(insertSkill, 4, skill.mod);
+                sqlite3_bind_double(insertSkill, 5, skill.damage);
+                sqlite3_bind_double(insertSkill, 6, skill.progress);
+                sqlite3_bind_int(insertSkill, 7, skill.increases);
+                checkSqlite(sqlite3_step(insertSkill), mDb, "insertCharacterSkill");
+                sqlite3_reset(insertSkill);
+                sqlite3_clear_bindings(insertSkill);
+            }
+            sqlite3_finalize(insertSkill);
+
+            sqlite3_stmt* mark = prepare(touchLastSeen
+                    ? "UPDATE characters SET stats_saved=1, level=?1, level_progress=?2, last_seen=?3 WHERE id=?4"
+                    : "UPDATE characters SET stats_saved=1, level=?1, level_progress=?2 WHERE id=?3");
+            sqlite3_bind_int(mark, 1, player.level);
+            sqlite3_bind_double(mark, 2, player.levelProgress);
+            if (touchLastSeen)
+            {
+                sqlite3_bind_int64(mark, 3, static_cast<int64_t>(std::time(nullptr)));
+                sqlite3_bind_int64(mark, 4, characterId);
+            }
+            else
+            {
+                sqlite3_bind_int64(mark, 3, characterId);
+            }
+            checkSqlite(sqlite3_step(mark), mDb, "markCharacterStatsSaved");
             sqlite3_finalize(mark);
 
             exec("COMMIT");
