@@ -78,8 +78,7 @@ namespace MWPhysics
             return candidateNormal * lastNormal >= sSurfReacquireNormalDotTolerance;
         }
 
-        float surfPlaneDistance(
-            const osg::Vec3f& point, const osg::Vec3f& planeNormal, const osg::Vec3f& planePoint)
+        float surfPlaneDistance(const osg::Vec3f& point, const osg::Vec3f& planeNormal, const osg::Vec3f& planePoint)
         {
             return std::abs((point - planePoint) * planeNormal);
         }
@@ -118,8 +117,7 @@ namespace MWPhysics
             return sLastSurfContacts;
         }
 
-        bool tryGetStoredSurfContact(
-            const btCollisionObject* obj, osg::Vec3f& normal, osg::Vec3f& contactPosition)
+        bool tryGetStoredSurfContact(const btCollisionObject* obj, osg::Vec3f& normal, osg::Vec3f& contactPosition)
         {
             const auto it = surfContactMemory().find(obj);
             if (it == surfContactMemory().end())
@@ -130,8 +128,7 @@ namespace MWPhysics
             return true;
         }
 
-        void storeSurfContact(
-            const btCollisionObject* obj, const osg::Vec3f& normal, const osg::Vec3f& contactPosition)
+        void storeSurfContact(const btCollisionObject* obj, const osg::Vec3f& normal, const osg::Vec3f& contactPosition)
         {
             surfContactMemory()[obj] = { normal, contactPosition };
         }
@@ -144,8 +141,8 @@ namespace MWPhysics
         void logSurfDebug(const char* phase, const ActorFrameData& actor, const SurfPhysicsSettings& settings,
             const osg::Vec3f& position, const osg::Vec3f& velocity, const osg::Vec3f& normal, float fraction,
             bool walkable, bool seenGround, bool onGround, bool onSlope, float velocityIntoSurface,
-            float effectiveOverbounce, bool usedSeamLogic, bool usedNormalPush, bool clipped,
-            float inputPlaneDot, float outputPlaneDot)
+            float effectiveOverbounce, bool usedSeamLogic, bool usedNormalPush, bool clipped, float inputPlaneDot,
+            float outputPlaneDot)
         {
             if (!shouldLogSurfDebug())
                 return;
@@ -182,7 +179,7 @@ namespace MWPhysics
             if (actor.mFlying || underwater)
             {
                 return (osg::Quat(actor.mRotation.x(), osg::Vec3f(-1, 0, 0))
-                        * osg::Quat(actor.mRotation.y(), osg::Vec3f(0, 0, -1)))
+                           * osg::Quat(actor.mRotation.y(), osg::Vec3f(0, 0, -1)))
                     * actor.mMovement;
             }
 
@@ -265,7 +262,10 @@ namespace MWPhysics
                         }
                     }
 
-                    if (!jumpRequested)
+                    // Do not kill carried upward jump inertia just because the jump input was consumed.
+                    // At 60 Hz the actor can still be classified as grounded for a frame after jump impulse
+                    // application.
+                    if (!jumpRequested && velocity.z() <= 0.f)
                         velocity.z() = 0.f;
                 }
                 else
@@ -277,14 +277,15 @@ namespace MWPhysics
                         const float addSpeed = cappedWishSpeed - currentSpeed;
                         if (addSpeed > 0.f)
                         {
-                            const float accelSpeed = std::min(settings.airAcceleration * cappedWishSpeed * time, addSpeed);
+                            const float accelSpeed
+                                = std::min(settings.airAcceleration * cappedWishSpeed * time, addSpeed);
                             velocity.x() += accelSpeed * wishDir.x();
                             velocity.y() += accelSpeed * wishDir.y();
                         }
                     }
 
-                    velocity.z() -= time * Constants::GravityConst * Constants::UnitsPerMeter
-                        * settings.gravityMultiplier;
+                    velocity.z()
+                        -= time * Constants::GravityConst * Constants::UnitsPerMeter * settings.gravityMultiplier;
                     if (velocity.z() < 0.f)
                         velocity.z() *= actor.mSlowFall;
                     if (actor.mSlowFall < 1.f)
@@ -330,7 +331,8 @@ namespace MWPhysics
                     break;
                 }
 
-                if (isWalkableSurfSlope(tracer.mPlaneNormal, settings) && !actor.mFlying && newPosition.z() >= swimlevel)
+                if (isWalkableSurfSlope(tracer.mPlaneNormal, settings) && !actor.mFlying
+                    && newPosition.z() >= swimlevel)
                     seenGround = true;
 
                 const float hitHeight = tracer.mHitPoint.z() - tracer.mEndPos.z() + actor.mHalfExtentsZ;
@@ -376,10 +378,9 @@ namespace MWPhysics
 
                 if (!walkableSlope || actor.mIsOnSlope)
                 {
-                    logSurfDebug("collision", actor, settings, tracer.mEndPos, velocity, planeNormal,
-                        collisionFraction, walkableSlope, seenGround, actor.mIsOnGround, actor.mIsOnSlope,
-                        velocityIntoSurface, effectiveOverbounce, false, false, clipped,
-                        inputPlaneDot, outputPlaneDot);
+                    logSurfDebug("collision", actor, settings, tracer.mEndPos, velocity, planeNormal, collisionFraction,
+                        walkableSlope, seenGround, actor.mIsOnGround, actor.mIsOnSlope, velocityIntoSurface,
+                        effectiveOverbounce, false, false, clipped, inputPlaneDot, outputPlaneDot);
                 }
 
                 osg::Vec3f direction = velocity;
@@ -395,7 +396,8 @@ namespace MWPhysics
             bool isOnGround = false;
             bool isOnSlope = false;
             actor.mStandingOn = nullptr;
-            if (forceGroundTest || (!actor.mFlying && !underwater && velocity.z() <= 0.f && newPosition.z() >= swimlevel))
+            if (forceGroundTest
+                || (!actor.mFlying && !underwater && velocity.z() <= 0.f && newPosition.z() >= swimlevel))
             {
                 const osg::Vec3f from = newPosition;
                 const auto dropDistance = 2 * sGroundOffset + (actor.mIsOnGround ? sStepSizeDown : 0);
@@ -414,7 +416,8 @@ namespace MWPhysics
                             tracer.mFraction, walkableSlope, seenGround, isOnGround && !isOnSlope, isOnSlope, 0.f, 0.f,
                             false, false, false, 0.f, 0.f);
 
-                        if (!isOnSlope && actor.mStandingOn->getBroadphaseHandle()->m_collisionFilterGroup == CollisionType_Water)
+                        if (!isOnSlope
+                            && actor.mStandingOn->getBroadphaseHandle()->m_collisionFilterGroup == CollisionType_Water)
                             actor.mWalkingOnWater = true;
 
                         if (!actor.mFlying && !isOnSlope)
