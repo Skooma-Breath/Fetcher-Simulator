@@ -141,18 +141,28 @@ local function tableCount(value)
     return count
 end
 
-local function liveSpawnedCount(spawnedMpNums)
-    local count = 0
+local function spawnedActorCounts(spawnedMpNums)
+    local live = 0
+    local dead = 0
+    local total = 0
     if type(spawnedMpNums) ~= "table" then
-        return count
+        return live, dead, total
     end
 
     for _, entry in pairs(spawnedMpNums) do
+        total = total + 1
         if type(entry) ~= "table" or entry.dead ~= true then
-            count = count + 1
+            live = live + 1
+        else
+            dead = dead + 1
         end
     end
-    return count
+    return live, dead, total
+end
+
+local function liveSpawnedCount(spawnedMpNums)
+    local live = spawnedActorCounts(spawnedMpNums)
+    return live
 end
 
 local function positionsDistanceSquared(left, right)
@@ -227,7 +237,10 @@ local function normalizePendingSpawns(spawner)
 end
 
 local function refreshCounts(spawner)
-    spawner.liveCount = liveSpawnedCount(spawner.spawnedMpNums)
+    local live, dead, total = spawnedActorCounts(spawner.spawnedMpNums)
+    spawner.liveCount = live
+    spawner.deadCount = dead
+    spawner.payloadCount = total
     spawner.pendingCount = #spawner.pendingSpawns
     spawner.remaining = math.max(0,
         (tonumber(spawner.spawnCount) or 0) - spawner.liveCount - spawner.pendingCount)
@@ -276,13 +289,7 @@ local function ensureSpawnerTickState(spawner)
     spawner.destroyed = spawner.destroyed == true
     spawner.actorMpNum = tonumber(spawner.actorMpNum) or 0
 
-    local liveCount = tonumber(spawner.liveCount)
-    if not liveCount then
-        liveCount = liveSpawnedCount(spawner.spawnedMpNums)
-    end
-    spawner.liveCount = math.max(0, math.floor(liveCount))
-    spawner.pendingCount = #spawner.pendingSpawns
-    spawner.remaining = math.max(0, spawner.spawnCount - spawner.liveCount - spawner.pendingCount)
+    refreshCounts(spawner)
     return true
 end
 
@@ -876,12 +883,14 @@ local function handleInfo(player, args)
     normalizeSpawnerState(spawner)
 
     player:sendMessage(string.format(
-        "%s: actor=%s record=%s spawn=%s live=%d pending=%d remaining=%d/%d timer=%.1fs cell=%s persistent=%s payloadPersistent=%s reset=%s destroyed=%s",
+        "%s: actor=%s record=%s spawn=%s live=%d dead=%d tracked=%d pending=%d remaining=%d/%d timer=%.1fs cell=%s persistent=%s payloadPersistent=%s reset=%s destroyed=%s",
         name,
         tostring(spawner.actorMpNum or 0),
         tostring(spawner.recordId),
         tostring(spawner.spawnRefId),
         tonumber(spawner.liveCount) or 0,
+        tonumber(spawner.deadCount) or 0,
+        tonumber(spawner.payloadCount) or 0,
         tonumber(spawner.pendingCount) or 0,
         tonumber(spawner.remaining) or 0,
         tonumber(spawner.spawnCount) or 0,
@@ -951,6 +960,8 @@ function M.listForAdminUi()
                 spawnRefId = spawner.spawnRefId,
                 spawnCount = spawner.spawnCount,
                 liveCount = spawner.liveCount,
+                deadCount = spawner.deadCount,
+                payloadCount = spawner.payloadCount,
                 pendingCount = spawner.pendingCount,
                 remaining = spawner.remaining,
                 spawnInterval = spawner.spawnInterval,
@@ -977,6 +988,8 @@ function M.listForAdminUi()
                     spawnRefId = "",
                     spawnCount = 0,
                     liveCount = 0,
+                    deadCount = 0,
+                    payloadCount = 0,
                     pendingCount = 0,
                     remaining = 0,
                     spawnInterval = getSpawnInterval(),
@@ -1068,6 +1081,7 @@ function M.onActorSpawned(data)
                     spawner.spawnedMpNums[tostring(data.mpNum)] = {
                         refId = data.refId,
                         cellId = data.cellId,
+                        dead = false,
                     }
                     refreshCounts(spawner)
                     changed = true
@@ -1137,9 +1151,10 @@ function M.onActorDeath(data)
         spawner.pendingSpawns = {}
         spawner.spawnTimer = spawner.spawnInterval
         refreshCounts(spawner)
-        mp.log(string.format("[spawner] %s destroyed; future timed spawns halted live=%d remaining=%d actorMpNum reset to 0",
+        mp.log(string.format("[spawner] %s destroyed; future timed spawns halted live=%d dead=%d remaining=%d actorMpNum reset to 0",
             matchedName,
             spawner.liveCount,
+            spawner.deadCount,
             spawner.remaining
         ))
 
@@ -1161,19 +1176,21 @@ function M.onActorDeath(data)
         end
         refreshCounts(spawner)
         if spawner.destroyed then
-            mp.log(string.format("[spawner] %s payload died mpNum=%s; no replacement because spawner is destroyed live=%d pending=%d remaining=%d",
+            mp.log(string.format("[spawner] %s payload died mpNum=%s; no replacement because spawner is destroyed live=%d dead=%d pending=%d remaining=%d",
                 matchedName,
                 tostring(data.mpNum),
                 spawner.liveCount,
+                spawner.deadCount,
                 spawner.pendingCount,
                 spawner.remaining
             ))
         else
-            mp.log(string.format("[spawner] %s payload died mpNum=%s; replacement in %.1fs live=%d pending=%d remaining=%d",
+            mp.log(string.format("[spawner] %s payload died mpNum=%s; replacement in %.1fs live=%d dead=%d pending=%d remaining=%d",
                 matchedName,
                 tostring(data.mpNum),
                 spawner.spawnInterval,
                 spawner.liveCount,
+                spawner.deadCount,
                 spawner.pendingCount,
                 spawner.remaining
             ))

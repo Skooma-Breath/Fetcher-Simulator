@@ -5356,6 +5356,7 @@ void MPServer::handleActorPresentationV2(ConnectedClient& c, const uint8_t* data
         }
 
         BaseActor& actor = record->actor;
+        const bool wasDead = actor.isDead;
         applyActorPresentationFlags(actor, snapshot.presentationFlags);
         actor.isMoving = snapshot.isMoving;
         actor.isAttackingOrCasting = snapshot.isAttackingOrCasting;
@@ -5386,6 +5387,14 @@ void MPServer::handleActorPresentationV2(ConnectedClient& c, const uint8_t* data
         actor.cellId = cellId;
         record->lastSnapshotTime = timestamp;
         ensureActorNetId(*record, cellId);
+        if (actor.mpNum != 0 && actor.isDead && !wasDead)
+        {
+            Log(Debug::Info) << "[Server] ActorPresentationV2 observed spawned death transition"
+                             << " refId=" << actor.refId
+                             << " mpNum=" << actor.mpNum
+                             << " cell=" << cellId;
+            sendActorLifecycleEvent("death", actor, record->persistent);
+        }
 
         ActorList& outgoing = updatesByCell[cellId];
         if (outgoing.cellId.empty())
