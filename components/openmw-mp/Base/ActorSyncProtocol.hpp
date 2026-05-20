@@ -11,8 +11,103 @@
 namespace mwmp
 {
     static constexpr uint32_t ActorSyncProtocolVersionV1 = 1;
-    static constexpr uint32_t ActorSyncProtocolVersionV2 = 2;
-    static constexpr uint32_t FirstServerAssignedActorNetId = 1000000000u;
+    // Still named v2 in code because this is the active ActorSync v2 lane, but
+    // the wire number is bumped for the deterministic ActorInstanceId key break.
+    static constexpr uint32_t ActorSyncProtocolVersionV2 = 3;
+
+    using ActorInstanceId = uint64_t;
+
+    enum class ActorKeyKind : uint8_t
+    {
+        VanillaRefNum = 0,
+        SpawnedMpNum = 1,
+        Unknown = 255,
+    };
+
+    struct ActorInstanceKey
+    {
+        ActorKeyKind kind = ActorKeyKind::Unknown;
+        uint32_t id = 0;
+    };
+
+    inline bool isValidActorInstanceKey(const ActorInstanceKey& key)
+    {
+        return key.id != 0
+            && (key.kind == ActorKeyKind::VanillaRefNum || key.kind == ActorKeyKind::SpawnedMpNum);
+    }
+
+    inline bool hasMissingActorInstanceIdentity(const BaseActor& actor)
+    {
+        return actor.refNum == 0 && actor.mpNum == 0;
+    }
+
+    inline bool hasAmbiguousActorInstanceIdentity(const BaseActor& actor)
+    {
+        return actor.refNum != 0 && actor.mpNum != 0;
+    }
+
+    inline ActorInstanceKey makeActorInstanceKey(const BaseActor& actor)
+    {
+        // Spawned actors can carry a temporary engine refNum locally. The server
+        // normalizes this, and deterministic wire identity still belongs to mpNum.
+        if (actor.mpNum != 0)
+            return { ActorKeyKind::SpawnedMpNum, actor.mpNum };
+        if (actor.refNum != 0)
+            return { ActorKeyKind::VanillaRefNum, actor.refNum };
+        return {};
+    }
+
+    inline ActorInstanceId packActorInstanceKey(const ActorInstanceKey& key)
+    {
+        if (!isValidActorInstanceKey(key))
+            return 0;
+
+        return (static_cast<ActorInstanceId>(static_cast<uint8_t>(key.kind)) << 32) | key.id;
+    }
+
+    inline ActorInstanceKey unpackActorInstanceId(ActorInstanceId actorInstanceId)
+    {
+        if (actorInstanceId == 0)
+            return {};
+
+        const auto kind = static_cast<ActorKeyKind>((actorInstanceId >> 32) & 0xffu);
+        const auto id = static_cast<uint32_t>(actorInstanceId & 0xffffffffu);
+        ActorInstanceKey key { kind, id };
+        if (!isValidActorInstanceKey(key))
+            return {};
+        return key;
+    }
+
+    inline bool isValidActorInstanceId(ActorInstanceId actorInstanceId)
+    {
+        return isValidActorInstanceKey(unpackActorInstanceId(actorInstanceId));
+    }
+
+    inline ActorInstanceId actorInstanceIdFromActor(const BaseActor& actor)
+    {
+        return packActorInstanceKey(makeActorInstanceKey(actor));
+    }
+
+    inline bool actorInstanceIdMatchesActor(ActorInstanceId actorInstanceId, const BaseActor& actor)
+    {
+        const ActorInstanceId actorIdentity = actorInstanceIdFromActor(actor);
+        return actorInstanceId != 0 && actorIdentity != 0 && actorInstanceId == actorIdentity;
+    }
+
+    inline std::string describeActorInstanceId(ActorInstanceId actorInstanceId)
+    {
+        const ActorInstanceKey key = unpackActorInstanceId(actorInstanceId);
+        if (key.kind == ActorKeyKind::VanillaRefNum)
+            return "vanilla:" + std::to_string(key.id);
+        if (key.kind == ActorKeyKind::SpawnedMpNum)
+            return "spawned:" + std::to_string(key.id);
+        return "unknown:0";
+    }
+
+    inline std::string describeActorInstanceIdentity(const BaseActor& actor)
+    {
+        return describeActorInstanceId(actorInstanceIdFromActor(actor));
+    }
 
     enum ActorPresentationFlags : uint8_t
     {
@@ -54,7 +149,9 @@ namespace mwmp
 
     struct ActorIdentityRecord
     {
-        uint32_t actorNetId = 0;
+        // Transitional field name: this now carries deterministic ActorInstanceId,
+        // packed from TES3MP-style refNum/mpNum identity instead of server allocation.
+        ActorInstanceId actorNetId = 0;
         bool persistent = false;
         bool serverSpawned = false;
         bool removed = false;
@@ -79,12 +176,12 @@ namespace mwmp
         uint32_t protocolVersion = ActorSyncProtocolVersionV2;
         std::string cellId;
         uint32_t sequence = 0;
-        std::vector<uint32_t> actorNetIds;
+        std::vector<ActorInstanceId> actorNetIds;
     };
 
     struct CompactActorSnapshot
     {
-        uint32_t actorNetId = 0;
+        ActorInstanceId actorNetId = 0;
         Position position;
         Velocity velocity;
         uint16_t movementFlags = 0;
@@ -105,7 +202,7 @@ namespace mwmp
 
     struct ActorPresentationSnapshot
     {
-        uint32_t actorNetId = 0;
+        ActorInstanceId actorNetId = 0;
         bool isMoving = false;
         bool isAttackingOrCasting = false;
         bool hasWeaponDrawn = false;
@@ -132,7 +229,7 @@ namespace mwmp
 
     struct ActorAttackV2Event
     {
-        uint32_t actorNetId = 0;
+        ActorInstanceId actorNetId = 0;
         uint32_t eventId = 0;
         Attack attack;
     };

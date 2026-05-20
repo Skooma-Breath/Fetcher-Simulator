@@ -39,6 +39,7 @@ enum class OutboundLuaActionType
     GrantInventoryItem,
     RemovePlacedObject,
     RemoveGameObject,
+    ResetCellState,
     UpsertDynamicRecord,
     RemoveDynamicRecord,
     SetDynamicRecordDependencies,

@@ -22,6 +22,8 @@ namespace mwmp
             for (const auto& actor : mActorList->actors)
             {
                 packActorIdentity(ws, actor);
+                packPosition(ws, actor.position);
+                ws.write(actor.deathEventId);
                 ws.write(actor.deathState);
                 ws.write(actor.isDead);
                 ws.write(actor.isInstantDeath);
@@ -39,6 +41,8 @@ namespace mwmp
             for (auto& actor : mActorList->actors)
             {
                 unpackActorIdentity(rs, actor);
+                unpackPosition(rs, actor.position);
+                rs.read(actor.deathEventId);
                 rs.read(actor.deathState);
                 rs.read(actor.isDead);
                 rs.read(actor.isInstantDeath);

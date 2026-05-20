@@ -131,6 +131,7 @@ public:
         bool persistent = true);
     void queueRemoveActor(uint32_t mpNum, const std::string& cellId);
     void queueRemoveGameObject(uint32_t mpNum, const std::string& cellId);
+    void queueResetCellState(const std::string& cellId);
     void queueTeleportPlayer(uint32_t guid, const std::string& cellId, const Position& position);
     void queueUpsertPlayerMark(uint32_t guid, const PlayerMark& mark);
     void queueDeletePlayerMark(uint32_t guid, const std::string& name);

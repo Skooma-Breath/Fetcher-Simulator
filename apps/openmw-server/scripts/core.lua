@@ -23,6 +23,7 @@ local ALLOW_UNVERIFIED_ACTIVATE = Config.ALLOW_UNVERIFIED_ACTIVATE == true
 local LOGIN_PREFIX = COMMAND_PREFIX .. "login "
 local KICK_PREFIX = COMMAND_PREFIX .. "kick "
 local DELETE_PREFIX = COMMAND_PREFIX .. "delete "
+local RESETCELL_PREFIX = COMMAND_PREFIX .. "resetcell "
 local MPWHERE_PREFIX = COMMAND_PREFIX .. "mpwhere "
 local TOMP_PREFIX = COMMAND_PREFIX .. "tomp "
 local BRINGMP_PREFIX = COMMAND_PREFIX .. "bringmp "
@@ -165,7 +166,17 @@ local function normalizeCellId(cellId)
         return cellId
     end
 
+    if (cellId:sub(1, 1) == "\"" and cellId:sub(-1) == "\"")
+        or (cellId:sub(1, 1) == "'" and cellId:sub(-1) == "'") then
+        cellId = trim(cellId:sub(2, -2))
+    end
+
     local x, y = cellId:match("^[Ee][Xx][Tt]:%s*(-?%d+)%s*,%s*(-?%d+)$")
+    if x and y then
+        return string.format("EXT:%d,%d", tonumber(x), tonumber(y))
+    end
+
+    x, y = cellId:match("^%s*(-?%d+)%s*,%s*(-?%d+)$")
     if x and y then
         return string.format("EXT:%d,%d", tonumber(x), tonumber(y))
     end
@@ -708,6 +719,39 @@ local function handleChat(player, data)
 
         player:sendMessage(string.format("Queued delete for mpNum=%d.", mpNum))
         mp.log(string.format("[core] /delete by %s mpNum=%d cell=%s", player.name, mpNum, tostring(cellId)))
+        return false
+    end
+
+    if msg == COMMAND_PREFIX .. "resetcell" or msg:sub(1, #RESETCELL_PREFIX) == RESETCELL_PREFIX then
+        if not requireAdmin(player) then
+            return false
+        end
+
+        local rest = msg == COMMAND_PREFIX .. "resetcell" and "" or msg:sub(#RESETCELL_PREFIX + 1)
+        local cellId = normalizeCellId(rest ~= "" and rest or player.cell)
+        if not cellId or cellId == "" then
+            player:sendMessage("Usage: /resetcell [cell]")
+            return false
+        end
+
+        local removedSpawners, removedPayloads = destructibleSpawners.removeInCell(cellId)
+        if not mp.resetCell(cellId) then
+            player:sendMessage("Failed to queue reset for cell " .. tostring(cellId) .. ".")
+            return false
+        end
+
+        player:sendMessage(string.format(
+            "Queued reset for %s. Removed spawners=%d payloads=%d. Relog or reload the cell before testing it.",
+            cellId,
+            removedSpawners or 0,
+            removedPayloads or 0
+        ))
+        mp.log(string.format("[core] /resetcell by %s cell=%s spawners=%d payloads=%d",
+            player.name,
+            cellId,
+            removedSpawners or 0,
+            removedPayloads or 0
+        ))
         return false
     end
 

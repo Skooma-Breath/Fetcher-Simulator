@@ -243,7 +243,9 @@ local function normalizeSpawnerState(spawner)
         math.floor(tonumber(spawner.spawnCount) or tonumber(Config.SPAWNER_DEFAULT_COUNT) or 1))
     spawner.spawnInterval = math.max(0.1, tonumber(spawner.spawnInterval) or getSpawnInterval())
     spawner.spawnTimer = math.max(0, tonumber(spawner.spawnTimer) or spawner.spawnInterval)
-    if spawner.spawnedPersistent == nil then
+    if Config.SPAWNER_SPAWNED_ACTOR_PERSISTENT == false then
+        spawner.spawnedPersistent = false
+    elseif spawner.spawnedPersistent == nil then
         spawner.spawnedPersistent = Config.SPAWNER_SPAWNED_ACTOR_PERSISTENT ~= false
     else
         spawner.spawnedPersistent = spawner.spawnedPersistent == true
@@ -606,6 +608,7 @@ local function purgeSpawner(name)
 
     local removed = purgeSpawnedActors(spawner)
     saveState(state)
+    mp.log(string.format("[spawner] purged %s payloads=%d", name, removed))
     return true, string.format("Purged %d spawned actor(s) for %s.", removed, name)
 end
 
@@ -634,7 +637,48 @@ local function removeSpawner(name)
     recordStore.remove("creature", spawner.recordId, { force = true })
     state[name] = nil
     saveState(state)
+    mp.log(string.format("[spawner] removed %s spawnerActor=%s payloads=%d",
+        name,
+        tostring(spawner.actorMpNum or 0),
+        removedPayloads
+    ))
     return true, string.format("Removed spawner %s and %d payload actor(s).", name, removedPayloads)
+end
+
+local function removeSpawnersInCell(cellId)
+    cellId = trim(cellId) or ""
+    if cellId == "" then
+        return 0, 0
+    end
+
+    local state = loadState()
+    local removedSpawners = 0
+    local removedPayloads = 0
+    for name, spawner in pairs(state) do
+        if type(spawner) == "table" then
+            normalizeSpawnerState(spawner)
+            if spawner.cellId == cellId then
+                removedPayloads = removedPayloads + purgeSpawnedActors(spawner)
+                if spawner.actorMpNum and spawner.actorMpNum ~= 0 then
+                    mp.removeGameObject(spawner.actorMpNum, spawner.cellId or "")
+                end
+                recordStore.remove("creature", spawner.recordId, { force = true })
+                state[name] = nil
+                removedSpawners = removedSpawners + 1
+            end
+        end
+    end
+
+    if removedSpawners > 0 then
+        saveState(state)
+        mp.log(string.format("[spawner] reset cell %s removed spawners=%d payloads=%d",
+            cellId,
+            removedSpawners,
+            removedPayloads
+        ))
+    end
+
+    return removedSpawners, removedPayloads
 end
 
 local function resetSpawner(name, count)
@@ -994,6 +1038,10 @@ end
 
 function M.resetFromAdminUi(data)
     return resetSpawner(data.name, data.spawnCount or data.count)
+end
+
+function M.removeInCell(cellId)
+    return removeSpawnersInCell(cellId)
 end
 
 function M.onActorSpawned(data)

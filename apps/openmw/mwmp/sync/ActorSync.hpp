@@ -124,6 +124,8 @@ namespace mwmp
             bool lastAttackPressed = false;
             uint32_t nextAttackEventId = 1;
             uint32_t lastReceivedAttackEventId = 0;
+            uint32_t nextDeathEventId = 1;
+            uint32_t lastReceivedDeathEventId = 0;
             // Briefly suppress authoritative lower-body group sync so local hit/attack
             // transitions can finish without being immediately overwritten.
             float animGroupHoldTimer = 0.f;
@@ -152,7 +154,7 @@ namespace mwmp
             // been emitted for the current boundActor.  Reset whenever a new
             // binding is established so the first confirmation is always logged.
             bool bindingLogged = false;
-            uint32_t actorNetId = 0;
+            ActorInstanceId actorNetId = 0;
             bool hasAuthoritativeTransform = false;
         };
 
@@ -171,13 +173,16 @@ namespace mwmp
             // Log-dedup: mpNums already reported via "authority mapped actor".
             // Cleared whenever outboundCellId changes so re-mappings are logged.
             std::unordered_set<uint32_t> authorityLoggedMpNums;
+            // Log-dedup: stale generated spawner record ids that were found as
+            // vanilla actors in local content and intentionally not exported.
+            std::unordered_set<std::string> authoritySkippedUnmanagedSpawners;
         };
 
         void queueSnapshot(ActorRuntime& actor, const BaseActor& state, const ActorList& list);
         void mergeActorState(ActorRuntime& actor, const BaseActor& state, bool includeTransform);
-        uint32_t actorNetIdForActorState(const BaseActor& actor) const;
-        void rememberActorNetId(uint32_t actorNetId, const BaseActor& actor);
-        void indexActorNetId(uint32_t actorNetId, const std::string& oldCellId, const std::string& newCellId);
+        ActorInstanceId actorNetIdForActorState(const BaseActor& actor) const;
+        void rememberActorNetId(ActorInstanceId actorNetId, const BaseActor& actor);
+        void indexActorNetId(ActorInstanceId actorNetId, const std::string& oldCellId, const std::string& newCellId);
         ActorRuntime* findPrimaryActorRuntime(const BaseActor& actor);
         ActorRuntime& runtimeForPacketActor(const std::string& cellId, CellRuntime& cell, const BaseActor& actor);
         MWWorld::Ptr resolvePacketActorBinding(const std::string& packetCellId, CellRuntime& cell,
@@ -193,6 +198,7 @@ namespace mwmp
         void applyBoundActorState(ActorRuntime& actor);
         void rememberServerSpawnedActor(const std::string& cellId, const MWWorld::Ptr& ptr, uint32_t mpNum);
         void forgetServerSpawnedActor(const std::string& cellId, const MWWorld::Ptr& ptr, uint32_t mpNum);
+        void forgetServerSpawnedActorPtrMappings(const MWWorld::Ptr& ptr, uint32_t mpNum);
         uint32_t mappedMpNumForPtr(const std::string& cellId, const MWWorld::Ptr& ptr) const;
         bool isStaleServerSpawnedActorUpdate(uint32_t mpNum, uint64_t serverTimestamp) const;
         void rememberServerSpawnedActorTimestamp(uint32_t mpNum, uint64_t serverTimestamp);
@@ -205,11 +211,12 @@ namespace mwmp
         std::unordered_map<std::string, uint32_t>    mMpNumsByLocalActor;
         std::unordered_map<uint32_t, MWWorld::Ptr>   mServerSpawnedActorsByMpNum;
         std::unordered_map<uint32_t, uint64_t>       mServerSpawnedActorLastTimestamps;
-        std::unordered_map<uint32_t, ActorRuntime>   mActorsByNetId;
-        std::unordered_map<std::string, std::unordered_set<uint32_t>> mCellActorIds;
-        std::unordered_map<std::string, uint32_t>    mActorNetIdsByKey;
+        std::unordered_map<ActorInstanceId, ActorRuntime>   mActorsByNetId;
+        std::unordered_map<std::string, std::unordered_set<ActorInstanceId>> mCellActorIds;
+        std::unordered_map<std::string, ActorInstanceId>    mActorNetIdsByKey;
         uint64_t mActorV2DiagnosticsLastLogMs = 0;
         std::size_t mActorV2SnapshotsWindow = 0;
+        std::size_t mActorV2InvalidActorIdWindow = 0;
         std::size_t mActorV2MissingIdentityWindow = 0;
         std::size_t mActorV2StaleWindow = 0;
         std::size_t mActorV2DeadLiveSuppressedWindow = 0;
@@ -217,6 +224,7 @@ namespace mwmp
         std::size_t mActorV2IdentityZeroTransformSkippedWindow = 0;
         std::size_t mActorV2PresentationSentWindow = 0;
         std::size_t mActorV2PresentationAppliedWindow = 0;
+        std::size_t mActorV2PresentationInvalidActorIdWindow = 0;
         std::size_t mActorV2PresentationMissingIdentityWindow = 0;
         std::size_t mActorV2PresentationStaleWindow = 0;
         std::size_t mActorV2PresentationDeadLiveSuppressedWindow = 0;
@@ -224,10 +232,11 @@ namespace mwmp
         std::size_t mActorV2PresentationGroupChangedWindow = 0;
         std::size_t mActorV2AttackSentWindow = 0;
         std::size_t mActorV2AttackAppliedWindow = 0;
+        std::size_t mActorV2AttackInvalidActorIdWindow = 0;
         std::size_t mActorV2AttackMissingIdentityWindow = 0;
         std::size_t mActorV2AttackDuplicateWindow = 0;
         std::size_t mActorV2AttackDeadSuppressedWindow = 0;
-        std::unordered_map<uint32_t, std::size_t> mActorV2MissingIdentityByNetIdWindow;
+        std::unordered_map<ActorInstanceId, std::size_t> mActorV2MissingIdentityByNetIdWindow;
     };
 
 } // namespace mwmp

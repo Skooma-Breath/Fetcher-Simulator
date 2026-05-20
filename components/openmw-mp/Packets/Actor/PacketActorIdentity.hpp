@@ -128,7 +128,7 @@ namespace mwmp
 
             const auto count = static_cast<uint16_t>(mAck->actorNetIds.size());
             ws.write(count);
-            for (uint32_t actorNetId : mAck->actorNetIds)
+            for (ActorInstanceId actorNetId : mAck->actorNetIds)
                 ws.write(actorNetId);
         }
 
@@ -141,7 +141,7 @@ namespace mwmp
             uint16_t count = 0;
             rs.read(count);
             mAck->actorNetIds.resize(count);
-            for (uint32_t& actorNetId : mAck->actorNetIds)
+            for (ActorInstanceId& actorNetId : mAck->actorNetIds)
                 rs.read(actorNetId);
         }
 

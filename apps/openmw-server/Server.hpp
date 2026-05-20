@@ -66,10 +66,10 @@ struct ConnectedClient
     std::unordered_set<std::string> loadedActorCells; ///< empty falls back to player.cell
     uint32_t loadedActorCellsSequence = 0;
     uint32_t actorSyncProtocolVersion = ActorSyncProtocolVersionV1;
-    std::unordered_set<uint32_t> actorV2IdentitySent;
-    std::unordered_set<uint32_t> actorV2IdentityAcked;
-    std::unordered_map<uint32_t, uint64_t> actorV2LastSentMs;
-    std::unordered_map<uint32_t, std::size_t> actorV2MissingIdentityByNetIdWindow;
+    std::unordered_set<ActorInstanceId> actorV2IdentitySent;
+    std::unordered_set<ActorInstanceId> actorV2IdentityAcked;
+    std::unordered_map<ActorInstanceId, uint64_t> actorV2LastSentMs;
+    std::unordered_map<ActorInstanceId, std::size_t> actorV2MissingIdentityByNetIdWindow;
     uint64_t actorV2DiagnosticsLastLogMs = 0;
     std::size_t actorV2IdentitySentWindow = 0;
     std::size_t actorV2IdentityAckedWindow = 0;
@@ -157,6 +157,7 @@ public:
         bool persistent = true);
     bool removeActor(uint32_t mpNum, const std::string& cellId);
     bool removeGameObject(uint32_t mpNum, const std::string& cellId);
+    bool resetCellStateForTesting(const std::string& cellId);
     bool upsertDynamicRecord(const std::string& recordType, const std::string& recordId, const std::string& data,
         const std::string& recordScope, bool persistent);
     bool removeDynamicRecord(const std::string& recordType, const std::string& recordId);
@@ -299,7 +300,7 @@ private:
     void setNextWorldMpNum(uint64_t nextMpNum);
     bool removePlacedObjectAuthoritative(uint32_t mpNum, const std::string& cellId);
     bool removePlacedObjectAuthoritativeAnyCell(uint32_t mpNum, const std::string& preferredCellId);
-    void persistSpawnedActorIfNeeded(const ActorRegistryRecord& record);
+    void persistSpawnedActorIfNeeded(ActorRegistryRecord& record, uint64_t now = 0, bool force = true);
     void deletePersistedSpawnedActor(uint32_t mpNum);
     void sendActorLifecycleEvent(const char* eventName, const BaseActor& actor, bool persistent);
     void sendDynamicRecordsToClient(HSteamNetConnection conn);
@@ -350,7 +351,10 @@ private:
         // has processed the spawn notification (timing race).
         uint64_t serverSpawnTime = 0;
         bool persistent = false;
-        uint32_t actorNetId = 0;
+        ActorInstanceId actorNetId = 0;
+        uint32_t lastDeathEventId = 0;
+        uint64_t lastPersistTime = 0;
+        bool pendingPersist = false;
     };
 
     struct CellActorState
@@ -359,6 +363,8 @@ private:
         uint32_t authorityGeneration = 0;
         uint32_t nextSnapshotSequence = 1;
         std::unordered_map<std::string, ActorRegistryRecord> actors;
+        std::unordered_set<std::string> resetSuppressedVanillaDeaths;
+        std::unordered_map<std::string, uint64_t> staleLiveVanillaDeathResendMs;
     };
 
     // ── State ─────────────────────────────────────────────────────────────
@@ -371,9 +377,9 @@ private:
         const std::string& destinationCellId,
         std::unordered_set<std::string>& changedCellIds);
     void broadcastActorListForCell(const std::string& cellId, CellActorState& cellState);
-    uint32_t assignActorNetId(const BaseActor& actor);
-    uint32_t ensureActorNetId(ActorRegistryRecord& record, const std::string& cellId);
-    void forgetActorNetId(uint32_t actorNetId, const BaseActor& actor);
+    ActorInstanceId assignActorNetId(const BaseActor& actor);
+    ActorInstanceId ensureActorNetId(ActorRegistryRecord& record, const std::string& cellId);
+    void forgetActorNetId(ActorInstanceId actorNetId, const BaseActor& actor);
     ActorIdentityList buildActorIdentityList(
         const std::string& cellId,
         CellActorState& cellState,
@@ -394,6 +400,14 @@ private:
         const std::string& incomingCellId,
         const ConnectedClient& sender,
         const char* packetName) const;
+    bool rejectResetStaleDeadVanillaActor(
+        const BaseActor& actor,
+        const std::string& incomingCellId,
+        const ConnectedClient& sender,
+        const char* packetName) const;
+    void clearResetStaleDeathSuppressionForAliveVanillaActor(
+        const BaseActor& actor,
+        const std::string& incomingCellId);
     std::size_t mergeDeadVanillaActorsForCell(
         const std::string& cellId,
         std::unordered_map<std::string, ActorRegistryRecord>& actors) const;
@@ -450,12 +464,11 @@ private:
         std::unordered_map<std::string, StoredDynamicRecord> dynamicRecords;
         std::unordered_map<std::string, CellActorState> actorCells;
         std::unordered_map<std::string, std::string> actorLocations;
-        std::unordered_map<std::string, uint32_t> actorNetIdsByKey;
-        std::unordered_map<uint32_t, std::string> actorKeysByNetId;
+        std::unordered_map<std::string, ActorInstanceId> actorNetIdsByKey;
+        std::unordered_map<ActorInstanceId, std::string> actorKeysByNetId;
         std::unordered_map<std::string, std::unordered_map<std::string, ActorRegistryRecord>> deadVanillaActorCells;
         uint64_t nextObjectMpNum = 1;
         uint64_t nextActorMpNum = 1;
-        uint32_t nextActorNetId = FirstServerAssignedActorNetId;
         uint64_t nextDynamicRecordSequence = 1;
 
         // Weather — reported by the host (guid 1) and relayed to others.

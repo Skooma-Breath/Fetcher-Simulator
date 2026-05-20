@@ -38,6 +38,7 @@ namespace mwmp
         Attack       attack;
         CastSpell    cast;
         uint8_t      deathState = 0;
+        uint32_t     deathEventId = 0;
         bool         isDead = false;
         bool         isInstantDeath = false;
         std::string  deathAnimGroup;         // e.g. "death1"/"death2"/"death_knock_down" synced from authority

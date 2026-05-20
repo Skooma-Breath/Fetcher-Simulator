@@ -291,6 +291,9 @@ void LuaServerContext::drainOutbound()
             case OutboundLuaActionType::RemoveGameObject:
                 mServer->removeGameObject(action.mpNum, action.cellId);
                 break;
+            case OutboundLuaActionType::ResetCellState:
+                mServer->resetCellStateForTesting(action.cellId);
+                break;
             case OutboundLuaActionType::UpsertDynamicRecord:
                 mServer->upsertDynamicRecord(
                     action.recordType, action.recordId, action.recordData, action.recordScope, action.recordPersistent);
@@ -1050,6 +1053,17 @@ void LuaServerContext::queueRemoveGameObject(uint32_t mpNum, const std::string& 
     OutboundLuaAction action;
     action.type = OutboundLuaActionType::RemoveGameObject;
     action.mpNum = mpNum;
+    action.cellId = cellId;
+    mOutboundQueue.push(std::move(action));
+}
+
+void LuaServerContext::queueResetCellState(const std::string& cellId)
+{
+    if (cellId.empty())
+        return;
+
+    OutboundLuaAction action;
+    action.type = OutboundLuaActionType::ResetCellState;
     action.cellId = cellId;
     mOutboundQueue.push(std::move(action));
 }

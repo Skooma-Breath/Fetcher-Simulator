@@ -20,6 +20,7 @@
 ///              last_seen INTEGER)
 ///
 
+#include <cstddef>
 #include <cstdint>
 #include <optional>
 #include <string>
@@ -221,6 +222,9 @@ namespace mwmp
         /// Delete one multiplayer-placed world object by mpNum.
         void deleteWorldObject(uint32_t mpNum);
 
+        /// Delete all multiplayer-placed world objects in a cell.
+        std::size_t deleteWorldObjectsForCell(std::string_view cellId);
+
         /// Load persistent server-spawned actors.
         std::vector<PersistedSpawnedActor> loadSpawnedActors();
 
@@ -229,6 +233,9 @@ namespace mwmp
 
         /// Delete one server-spawned actor by mpNum.
         void deleteSpawnedActor(uint32_t mpNum);
+
+        /// Delete all persistent server-spawned actors in a cell.
+        std::size_t deleteSpawnedActorsForCell(std::string_view cellId);
 
         /// Load persisted dead vanilla actors.
         std::vector<BaseActor> loadDeadVanillaActors();
@@ -239,6 +246,9 @@ namespace mwmp
         /// Delete one persisted dead vanilla actor by identity.
         void deleteDeadVanillaActor(std::string_view refId, uint32_t refNum);
 
+        /// Delete all persisted dead vanilla actors in a cell.
+        std::size_t deleteDeadVanillaActorsForCell(std::string_view cellId);
+
         /// Load server-authoritative container inventories.
         std::vector<ContainerRecord> loadContainerRecords();
 
@@ -248,6 +258,9 @@ namespace mwmp
         /// Delete one server-authoritative container inventory and its items.
         void deleteContainerRecord(std::string_view cellId, std::string_view refId, uint32_t refNum);
 
+        /// Delete all server-authoritative container inventories in a cell.
+        std::size_t deleteContainerRecordsForCell(std::string_view cellId);
+
         /// Load persisted door states.
         std::vector<DoorEntry> loadDoorStates();
 
@@ -256,6 +269,9 @@ namespace mwmp
 
         /// Delete one persisted door state entry.
         void deleteDoorState(std::string_view cellId, std::string_view refId, uint32_t refNum);
+
+        /// Delete all persisted door states in a cell.
+        std::size_t deleteDoorStatesForCell(std::string_view cellId);
 
         /// Load or initialize the durable increment-only multiplayer object id allocator.
         uint64_t loadNextMpNum(uint64_t minimumNext);
@@ -287,6 +303,7 @@ namespace mwmp
         /// Runtime-only spawned actor links keep generated actor records alive until despawn/server restart.
         void upsertSpawnedActorDynamicRecordLink(std::string_view recordId, std::string_view cellId, uint32_t mpNum);
         void deleteSpawnedActorDynamicRecordLink(uint32_t mpNum, std::string_view cellId);
+        std::size_t deleteSpawnedActorDynamicRecordLinksForCell(std::string_view cellId);
         void clearSpawnedActorDynamicRecordLinks();
 
         /// Replace all record-to-record dependency links owned by one dynamic record.

@@ -167,6 +167,13 @@ local COMMANDS = {
         adminOnly = true,
     },
     {
+        id = "resetcell",
+        category = "Admin",
+        usage = "/resetcell [cell]",
+        summary = "Clear server test state for a cell; relog or reload before retesting.",
+        adminOnly = true,
+    },
+    {
         id = "mpwhere",
         category = "Admin",
         usage = "/mpwhere <mpNum>",

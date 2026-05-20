@@ -281,6 +281,22 @@ sol::table initMpPackage(LuaUtil::LuaView& view, LuaServerContext* context, LuaU
         context->queueRemoveGameObject(mpNum, cellId.value_or(""));
         return true;
     });
+    mp.set_function("resetCell", [context](const std::string& cellId) -> bool
+    {
+        if (!context || cellId.empty())
+            return false;
+
+        context->queueResetCellState(cellId);
+        return true;
+    });
+    mp.set_function("ResetCell", [context](const std::string& cellId) -> bool
+    {
+        if (!context || cellId.empty())
+            return false;
+
+        context->queueResetCellState(cellId);
+        return true;
+    });
 
     auto resolveActorPersistent = [context](const sol::optional<sol::table>& options) -> bool
     {

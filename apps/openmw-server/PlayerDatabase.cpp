@@ -1447,6 +1447,43 @@ CREATE INDEX IF NOT EXISTS idx_character_marks_character
         }
     }
 
+    std::size_t PlayerDatabase::deleteWorldObjectsForCell(std::string_view cellId)
+    {
+        if (cellId.empty())
+            return 0;
+
+        exec("BEGIN");
+        try
+        {
+            sqlite3_stmt* s = prepare("DELETE FROM world_objects WHERE cell_id=?1");
+            sqlite3_bind_text(s, 1, cellId.data(), static_cast<int>(cellId.size()), SQLITE_TRANSIENT);
+            checkSqlite(sqlite3_step(s), mDb, "deleteWorldObjectsForCell");
+            const std::size_t removed = static_cast<std::size_t>(sqlite3_changes(mDb));
+            sqlite3_finalize(s);
+
+            sqlite3_stmt* clearLinks = prepare(
+                "DELETE FROM world_dynamic_record_links WHERE link_kind=?1 AND owner_b=?2");
+            sqlite3_bind_text(clearLinks, 1, "placed_object", -1, SQLITE_STATIC);
+            sqlite3_bind_text(clearLinks, 2, cellId.data(), static_cast<int>(cellId.size()), SQLITE_TRANSIENT);
+            checkSqlite(sqlite3_step(clearLinks), mDb, "deleteWorldObjectsForCell(link)");
+            sqlite3_finalize(clearLinks);
+
+            exec("COMMIT");
+            return removed;
+        }
+        catch (...)
+        {
+            try
+            {
+                exec("ROLLBACK");
+            }
+            catch (...)
+            {
+            }
+            throw;
+        }
+    }
+
     std::vector<PersistedSpawnedActor> PlayerDatabase::loadSpawnedActors()
     {
         sqlite3_stmt* s = prepare(
@@ -1586,6 +1623,19 @@ CREATE INDEX IF NOT EXISTS idx_character_marks_character
         sqlite3_finalize(s);
     }
 
+    std::size_t PlayerDatabase::deleteSpawnedActorsForCell(std::string_view cellId)
+    {
+        if (cellId.empty())
+            return 0;
+
+        sqlite3_stmt* s = prepare("DELETE FROM world_spawned_actors WHERE cell_id=?1");
+        sqlite3_bind_text(s, 1, cellId.data(), static_cast<int>(cellId.size()), SQLITE_TRANSIENT);
+        checkSqlite(sqlite3_step(s), mDb, "deleteSpawnedActorsForCell");
+        const std::size_t removed = static_cast<std::size_t>(sqlite3_changes(mDb));
+        sqlite3_finalize(s);
+        return removed;
+    }
+
     std::vector<BaseActor> PlayerDatabase::loadDeadVanillaActors()
     {
         sqlite3_stmt* s = prepare(
@@ -1716,6 +1766,19 @@ CREATE INDEX IF NOT EXISTS idx_character_marks_character
         sqlite3_bind_int64(s, 2, refNum);
         checkSqlite(sqlite3_step(s), mDb, "deleteDeadVanillaActor");
         sqlite3_finalize(s);
+    }
+
+    std::size_t PlayerDatabase::deleteDeadVanillaActorsForCell(std::string_view cellId)
+    {
+        if (cellId.empty())
+            return 0;
+
+        sqlite3_stmt* s = prepare("DELETE FROM world_dead_vanilla_actors WHERE cell_id=?1");
+        sqlite3_bind_text(s, 1, cellId.data(), static_cast<int>(cellId.size()), SQLITE_TRANSIENT);
+        checkSqlite(sqlite3_step(s), mDb, "deleteDeadVanillaActorsForCell");
+        const std::size_t removed = static_cast<std::size_t>(sqlite3_changes(mDb));
+        sqlite3_finalize(s);
+        return removed;
     }
 
     std::vector<ContainerRecord> PlayerDatabase::loadContainerRecords()
@@ -1895,6 +1958,45 @@ CREATE INDEX IF NOT EXISTS idx_character_marks_character
         }
     }
 
+    std::size_t PlayerDatabase::deleteContainerRecordsForCell(std::string_view cellId)
+    {
+        if (cellId.empty())
+            return 0;
+
+        exec("BEGIN");
+        try
+        {
+            sqlite3_stmt* s = prepare("DELETE FROM world_containers WHERE cell_id=?1");
+            sqlite3_bind_text(s, 1, cellId.data(), static_cast<int>(cellId.size()), SQLITE_TRANSIENT);
+            checkSqlite(sqlite3_step(s), mDb, "deleteContainerRecordsForCell");
+            const std::size_t removed = static_cast<std::size_t>(sqlite3_changes(mDb));
+            sqlite3_finalize(s);
+
+            sqlite3_stmt* clearLinks = prepare(
+                "DELETE FROM world_dynamic_record_links"
+                " WHERE owner_a=?1 AND (link_kind=?2 OR link_kind=?3)");
+            sqlite3_bind_text(clearLinks, 1, cellId.data(), static_cast<int>(cellId.size()), SQLITE_TRANSIENT);
+            sqlite3_bind_text(clearLinks, 2, "container_parent", -1, SQLITE_STATIC);
+            sqlite3_bind_text(clearLinks, 3, "container_item", -1, SQLITE_STATIC);
+            checkSqlite(sqlite3_step(clearLinks), mDb, "deleteContainerRecordsForCell(link)");
+            sqlite3_finalize(clearLinks);
+
+            exec("COMMIT");
+            return removed;
+        }
+        catch (...)
+        {
+            try
+            {
+                exec("ROLLBACK");
+            }
+            catch (...)
+            {
+            }
+            throw;
+        }
+    }
+
     std::vector<DoorEntry> PlayerDatabase::loadDoorStates()
     {
         sqlite3_stmt* s = prepare(
@@ -1997,6 +2099,43 @@ CREATE INDEX IF NOT EXISTS idx_character_marks_character
             sqlite3_finalize(clearLinks);
 
             exec("COMMIT");
+        }
+        catch (...)
+        {
+            try
+            {
+                exec("ROLLBACK");
+            }
+            catch (...)
+            {
+            }
+            throw;
+        }
+    }
+
+    std::size_t PlayerDatabase::deleteDoorStatesForCell(std::string_view cellId)
+    {
+        if (cellId.empty())
+            return 0;
+
+        exec("BEGIN");
+        try
+        {
+            sqlite3_stmt* s = prepare("DELETE FROM world_doors WHERE cell_id=?1");
+            sqlite3_bind_text(s, 1, cellId.data(), static_cast<int>(cellId.size()), SQLITE_TRANSIENT);
+            checkSqlite(sqlite3_step(s), mDb, "deleteDoorStatesForCell");
+            const std::size_t removed = static_cast<std::size_t>(sqlite3_changes(mDb));
+            sqlite3_finalize(s);
+
+            sqlite3_stmt* clearLinks = prepare(
+                "DELETE FROM world_dynamic_record_links WHERE link_kind=?1 AND owner_a=?2");
+            sqlite3_bind_text(clearLinks, 1, "door_state", -1, SQLITE_STATIC);
+            sqlite3_bind_text(clearLinks, 2, cellId.data(), static_cast<int>(cellId.size()), SQLITE_TRANSIENT);
+            checkSqlite(sqlite3_step(clearLinks), mDb, "deleteDoorStatesForCell(link)");
+            sqlite3_finalize(clearLinks);
+
+            exec("COMMIT");
+            return removed;
         }
         catch (...)
         {
@@ -2216,6 +2355,21 @@ CREATE INDEX IF NOT EXISTS idx_character_marks_character
         sqlite3_bind_text(s, 3, cellId.data(), static_cast<int>(cellId.size()), SQLITE_TRANSIENT);
         checkSqlite(sqlite3_step(s), mDb, "deleteSpawnedActorDynamicRecordLink");
         sqlite3_finalize(s);
+    }
+
+    std::size_t PlayerDatabase::deleteSpawnedActorDynamicRecordLinksForCell(std::string_view cellId)
+    {
+        if (cellId.empty())
+            return 0;
+
+        sqlite3_stmt* s = prepare(
+            "DELETE FROM world_dynamic_record_links WHERE link_kind=?1 AND owner_b=?2");
+        sqlite3_bind_text(s, 1, "spawned_actor", -1, SQLITE_STATIC);
+        sqlite3_bind_text(s, 2, cellId.data(), static_cast<int>(cellId.size()), SQLITE_TRANSIENT);
+        checkSqlite(sqlite3_step(s), mDb, "deleteSpawnedActorDynamicRecordLinksForCell");
+        const std::size_t removed = static_cast<std::size_t>(sqlite3_changes(mDb));
+        sqlite3_finalize(s);
+        return removed;
     }
 
     void PlayerDatabase::clearSpawnedActorDynamicRecordLinks()
