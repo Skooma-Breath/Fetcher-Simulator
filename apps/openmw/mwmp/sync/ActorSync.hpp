@@ -71,6 +71,14 @@ namespace mwmp
             Velocity velocity;
             uint32_t sequence = 0;
             uint64_t serverTimestamp = 0;
+            bool isMoving = false;
+            bool isAttackingOrCasting = false;
+            bool hasWeaponDrawn = false;
+            bool hasSpellReadied = false;
+            uint32_t movementFlags = 0;
+            float animFwd = 0.f;
+            float animSide = 0.f;
+            std::string currentAnimGroup;
         };
 
         struct ActorRuntime
@@ -78,6 +86,10 @@ namespace mwmp
             BaseActor state;
             Position smoothedPosition;
             bool hasSmoothedPosition = false;
+            Position stationaryHoldPosition;
+            bool hasStationaryHoldPosition = false;
+            Position stationaryReleasePosition;
+            float stationaryReleaseTimer = 0.f;
             std::deque<BufferedSnapshot> snapshots;
             double interpolationRenderTimestamp = 0.0;
             float latestSnapshotAge = 0.f;
@@ -101,6 +113,15 @@ namespace mwmp
             // When true, the death came from a real-time ActorDeath packet (not an
             // ActorList load), so the death animation should play from the start.
             bool deathFromRealtimePacket = false;
+            // Set once this runtime has received a live state in the current
+            // session. Used to distinguish a fresh death transition from a dead
+            // actor loaded during bootstrap/relog.
+            bool observedLiveSinceBinding = false;
+            // A v2 presentation or stats packet can report "dead" before the
+            // reliable ActorDeath/dead baseline with the synced animation arrives.
+            // While this is true, keep the actor alive visually and wait for the
+            // death animation source instead of applying a final corpse pose.
+            bool pendingRealtimeDeathReplay = false;
             // Pending magic bolt launch — delayed so bolt appears at end of cast
             // animation rather than immediately when the cast packet arrives.
             float pendingBoltTimer = -1.f;
@@ -129,6 +150,10 @@ namespace mwmp
             // Briefly suppress authoritative lower-body group sync so local hit/attack
             // transitions can finish without being immediately overwritten.
             float animGroupHoldTimer = 0.f;
+            // Authority side: debounce one-frame AI/pathing stalls so the wire
+            // stream does not alternate walk/stop while the actor is still
+            // visibly chasing.
+            float authorityLocomotionStopTimer = 0.f;
             // Non-authority attack replay holds. Attack packets are reliable events,
             // while presentation/position are delayed streams; these short holds keep
             // the visible weapon and stop pose stable through the replayed swing.
@@ -156,6 +181,7 @@ namespace mwmp
             bool bindingLogged = false;
             ActorInstanceId actorNetId = 0;
             bool hasAuthoritativeTransform = false;
+            bool hasAuthoritativeEquipment = false;
         };
 
         struct CellRuntime
@@ -180,6 +206,8 @@ namespace mwmp
 
         void queueSnapshot(ActorRuntime& actor, const BaseActor& state, const ActorList& list);
         void mergeActorState(ActorRuntime& actor, const BaseActor& state, bool includeTransform);
+        bool shouldReplayDeadBaselineAsRealtime(const ActorRuntime& actor, const BaseActor& state) const;
+        void markDeadBaselineState(ActorRuntime& actor, const BaseActor& state, bool replayRealtime);
         ActorInstanceId actorNetIdForActorState(const BaseActor& actor) const;
         void rememberActorNetId(ActorInstanceId actorNetId, const BaseActor& actor);
         void indexActorNetId(ActorInstanceId actorNetId, const std::string& oldCellId, const std::string& newCellId);
@@ -190,6 +218,7 @@ namespace mwmp
         void logWatchedBorderActor(const char* event, const std::string& packetCellId, const BaseActor& packetActor,
             const ActorRuntime* runtime, const MWWorld::Ptr& resolvedPtr, const char* source) const;
         void advanceSmoothing(ActorRuntime& actor, float dt);
+        void fastForwardRuntimeToLatestSnapshot(ActorRuntime& actor, const char* reason, uint64_t eventTimestamp);
         void sendAuthoritativeActorUpdates(const std::string& cellId, CellRuntime& cell, float dt);
         bool shouldAcceptSnapshot(CellRuntime& cell, const ActorList& list, const char* packetName,
             bool isPositionSnapshot = false);
@@ -220,6 +249,9 @@ namespace mwmp
         std::size_t mActorV2MissingIdentityWindow = 0;
         std::size_t mActorV2StaleWindow = 0;
         std::size_t mActorV2DeadLiveSuppressedWindow = 0;
+        std::size_t mActorV2PositionMovingWindow = 0;
+        std::size_t mActorV2PositionAttackingWindow = 0;
+        std::size_t mActorV2PositionWeaponDrawnWindow = 0;
         std::size_t mActorV2IdentityTransformPreservedWindow = 0;
         std::size_t mActorV2IdentityZeroTransformSkippedWindow = 0;
         std::size_t mActorV2PresentationSentWindow = 0;

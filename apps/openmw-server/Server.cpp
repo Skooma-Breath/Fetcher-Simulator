@@ -771,6 +771,21 @@ namespace
             || group.find("turn") != std::string::npos;
     }
 
+    bool isIdleAnimGroup(const std::string& group)
+    {
+        return group == "idle" || group.rfind("idle", 0) == 0;
+    }
+
+    bool isBaseIdleAnimGroup(const std::string& group)
+    {
+        return group == "idle" || group == "idleswim" || group == "idlesneak";
+    }
+
+    bool isReliablePresentationAnimGroup(const std::string& group)
+    {
+        return !group.empty() && !isLocomotionAnimGroup(group) && !isBaseIdleAnimGroup(group);
+    }
+
     mwmp::ActorPresentationSnapshot makePresentationSnapshot(const mwmp::BaseActor& actor, mwmp::ActorInstanceId actorNetId)
     {
         const bool axisLocomotion = std::abs(actor.animFlags.animFwd) > 0.1f
@@ -2381,7 +2396,7 @@ void MPServer::broadcastActorPositionV2ToCell(
         switch (tier)
         {
             case 0: return 50;
-            case 1: return 100;
+            case 1: return 50;
             case 2: return 250;
             case 3: return 1000;
             default: return 0;
@@ -2445,15 +2460,7 @@ void MPServer::broadcastActorPositionV2ToCell(
                 continue;
             }
 
-            CompactActorSnapshot snapshot;
-            snapshot.actorNetId = actorNetId;
-            snapshot.position = actor.position;
-            snapshot.velocity = actor.velocity;
-            snapshot.movementFlags = static_cast<uint16_t>(actor.animFlags.movementFlags);
-            snapshot.animFwd = quantizeActorAxis(actor.animFlags.animFwd);
-            snapshot.animSide = quantizeActorAxis(actor.animFlags.animSide);
-            snapshot.presentationFlags = makeActorPresentationFlags(actor);
-            positionList.snapshots.push_back(snapshot);
+            positionList.snapshots.push_back(makeCompactActorSnapshot(actor, actorNetId));
             client.actorV2LastSentMs[actorNetId] = now;
             budgetUsed += kSnapshotCostBytes;
         }
@@ -4960,8 +4967,7 @@ void MPServer::handleActorPositionV2(ConnectedClient& c, const uint8_t* data, si
     auto applyPositionSnapshot = [](BaseActor& actor, const CompactActorSnapshot& snapshot,
                                    const std::string& cellId)
     {
-        actor.position = snapshot.position;
-        actor.velocity = snapshot.velocity;
+        applyCompactActorSnapshotState(actor, snapshot, false);
         actor.cellId = cellId;
     };
 
@@ -5357,24 +5363,18 @@ void MPServer::handleActorPresentationV2(ConnectedClient& c, const uint8_t* data
 
         BaseActor& actor = record->actor;
         const bool wasDead = actor.isDead;
-        applyActorPresentationFlags(actor, snapshot.presentationFlags);
-        actor.isMoving = snapshot.isMoving;
         actor.isAttackingOrCasting = snapshot.isAttackingOrCasting;
         actor.hasWeaponDrawn = snapshot.hasWeaponDrawn;
         actor.hasSpellReadied = snapshot.hasSpellReadied;
         actor.isDead = snapshotIsDead;
-        actor.animFlags.movementFlags = snapshot.movementFlags;
-        actor.animFlags.animFwd = dequantizeActorAxis(snapshot.animFwd);
-        actor.animFlags.animSide = dequantizeActorAxis(snapshot.animSide);
-        if (!snapshot.currentAnimGroup.empty())
+        actor.position.isTeleporting = (snapshot.presentationFlags & ActorPresentationTeleporting) != 0;
+        static constexpr uint32_t kReliablePresentationMovementFlags =
+            AnimFlags::MF_KNOCKED_DOWN | AnimFlags::MF_KNOCKED_OUT | AnimFlags::MF_RECOVERY;
+        actor.animFlags.movementFlags =
+            (actor.animFlags.movementFlags & ~kReliablePresentationMovementFlags)
+            | (snapshot.movementFlags & kReliablePresentationMovementFlags);
+        if (isReliablePresentationAnimGroup(snapshot.currentAnimGroup))
             actor.animFlags.currentAnimGroup = snapshot.currentAnimGroup;
-        else if (!snapshot.isMoving)
-            actor.animFlags.currentAnimGroup.clear();
-        if (!snapshot.isMoving)
-        {
-            actor.animFlags.animFwd = 0.f;
-            actor.animFlags.animSide = 0.f;
-        }
         if (snapshotIsDead)
         {
             actor.isMoving = false;

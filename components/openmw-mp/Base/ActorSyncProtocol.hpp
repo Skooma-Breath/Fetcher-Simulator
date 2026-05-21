@@ -3,6 +3,7 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <cmath>
 #include <string>
 #include <vector>
 
@@ -254,6 +255,70 @@ namespace mwmp
     inline float dequantizeActorAxis(int8_t value)
     {
         return static_cast<float>(value) / 127.f;
+    }
+
+    inline CompactActorSnapshot makeCompactActorSnapshot(const BaseActor& actor, ActorInstanceId actorNetId)
+    {
+        const bool axisLocomotion = std::abs(actor.animFlags.animFwd) > 0.1f
+            || std::abs(actor.animFlags.animSide) > 0.1f;
+        const float speedSq = actor.velocity.linear[0] * actor.velocity.linear[0]
+            + actor.velocity.linear[1] * actor.velocity.linear[1]
+            + actor.velocity.linear[2] * actor.velocity.linear[2];
+        const bool velocityLocomotion = speedSq > 20.f * 20.f;
+        const bool hasLocomotionInput = !actor.isDead && (axisLocomotion || velocityLocomotion);
+
+        float animFwd = hasLocomotionInput ? actor.animFlags.animFwd : 0.f;
+        float animSide = hasLocomotionInput ? actor.animFlags.animSide : 0.f;
+        if (hasLocomotionInput && !axisLocomotion && velocityLocomotion)
+        {
+            animFwd = 1.f;
+            animSide = 0.f;
+        }
+
+        BaseActor presentationActor = actor;
+        presentationActor.isMoving = hasLocomotionInput;
+
+        CompactActorSnapshot snapshot;
+        snapshot.actorNetId = actorNetId;
+        snapshot.position = actor.position;
+        snapshot.velocity = actor.velocity;
+        snapshot.movementFlags = static_cast<uint16_t>(actor.animFlags.movementFlags);
+        snapshot.animFwd = hasLocomotionInput ? quantizeActorAxis(animFwd) : 0;
+        snapshot.animSide = hasLocomotionInput ? quantizeActorAxis(animSide) : 0;
+        snapshot.presentationFlags = makeActorPresentationFlags(presentationActor);
+        return snapshot;
+    }
+
+    inline void applyCompactActorSnapshotState(
+        BaseActor& actor, const CompactActorSnapshot& snapshot, bool includeDeathState = false)
+    {
+        const bool previousDead = actor.isDead;
+
+        actor.position = snapshot.position;
+        actor.velocity = snapshot.velocity;
+        applyActorPresentationFlags(actor, snapshot.presentationFlags);
+        if (!includeDeathState)
+            actor.isDead = previousDead;
+
+        actor.animFlags.movementFlags = snapshot.movementFlags;
+        actor.animFlags.animFwd = dequantizeActorAxis(snapshot.animFwd);
+        actor.animFlags.animSide = dequantizeActorAxis(snapshot.animSide);
+
+        if (!actor.isMoving)
+        {
+            actor.animFlags.animFwd = 0.f;
+            actor.animFlags.animSide = 0.f;
+        }
+
+        if (actor.isDead)
+        {
+            actor.isMoving = false;
+            actor.isAttackingOrCasting = false;
+            actor.velocity = Velocity {};
+            actor.animFlags.movementFlags = 0;
+            actor.animFlags.animFwd = 0.f;
+            actor.animFlags.animSide = 0.f;
+        }
     }
 }
 

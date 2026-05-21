@@ -66,6 +66,33 @@ namespace
         const auto* baseNode = ptr.getRefData().getBaseNode();
         return baseNode && baseNode->getUserValue("mp_player_name", outName);
     }
+
+    bool isMpBaseIdleGroup(const std::string& group)
+    {
+        return group == "idle" || group == "idleswim" || group == "idlesneak";
+    }
+
+    bool isMpSpecialIdleGroup(const std::string& group)
+    {
+        return group.rfind("idle", 0) == 0 && !isMpBaseIdleGroup(group);
+    }
+
+    void setMpCurrentIdleGroup(const MWWorld::Ptr& ptr, const std::string& group)
+    {
+        if (auto* baseNode = ptr.getRefData().getBaseNode())
+            baseNode->setUserValue("mp_current_idle_group", group);
+    }
+
+    bool getMpSyncedRemoteIdleGroup(const MWWorld::Ptr& ptr, std::string& group)
+    {
+        const auto* baseNode = ptr.getRefData().getBaseNode();
+        bool isRemote = false;
+        if (!baseNode || !baseNode->getUserValue("mp_remote_actor", isRemote) || !isRemote)
+            return false;
+        if (!baseNode->getUserValue("mp_synced_idle_group", group) || !isMpSpecialIdleGroup(group))
+            return false;
+        return true;
+    }
 #endif
 
     std::string_view getBestAttack(const ESM::Weapon* weapon)
@@ -396,6 +423,9 @@ namespace MWMechanics
     {
         clearStateAnimation(mCurrentIdle);
         mIdleState = CharState_None;
+#ifdef BUILD_MULTIPLAYER
+        setMpCurrentIdleGroup(mPtr, {});
+#endif
     }
 
     void CharacterController::resetCurrentHitState()
@@ -897,7 +927,17 @@ namespace MWMechanics
             return;
         }
 
-        if (!force && idle == mIdleState && (mAnimation->isPlaying(mCurrentIdle) || !mAnimQueue.empty()))
+#ifdef BUILD_MULTIPLAYER
+        std::string syncedIdleGroup;
+        const bool hasSyncedIdleGroup = (idle == CharState_Idle || idle == CharState_SpecialIdle)
+            && getMpSyncedRemoteIdleGroup(mPtr, syncedIdleGroup);
+#endif
+
+        if (!force && idle == mIdleState && (mAnimation->isPlaying(mCurrentIdle) || !mAnimQueue.empty())
+#ifdef BUILD_MULTIPLAYER
+            && (!hasSyncedIdleGroup || mCurrentIdle == syncedIdleGroup)
+#endif
+        )
             return;
 
         mIdleState = idle;
@@ -939,6 +979,16 @@ namespace MWMechanics
             }
         }
 
+#ifdef BUILD_MULTIPLAYER
+        if (hasSyncedIdleGroup)
+        {
+            idleGroup = syncedIdleGroup;
+            priority = getIdlePriority(CharState_SpecialIdle);
+            numLoops = std::numeric_limits<uint32_t>::max();
+            mIdleState = CharState_SpecialIdle;
+        }
+#endif
+
         if (!mAnimation->hasAnimation(idleGroup))
         {
             resetCurrentIdleState();
@@ -955,6 +1005,9 @@ namespace MWMechanics
         mCurrentIdle = std::move(idleGroup);
         playBlendedAnimation(mCurrentIdle, priority, MWRender::BlendMask_All, false, 1.0f, "start", "stop", startPoint,
             static_cast<uint32_t>(numLoops), true);
+#ifdef BUILD_MULTIPLAYER
+        setMpCurrentIdleGroup(mPtr, mCurrentIdle);
+#endif
     }
 
     void CharacterController::refreshCurrentAnims(
@@ -2151,6 +2204,9 @@ namespace MWMechanics
                     mAnimQueue.front().mSpeed, (loopStart ? "loop start" : mAnimQueue.front().mStartKey),
                     mAnimQueue.front().mStopKey, mAnimQueue.front().mTime, mAnimQueue.front().mLoopCount,
                     mAnimQueue.front().mLooping);
+#ifdef BUILD_MULTIPLAYER
+            setMpCurrentIdleGroup(mPtr, mAnimQueue.front().mGroup);
+#endif
         }
     }
 
@@ -3068,10 +3124,17 @@ namespace MWMechanics
             if (mAnimation)
                 mAnimation->setPlayScriptedOnly(false);
             mAnimQueue.clear();
+#ifdef BUILD_MULTIPLAYER
+            setMpCurrentIdleGroup(mPtr, {});
+#endif
             return;
         }
 
         std::erase_if(mAnimQueue, [](const AnimationQueueEntry& entry) { return !entry.mScripted; });
+#ifdef BUILD_MULTIPLAYER
+        if (mAnimQueue.empty())
+            setMpCurrentIdleGroup(mPtr, {});
+#endif
     }
 
     void CharacterController::forceStateUpdate()
