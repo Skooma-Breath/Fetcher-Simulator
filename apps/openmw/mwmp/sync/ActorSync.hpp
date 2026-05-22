@@ -160,7 +160,7 @@ namespace mwmp
             float attackDrawHoldTimer = 0.f;
             float attackLocomotionHoldTimer = 0.f;
             // Authority side: seconds since this actor was last included in an
-            // ActorPosition packet. Dense-cell scheduling uses this to avoid
+            // ActorPositionV2 packet. Dense-cell scheduling uses this to avoid
             // starving active actors behind a large high-priority set.
             float timeSinceLastPositionSend = 0.f;
             bool lastSentPresentationValid = false;

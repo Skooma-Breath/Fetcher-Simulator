@@ -12,6 +12,7 @@
 #include "engine.hpp"
 #include "options.hpp"
 #ifdef BUILD_MULTIPLAYER
+#include "mwmp/Main.hpp"
 #include "mwmp/sha256.hpp"
 #endif
 
@@ -181,14 +182,24 @@ bool parseOptions(int argc, char** argv, OMW::Engine& engine, Files::Configurati
                 host = connectStr.substr(0, sep);
                 port = static_cast<uint16_t>(std::stoi(connectStr.substr(sep + 1)));
             }
-            const std::string playerName  = variables["mp-name"].as<std::string>();
+            std::string playerName = variables["mp-account"].as<std::string>();
+            if (playerName.empty())
+                playerName = variables["mp-name"].as<std::string>();
+            const std::string characterName = variables["mp-character"].as<std::string>();
+            const bool autoEnter = variables["mp-auto-enter"].as<bool>();
             const std::string passwordRaw = variables["mp-password"].as<std::string>();
             // Hash password the same way AccountDialog does so CLI and GUI paths
             // always send the same credential format to the server.
             const std::string passwordHash = passwordRaw.empty()
                 ? std::string{}
                 : mwmp::crypto::sha256hex(passwordRaw);
-            engine.setMultiplayer(host, port, playerName, passwordHash);
+
+            // The GUI character-select path initialises Identity before attempting
+            // keypair auth. Do the same for CLI --connect launches so linked
+            // accounts can authenticate without --mp-password.
+            mwmp::Main::setStaticKeysDir(std::filesystem::current_path() / "mp-keys");
+
+            engine.setMultiplayer(host, port, playerName, passwordHash, characterName, autoEnter);
         }
     }
 #endif

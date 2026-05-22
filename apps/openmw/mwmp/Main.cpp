@@ -1,6 +1,7 @@
 #include "Main.hpp"
 #include "Identity.hpp"
 #include "MpNetworkBridge.hpp"
+#include <algorithm>
 #include <cstring>
 
 #include <stdexcept>
@@ -63,14 +64,18 @@
 #include "../mwbase/environment.hpp"
 #include "../mwbase/statemanager.hpp"
 #include "../mwbase/mechanicsmanager.hpp"
+#include "../mwbase/windowmanager.hpp"
 #include "../mwphysics/surfphysics.hpp"
 #include "../mwbase/world.hpp"
+#include "../mwgui/inventorywindow.hpp"
+#include "../mwgui/mode.hpp"
 #include "../mwworld/player.hpp"
 #include "../mwworld/esmstore.hpp"
 #include <sstream>
 #include <filesystem>
 #include <components/esm/position.hpp>
 #include <components/esm/refid.hpp>
+#include <components/esm3/loadclas.hpp>
 
 namespace mwmp
 {
@@ -109,7 +114,8 @@ bool Main::init(const std::string& host, uint16_t port,
                 const std::string& playerName,
                 const std::string& passwordHash,
                 bool isRegistration,
-                bool useKeypair)
+                bool useKeypair,
+                const std::string& autoCharacterName)
 {
     if (sInstance)
     {
@@ -124,6 +130,7 @@ bool Main::init(const std::string& host, uint16_t port,
         sInstance->mPasswordHash   = passwordHash;
         sInstance->mIsRegistration = isRegistration;
         sInstance->mUseKeypair     = useKeypair;
+        sInstance->mAutoCharacterName = autoCharacterName;
         sInstance->mHost           = host;
         sInstance->mPort           = port;
         sInstance->mPlayerSync->localPlayer().name = playerName;
@@ -157,6 +164,12 @@ bool Main::init(const std::string& host, uint16_t port,
 
         Log(Debug::Info) << "[MP] Main initialised, connecting to "
                          << host << ":" << port;
+        if (!autoCharacterName.empty())
+        {
+            Log(Debug::Info) << "[MP] Auto character selection armed"
+                             << " account=" << playerName
+                             << " character=" << autoCharacterName;
+        }
         return true;
     }
     catch (const std::exception& e)
@@ -221,6 +234,9 @@ void Main::frame(float dt)
         return;
     }
 
+    if (!mClient->isConnected()) return;
+
+    tryAutoEnterWorld();
     if (!mClient->isConnected()) return;
 
     mPlayerSync->update(dt);
@@ -357,6 +373,8 @@ void Main::onDisconnected()
     mCharSelectError.clear();
     mCharacterName.clear();
     mCharacterList.clear();
+    mAutoCharacterSelectSent = false;
+    mAutoEnterPending = false;
     mIsLinked       = false;
     mLocalPublicKey.clear();
     MWPhysics::resetSurfPhysicsSettings();
@@ -395,6 +413,193 @@ void Main::disconnect(const std::string& reason)
             mPlayerSync->flushPersistentStats();
         mClient->disconnect(reason);
     }
+}
+
+// ---------------------------------------------------------------------------
+void Main::sendCharacterSelect(const std::string& charName, bool isNew)
+{
+    if (!mClient)
+        return;
+
+    mCharSelectError.clear();
+    mCharacterDataReady = false;
+
+    PacketCharacterSelect pkt;
+    pkt.charName = charName;
+    pkt.isNew = isNew;
+    mClient->sendReliable(pkt.encode());
+
+    Log(Debug::Info) << "[MP] Sent CharacterSelect: '" << charName << "' isNew=" << isNew;
+}
+
+// ---------------------------------------------------------------------------
+void Main::tryAutoSelectCharacter()
+{
+    if (mAutoCharacterName.empty() || mAutoCharacterSelectSent)
+        return;
+
+    const auto characterIt = std::find_if(mCharacterList.begin(), mCharacterList.end(),
+        [&](const CharacterEntry& entry) { return entry.name == mAutoCharacterName; });
+    if (characterIt == mCharacterList.end())
+    {
+        mRejectReason = "Auto character '" + mAutoCharacterName + "' was not found on account '" + mPlayerName + "'.";
+        Log(Debug::Error) << "[MP] " << mRejectReason;
+        disconnect(mRejectReason);
+        return;
+    }
+
+    if (characterIt->isNew)
+    {
+        mRejectReason = "Auto character '" + mAutoCharacterName
+            + "' is incomplete and still requires character creation.";
+        Log(Debug::Error) << "[MP] " << mRejectReason;
+        disconnect(mRejectReason);
+        return;
+    }
+
+    mAutoCharacterSelectSent = true;
+    Log(Debug::Info) << "[MP] Auto-selecting character '" << characterIt->name << "'";
+    sendCharacterSelect(characterIt->name, false);
+}
+
+// ---------------------------------------------------------------------------
+bool Main::enterSelectedCharacterWorld(bool allowNewCharacterUi)
+{
+    MWBase::WindowManager* windowManager = MWBase::Environment::get().getWindowManager();
+    windowManager->removeGuiMode(MWGui::GM_MainMenu);
+
+    const bool isNew = isNewCharacter();
+    const std::string spawnCell = getSpawnCell();
+    const std::string worldName = getCharacterName().empty()
+        ? getPlayerSync().localPlayer().name
+        : getCharacterName();
+
+    if (isNew && !allowNewCharacterUi)
+    {
+        Log(Debug::Error) << "[MP] Auto-enter refused incomplete/new character '" << worldName << "'";
+        disconnect("Auto-enter refused incomplete character");
+        return false;
+    }
+
+    if (isNew)
+    {
+        Log(Debug::Info) << "[MP] New character - spawning in: " << spawnCell;
+        MWBase::Environment::get().getStateManager()->newGame(true);
+        windowManager->updatePlayer();
+        if (!worldName.empty())
+            MWBase::Environment::get().getMechanicsManager()->setPlayerName(worldName);
+        windowManager->setCharGenCompleteCallback(
+            []() {
+                if (Main::isInitialised())
+                {
+                    Log(Debug::Info) << "[MP] Chargen complete - arming watcher";
+                    Main::get().startWatchingCharGen();
+                }
+                MWBase::Environment::get().getWindowManager()->setNewGame(false);
+            });
+        windowManager->pushGuiMode(MWGui::GM_Race);
+        return true;
+    }
+
+    Log(Debug::Info) << "[MP] Returning player - restoring in: " << spawnCell;
+    MWBase::Environment::get().getStateManager()->newGame(true);
+    windowManager->updatePlayer();
+
+    if (!worldName.empty())
+        MWBase::Environment::get().getMechanicsManager()->setPlayerName(worldName);
+
+    auto mechanicsManager = MWBase::Environment::get().getMechanicsManager();
+    try
+    {
+        const std::string race = getRestoredRace();
+        const std::string head = getRestoredHeadMesh();
+        const std::string hair = getRestoredHairMesh();
+        const bool isMale = getRestoredIsMale();
+        const std::string className = getRestoredClassName();
+        const std::string birthSign = getRestoredBirthSign();
+
+        if (!race.empty())
+        {
+            mechanicsManager->setPlayerRace(ESM::RefId::deserializeText(race), isMale,
+                ESM::RefId::deserializeText(head), ESM::RefId::deserializeText(hair));
+            windowManager->getInventoryWindow()->rebuildAvatar();
+        }
+        if (!className.empty())
+        {
+            ESM::Class playerClass;
+            playerClass.mName = className;
+            playerClass.mData = getPlayerSync().localPlayer().charClass.mData;
+            playerClass.mRecordFlags = 0;
+            mechanicsManager->setPlayerClass(playerClass);
+        }
+        if (!birthSign.empty())
+            mechanicsManager->setPlayerBirthsign(ESM::RefId::deserializeText(birthSign));
+    }
+    catch (const std::exception& e)
+    {
+        Log(Debug::Warning) << "[MP] Chargen restore error: " << e.what();
+    }
+
+    const std::string targetCell = spawnCell.empty() ? "toddtest" : spawnCell;
+    const float sx = getSpawnX();
+    const float sy = getSpawnY();
+    const float sz = getSpawnZ();
+    const float rx = getSpawnRotX();
+    const float ry = getSpawnRotY();
+    const float rz = getSpawnRotZ();
+    const bool hasSavedPos = sx != 0.f || sy != 0.f || sz != 0.f;
+
+    MWBase::World* world = MWBase::Environment::get().getWorld();
+    ESM::Position dest {};
+
+    const auto interiorId = world->findInteriorPosition(targetCell, dest);
+    if (!interiorId.empty())
+    {
+        if (hasSavedPos)
+        {
+            dest.pos[0] = sx;
+            dest.pos[1] = sy;
+            dest.pos[2] = sz;
+            dest.rot[0] = rx;
+            dest.rot[1] = ry;
+            dest.rot[2] = rz;
+        }
+        world->changeToCell(interiorId, dest, true);
+    }
+    else
+    {
+        const auto exteriorId = world->findExteriorPosition(targetCell, dest);
+        if (!exteriorId.empty())
+        {
+            if (hasSavedPos)
+            {
+                dest.pos[0] = sx;
+                dest.pos[1] = sy;
+                dest.pos[2] = sz;
+                dest.rot[0] = rx;
+                dest.rot[1] = ry;
+                dest.rot[2] = rz;
+            }
+            world->changeToCell(exteriorId, dest, true);
+        }
+        else
+            world->changeToInteriorCell(targetCell, dest, true);
+    }
+
+    getPlayerSync().applyRestoredStatsToPlayer();
+    Log(Debug::Info) << "[MP] Returning player restore complete - sending full sync";
+    getPlayerSync().forceFullSync(false);
+    return true;
+}
+
+// ---------------------------------------------------------------------------
+void Main::tryAutoEnterWorld()
+{
+    if (!mAutoEnterPending || !mCharacterDataReady)
+        return;
+
+    mAutoEnterPending = false;
+    enterSelectedCharacterWorld(false);
 }
 
 // ---------------------------------------------------------------------------
@@ -466,6 +671,7 @@ void Main::registerProtocolHandlers()
             // Signal AccountDialog that the connection is ready so it can
             // open CharacterSelectDialog.
             mWorldReady = true;
+            tryAutoSelectCharacter();
         });
 
     // --- Character select error — server rejected the CharacterSelect request ---
@@ -476,6 +682,11 @@ void Main::registerProtocolHandlers()
             if (!err.decode(data, size)) return;
             mCharSelectError = err.reason;
             Log(Debug::Warning) << "[MP] CharacterSelect rejected: " << mCharSelectError;
+            if (!mAutoCharacterName.empty())
+            {
+                mRejectReason = mCharSelectError;
+                disconnect("Auto CharacterSelect rejected: " + mCharSelectError);
+            }
         });
 
     
@@ -561,6 +772,8 @@ void Main::registerProtocolHandlers()
                              << " class=" << mRestoredClassName;
 
             mCharacterDataReady = true;
+            if (!mAutoCharacterName.empty())
+                mAutoEnterPending = true;
             // NOTE: do NOT call forceFullSync() here for returning players.
             // At this point world->getPlayerPtr() still has the blank template
             // NPC record — setPlayerRace() has not been called yet.

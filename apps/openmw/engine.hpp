@@ -180,6 +180,8 @@ namespace OMW
         uint16_t     mMPServerPort     = 25565;
         std::string  mMPPlayerName;
         std::string  mMPPasswordHash;
+        std::string  mMPCharacterName;
+        bool         mMPAutoEnter      = false;
         bool         mMPEnabled        = false;
 #endif
         Debug::Level mMaxRecastLogLevel = Debug::Error;
@@ -279,12 +281,15 @@ namespace OMW
         /// passwordHash must be the SHA-256 hex digest of the raw password,
         /// or empty for password-less servers.
         void setMultiplayer(const std::string& address, uint16_t port,
-                            const std::string& playerName, const std::string& passwordHash)
+                            const std::string& playerName, const std::string& passwordHash,
+                            const std::string& characterName = {}, bool autoEnter = false)
         {
             mMPServerAddress = address;
             mMPServerPort    = port;
             mMPPlayerName    = playerName;
             mMPPasswordHash  = passwordHash;
+            mMPCharacterName = characterName;
+            mMPAutoEnter     = autoEnter;
             mMPEnabled       = !address.empty();
         }
 #endif

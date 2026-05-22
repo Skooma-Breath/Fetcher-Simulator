@@ -48,7 +48,8 @@ namespace mwmp
                             const std::string& playerName,
                             const std::string& passwordHash,
                             bool isRegistration = false,
-                            bool useKeypair     = true);
+                            bool useKeypair     = true,
+                            const std::string& autoCharacterName = {});
         static void destroy();
 
         // Per-frame update — call from engine frame loop
@@ -100,6 +101,8 @@ namespace mwmp
         static bool        isConnected();
         // Gracefully disconnect; safe to call from any thread context
         void               disconnect(const std::string& reason = "Client disconnect");
+        void               sendCharacterSelect(const std::string& charName, bool isNew);
+        bool               enterSelectedCharacterWorld(bool allowNewCharacterUi);
         void               sendActorCombatRequest(const MWWorld::Ptr& victim, float damage, bool healthDamage,
             bool knocked, const osg::Vec3f& hitPos, int attackType, float attackStrength);
         void               sendActorNpcPlayerHit(uint32_t victimGuid, const MWWorld::Ptr& npcAttacker, float damage,
@@ -125,6 +128,8 @@ namespace mwmp
         void handleChallenge(const uint8_t* data, size_t size);
         void onConnected();
         void onDisconnected();
+        void tryAutoSelectCharacter();
+        void tryAutoEnterWorld();
 
         static Main* sInstance;
 
@@ -158,6 +163,9 @@ namespace mwmp
         std::string mPasswordHash;
         bool        mIsRegistration = false;
         bool        mUseKeypair          = true;
+        std::string mAutoCharacterName;
+        bool        mAutoCharacterSelectSent = false;
+        bool        mAutoEnterPending = false;
         bool        mUnexpectedDisconnect = false; ///< set by onDisconnected when world was ready; polled on main thread
         std::string mHost;
         uint16_t    mPort           = 25565;

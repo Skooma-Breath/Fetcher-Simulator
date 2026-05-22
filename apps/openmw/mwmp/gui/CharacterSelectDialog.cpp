@@ -5,17 +5,6 @@
 #include <algorithm>
 #include <components/debug/debuglog.hpp>
 
-#include "../../mwbase/environment.hpp"
-#include "../../mwbase/mechanicsmanager.hpp"
-#include "../../mwbase/statemanager.hpp"
-#include "../../mwbase/windowmanager.hpp"
-#include "../../mwgui/inventorywindow.hpp"
-#include "../../mwbase/world.hpp"
-#include "../../mwgui/mode.hpp"
-#include <components/esm/position.hpp>
-#include <components/esm/refid.hpp>
-#include <components/esm3/loadclas.hpp>
-#include "../sync/PlayerSync.hpp"
 #include "../Identity.hpp"
 #include "../Main.hpp"
 #include "../network/Client.hpp"
@@ -436,19 +425,12 @@ void CharacterSelectDialog::onKeyLinkClicked(MyGUI::Widget*)
 void CharacterSelectDialog::sendCharacterSelect(const std::string& charName, bool isNew)
 {
     if (!Main::isInitialised()) return;
-    Main::get().clearCharSelectError();
-
-    PacketCharacterSelect pkt;
-    pkt.charName = charName;
-    pkt.isNew    = isNew;
-    Main::get().getNetworking().sendReliable(pkt.encode());
+    Main::get().sendCharacterSelect(charName, isNew);
 
     mState = State::WaitingForData;
     mTimer = 0.f;
     setCharStatus("Loading...");
     setCharPanelBusy(true);
-
-    Log(Debug::Info) << "[MP] Sent CharacterSelect: '" << charName << "' isNew=" << isNew;
 }
 
 // ---------------------------------------------------------------------------
@@ -584,113 +566,8 @@ void CharacterSelectDialog::onFrame(float dt)
 void CharacterSelectDialog::enterWorld()
 {
     setVisible(false);
-    MWBase::Environment::get().getWindowManager()->removeGuiMode(MWGui::GM_MainMenu);
-
-    Main& mp = Main::get();
-    const bool        isNew     = Main::get().isNewCharacter();
-    const std::string spawnCell = Main::get().getSpawnCell();
-    const std::string worldName = Main::get().getCharacterName().empty()
-        ? mp.getPlayerSync().localPlayer().name
-        : Main::get().getCharacterName();
-
-    if (isNew)
-    {
-        Log(Debug::Info) << "[MP] New character - spawning in: " << spawnCell;
-        MWBase::Environment::get().getStateManager()->newGame(true);
-        MWBase::Environment::get().getWindowManager()->updatePlayer();
-        if (!worldName.empty())
-            MWBase::Environment::get().getMechanicsManager()->setPlayerName(worldName);
-        MWBase::Environment::get().getWindowManager()->setCharGenCompleteCallback(
-            []() {
-                if (Main::isInitialised())
-                {
-                    Log(Debug::Info) << "[MP] Chargen complete - arming watcher";
-                    Main::get().startWatchingCharGen();
-                }
-                MWBase::Environment::get().getWindowManager()->setNewGame(false);
-            });
-        MWBase::Environment::get().getWindowManager()->pushGuiMode(MWGui::GM_Race);
-    }
-    else
-    {
-        Log(Debug::Info) << "[MP] Returning player - restoring in: " << spawnCell;
-        MWBase::Environment::get().getStateManager()->newGame(true);
-        MWBase::Environment::get().getWindowManager()->updatePlayer();
-
-        if (!worldName.empty())
-            MWBase::Environment::get().getMechanicsManager()->setPlayerName(worldName);
-
-        auto mm = MWBase::Environment::get().getMechanicsManager();
-        try
-        {
-            const std::string race    = Main::get().getRestoredRace();
-            const std::string head    = Main::get().getRestoredHeadMesh();
-            const std::string hair    = Main::get().getRestoredHairMesh();
-            const bool        isMale  = Main::get().getRestoredIsMale();
-            const std::string clsName = Main::get().getRestoredClassName();
-            const std::string birth   = Main::get().getRestoredBirthSign();
-
-            if (!race.empty())
-            {
-                mm->setPlayerRace(ESM::RefId::deserializeText(race), isMale,
-                                  ESM::RefId::deserializeText(head),
-                                  ESM::RefId::deserializeText(hair));
-                MWBase::Environment::get().getWindowManager()
-                    ->getInventoryWindow()->rebuildAvatar();
-            }
-            if (!clsName.empty())
-            {
-                ESM::Class cls;
-                cls.mName        = clsName;
-                cls.mData        = Main::get().getPlayerSync().localPlayer().charClass.mData;
-                cls.mRecordFlags = 0;
-                mm->setPlayerClass(cls);
-            }
-            if (!birth.empty())
-                mm->setPlayerBirthsign(ESM::RefId::deserializeText(birth));
-        }
-        catch (const std::exception& e)
-        {
-            Log(Debug::Warning) << "[MP] Chargen restore error: " << e.what();
-        }
-
-        const std::string targetCell = (spawnCell.empty() ? "toddtest" : spawnCell);
-        const float sx = Main::get().getSpawnX(),    sy = Main::get().getSpawnY(),
-                    sz = Main::get().getSpawnZ();
-        const float rx = Main::get().getSpawnRotX(), ry = Main::get().getSpawnRotY(),
-                    rz = Main::get().getSpawnRotZ();
-        const bool hasSavedPos = (sx != 0.f || sy != 0.f || sz != 0.f);
-
-        MWBase::World* world = MWBase::Environment::get().getWorld();
-        ESM::Position dest{};
-
-        const auto intId = world->findInteriorPosition(targetCell, dest);
-        if (!intId.empty())
-        {
-            if (hasSavedPos) { dest.pos[0]=sx; dest.pos[1]=sy; dest.pos[2]=sz;
-                               dest.rot[0]=rx; dest.rot[1]=ry; dest.rot[2]=rz; }
-            world->changeToCell(intId, dest, true);
-        }
-        else
-        {
-            const auto extId = world->findExteriorPosition(targetCell, dest);
-            if (!extId.empty())
-            {
-                if (hasSavedPos) { dest.pos[0]=sx; dest.pos[1]=sy; dest.pos[2]=sz;
-                                   dest.rot[0]=rx; dest.rot[1]=ry; dest.rot[2]=rz; }
-                world->changeToCell(extId, dest, true);
-            }
-            else
-                world->changeToInteriorCell(targetCell, dest, true);
-        }
-
-        if (Main::isInitialised())
-        {
-            Main::get().getPlayerSync().applyRestoredStatsToPlayer();
-            Log(Debug::Info) << "[MP] Returning player restore complete - sending full sync";
-            Main::get().getPlayerSync().forceFullSync(false);
-        }
-    }
+    if (Main::isInitialised())
+        Main::get().enterSelectedCharacterWorld(true);
 }
 
 // ---------------------------------------------------------------------------

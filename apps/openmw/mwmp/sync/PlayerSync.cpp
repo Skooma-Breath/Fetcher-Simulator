@@ -458,6 +458,13 @@ void PlayerSync::queueAuthoritativeEquipment(const BasePlayer& authoritative)
         mAuthoritativeEquipment[slot].slot = slot;
     mPendingEquipmentRestore = true;
 
+    // During MP auto-enter the server can send saved equipment immediately after
+    // CharacterData while OpenMW is still in State_NoGame. Do not apply to the
+    // pre-game/template player; newGame(true) would recreate the player and wipe
+    // the restored equipment. Keep it pending until the real world is running.
+    if (MWBase::Environment::get().getStateManager()->getState() != MWBase::StateManager::State_Running)
+        return;
+
     MWBase::World* world = MWBase::Environment::get().getWorld();
     if (!world) return;
 
@@ -471,6 +478,13 @@ void PlayerSync::queueAuthoritativeInventory(const BasePlayer& authoritative)
     mAuthoritativeInventory = authoritative.inventoryChanges;
     mAuthoritativeInventory.action = BasePlayer::InventoryChanges::Action::Set;
     mPendingInventoryRestore = true;
+
+    // During MP auto-enter the server can send saved inventory immediately after
+    // CharacterData while OpenMW is still in State_NoGame. Do not apply to the
+    // pre-game/template player; newGame(true) would recreate the player and wipe
+    // the restored inventory. Keep it pending until the real world is running.
+    if (MWBase::Environment::get().getStateManager()->getState() != MWBase::StateManager::State_Running)
+        return;
 
     MWBase::World* world = MWBase::Environment::get().getWorld();
     if (!world) return;

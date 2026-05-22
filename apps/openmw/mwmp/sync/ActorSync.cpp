@@ -16,7 +16,6 @@
 #include <components/misc/rng.hpp>
 #include <components/misc/resourcehelpers.hpp>
 #include <components/openmw-mp/Packets/Actor/PacketActorList.hpp>
-#include <components/openmw-mp/Packets/Actor/PacketActorPosition.hpp>
 #include <components/openmw-mp/Packets/Actor/PacketActorPositionV2.hpp>
 #include <components/openmw-mp/Packets/Actor/PacketActorPresentationV2.hpp>
 #include <components/openmw-mp/Packets/Actor/PacketActorCombatRequest.hpp>
@@ -51,7 +50,6 @@
 #include "../network/Client.hpp"
 #include "PlayerSync.hpp"
 #include "RemotePlayer.hpp"
-#include <components/openmw-mp/Packets/Actor/PacketActorAttack.hpp>
 #include <components/openmw-mp/Packets/Actor/PacketActorAttackV2.hpp>
 #include <components/openmw-mp/Packets/Actor/PacketActorEquipment.hpp>
 #include "../../mwworld/inventorystore.hpp"
@@ -86,6 +84,16 @@ namespace
     bool isUnmanagedSpawnerActor(const mwmp::BaseActor& actor)
     {
         return actor.mpNum == 0 && isGeneratedSpawnerRefId(actor.refId);
+    }
+
+    bool hasAnyEquipmentItem(const std::vector<mwmp::EquipmentItem>& equipment)
+    {
+        for (const auto& entry : equipment)
+        {
+            if (!entry.item.refId.empty())
+                return true;
+        }
+        return false;
     }
 
     bool applyDefaultServerSpawnedWander(
@@ -351,10 +359,15 @@ namespace
         return lowerBodyGroup;
     }
 
+    constexpr bool kEnableTemporaryActorWatchLogs = false;
+
     bool isWatchedBorderActor(const mwmp::BaseActor& actor, const std::string& packetCellId);
 
     bool isWatchedPresentationActor(const mwmp::BaseActor& actor, mwmp::ActorInstanceId actorNetId)
     {
+        if (!kEnableTemporaryActorWatchLogs)
+            return false;
+
         return actor.refId == "heddvild" || actor.mpNum == 2601
             || actorNetId == mwmp::packActorInstanceKey({ mwmp::ActorKeyKind::SpawnedMpNum, 2601 })
             || isWatchedBorderActor(actor, actor.cellId);
@@ -367,6 +380,9 @@ namespace
 
     bool isWatchedBorderActor(const mwmp::BaseActor& actor, const std::string& packetCellId)
     {
+        if (!kEnableTemporaryActorWatchLogs)
+            return false;
+
         if (actor.refId.find("imperial guard") == std::string::npos)
             return false;
         return isWatchedBorderCell(packetCellId) || isWatchedBorderCell(actor.cellId);
@@ -1298,7 +1314,7 @@ namespace mwmp
                 runtime.state.refNum = actorState.refNum;
                 runtime.state.mpNum = actorState.mpNum;
                 runtime.state.cellId = actorState.cellId;
-                if (!actorState.equipment.empty())
+                if (hasAnyEquipmentItem(actorState.equipment))
                 {
                     runtime.state.equipment = actorState.equipment;
                     runtime.hasAuthoritativeEquipment = true;
@@ -1333,7 +1349,7 @@ namespace mwmp
             {
                 const bool replayDeadBaseline = shouldReplayDeadBaselineAsRealtime(runtime, actorState);
                 runtime.state = actorState;
-                if (!actorState.equipment.empty())
+                if (hasAnyEquipmentItem(actorState.equipment))
                     runtime.hasAuthoritativeEquipment = true;
                 if (actorState.isDead)
                     markDeadBaselineState(runtime, actorState, replayDeadBaseline);
@@ -1372,24 +1388,35 @@ namespace mwmp
 
         mActorV2IdentityTransformPreservedWindow += transformPreserved;
         mActorV2IdentityZeroTransformSkippedWindow += zeroTransformSkipped;
-        Log(Debug::Info) << "[MP] ActorSync v2: identity"
-                         << " cell=" << list.cellId
-                         << " actors=" << list.actors.size()
-                         << " primary=" << mActorsByNetId.size()
-                         << " promoted=" << promoted
-                         << " migrated=" << migrated
-                         << " removed=" << removed
-                         << " baselineApplied=" << baselineApplied
-                         << " transformPreserved=" << transformPreserved
-                         << " zeroTransformSkipped=" << zeroTransformSkipped
-                         << " invalidActorNetId=" << invalidActorNetId
-                         << " firstInvalidActorKey=" << describeActorInstanceId(firstInvalidActorNetId)
-                         << " missingIdentity=" << missingIdentity
-                         << " identityMismatch=" << identityMismatch
-                         << " firstMismatchActorKey=" << describeActorInstanceId(firstMismatchActorNetId)
-                         << " ambiguousIdentityNormalized=" << ambiguousIdentityNormalized
-                         << " unmanagedSpawnerDropped=" << unmanagedSpawnerIdentityDropped
-                         << " seq=" << list.sequence;
+        const bool importantIdentityDiagnostics = invalidActorNetId != 0
+            || missingIdentity != 0
+            || identityMismatch != 0
+            || ambiguousIdentityNormalized != 0
+            || unmanagedSpawnerIdentityDropped != 0
+            || zeroTransformSkipped != 0
+            || removed != 0
+            || migrated != 0;
+        if (importantIdentityDiagnostics)
+        {
+            Log(Debug::Info) << "[MP] ActorSync v2: identity"
+                             << " cell=" << list.cellId
+                             << " actors=" << list.actors.size()
+                             << " primary=" << mActorsByNetId.size()
+                             << " promoted=" << promoted
+                             << " migrated=" << migrated
+                             << " removed=" << removed
+                             << " baselineApplied=" << baselineApplied
+                             << " transformPreserved=" << transformPreserved
+                             << " zeroTransformSkipped=" << zeroTransformSkipped
+                             << " invalidActorNetId=" << invalidActorNetId
+                             << " firstInvalidActorKey=" << describeActorInstanceId(firstInvalidActorNetId)
+                             << " missingIdentity=" << missingIdentity
+                             << " identityMismatch=" << identityMismatch
+                             << " firstMismatchActorKey=" << describeActorInstanceId(firstMismatchActorNetId)
+                             << " ambiguousIdentityNormalized=" << ambiguousIdentityNormalized
+                             << " unmanagedSpawnerDropped=" << unmanagedSpawnerIdentityDropped
+                             << " seq=" << list.sequence;
+        }
     }
 
     void ActorSync::onActorListUpdate(const ActorList& list)
@@ -1471,7 +1498,7 @@ namespace mwmp
                     runtime.state.refNum = actorState.refNum;
                     runtime.state.mpNum = actorState.mpNum;
                     runtime.state.cellId = list.cellId;
-                    if (!actorState.equipment.empty())
+                    if (hasAnyEquipmentItem(actorState.equipment))
                     {
                         runtime.state.equipment = actorState.equipment;
                         runtime.hasAuthoritativeEquipment = true;
@@ -1496,7 +1523,7 @@ namespace mwmp
                 {
                     const bool replayDeadBaseline = shouldReplayDeadBaselineAsRealtime(runtime, actorState);
                     runtime.state = actorState;
-                    if (!actorState.equipment.empty())
+                    if (hasAnyEquipmentItem(actorState.equipment))
                         runtime.hasAuthoritativeEquipment = true;
                     if (actorState.isDead)
                         markDeadBaselineState(runtime, actorState, replayDeadBaseline);
@@ -1513,7 +1540,7 @@ namespace mwmp
 
             const bool replayDeadBaseline = shouldReplayDeadBaselineAsRealtime(runtime, actorState);
             runtime.state = actorState;
-            if (!actorState.equipment.empty())
+            if (hasAnyEquipmentItem(actorState.equipment))
                 runtime.hasAuthoritativeEquipment = true;
             // If the actor arrives already dead from a full actor list (not a
             // real-time death packet), mark it so applyBoundActorState() can
@@ -1661,64 +1688,9 @@ namespace mwmp
 
     void ActorSync::onActorPositionUpdate(const ActorList& list)
     {
-        auto& cell = mCells[list.cellId];
-        if (!shouldAcceptSnapshot(cell, list, "ActorPosition", true))
-            return;
-
-        cell.latest.cellId = list.cellId;
-        cell.latest.authorityGuid = list.authorityGuid;
-        cell.latest.authorityGeneration = list.authorityGeneration;
-        cell.latest.snapshotSequence = list.snapshotSequence;
-        cell.latest.serverTimestamp = list.serverTimestamp;
-
-        for (const auto& actorState : list.actors)
-        {
-            if (isStaleServerSpawnedActorUpdate(actorState.mpNum, list.serverTimestamp))
-            {
-                Log(Debug::Verbose) << "[MP] ActorSync: skipped stale ActorPosition actor"
-                                    << " cell=" << list.cellId
-                                    << " refId=" << actorState.refId
-                                    << " mpNum=" << actorState.mpNum
-                                    << " ts=" << list.serverTimestamp;
-                continue;
-            }
-
-            const std::string actorKey = makeActorKey(actorState);
-            if (ActorRuntime* primaryRuntime = findPrimaryActorRuntime(actorState))
-            {
-                mergeActorState(*primaryRuntime, actorState, true);
-                queueSnapshot(*primaryRuntime, actorState, list);
-                rememberServerSpawnedActorTimestamp(actorState.mpNum, list.serverTimestamp);
-                continue;
-            }
-
-            auto runtimeIt = cell.actors.find(actorKey);
-            if (runtimeIt == cell.actors.end() && actorState.mpNum != 0)
-            {
-                ActorRuntime migratedRuntime;
-                if (takeServerSpawnedRuntimeFromOtherCell(list.cellId, actorState, list.serverTimestamp, migratedRuntime))
-                    runtimeIt = cell.actors.emplace(actorKey, std::move(migratedRuntime)).first;
-                else
-                {
-                    auto mappedIt = mServerSpawnedActorsByMpNum.find(actorState.mpNum);
-                    if (mappedIt != mServerSpawnedActorsByMpNum.end()
-                        && !mappedIt->second.isEmpty()
-                        && matchesActor(mappedIt->second, actorState))
-                    {
-                        ActorRuntime mappedRuntime;
-                        mappedRuntime.boundActor = mappedIt->second;
-                        runtimeIt = cell.actors.emplace(actorKey, std::move(mappedRuntime)).first;
-                    }
-                }
-            }
-            if (runtimeIt == cell.actors.end())
-                runtimeIt = cell.actors.emplace(actorKey, ActorRuntime()).first;
-
-            auto& runtime = runtimeIt->second;
-            mergeActorState(runtime, actorState, true);
-            queueSnapshot(runtime, actorState, list);
-            rememberServerSpawnedActorTimestamp(actorState.mpNum, list.serverTimestamp);
-        }
+        Log(Debug::Verbose) << "[MP] ActorSync: ignored retired legacy ActorPosition"
+                            << " cell=" << list.cellId
+                            << " actors=" << list.actors.size();
     }
 
     void ActorSync::onActorPositionV2Update(const ActorPositionV2List& list)
@@ -1838,41 +1810,58 @@ namespace mwmp
                     noisiestMissingCount = count;
                 }
             }
-            Log(Debug::Info) << "[MP] ActorSync v2: position receive"
-                             << " snapshots=" << mActorV2SnapshotsWindow
-                             << " invalidActorNetId=" << mActorV2InvalidActorIdWindow
-                             << " firstInvalidActorKey=" << describeActorInstanceId(firstInvalidActorNetId)
-                             << " missingIdentity=" << mActorV2MissingIdentityWindow
-                             << " firstMissingActorNetId=" << firstMissingActorNetId
-                             << " firstMissingActorKey=" << describeActorInstanceId(firstMissingActorNetId)
-                             << " noisiestMissingActorNetId=" << noisiestMissingActorNetId
-                             << " noisiestMissingActorKey=" << describeActorInstanceId(noisiestMissingActorNetId)
-                             << " noisiestMissingCount=" << noisiestMissingCount
-                             << " stale=" << mActorV2StaleWindow
-                             << " deadLiveSuppressed=" << mActorV2DeadLiveSuppressedWindow
-                             << " positionMoving=" << mActorV2PositionMovingWindow
-                             << " positionAttacking=" << mActorV2PositionAttackingWindow
-                             << " positionWeaponDrawn=" << mActorV2PositionWeaponDrawnWindow
-                             << " identityTransformPreserved=" << mActorV2IdentityTransformPreservedWindow
-                             << " identityZeroTransformSkipped=" << mActorV2IdentityZeroTransformSkippedWindow
-                             << " presentationSent=" << mActorV2PresentationSentWindow
-                             << " presentationApplied=" << mActorV2PresentationAppliedWindow
-                             << " presentationInvalidActorNetId="
-                             << mActorV2PresentationInvalidActorIdWindow
-                             << " presentationMissingIdentity=" << mActorV2PresentationMissingIdentityWindow
-                             << " presentationStale=" << mActorV2PresentationStaleWindow
-                             << " presentationDeadLiveSuppressed="
-                             << mActorV2PresentationDeadLiveSuppressedWindow
-                             << " presentationStopForced=" << mActorV2PresentationStopForcedWindow
-                             << " presentationGroupChanged=" << mActorV2PresentationGroupChangedWindow
-                             << " attackSent=" << mActorV2AttackSentWindow
-                             << " attackApplied=" << mActorV2AttackAppliedWindow
-                             << " attackInvalidActorNetId=" << mActorV2AttackInvalidActorIdWindow
-                             << " attackMissingIdentity=" << mActorV2AttackMissingIdentityWindow
-                             << " attackDuplicate=" << mActorV2AttackDuplicateWindow
-                             << " attackDeadSuppressed=" << mActorV2AttackDeadSuppressedWindow
-                             << " primaryActors=" << mActorsByNetId.size()
-                             << " seq=" << list.sequence;
+            const bool importantV2ReceiveDiagnostics = mActorV2InvalidActorIdWindow != 0
+                || mActorV2MissingIdentityWindow != 0
+                || mActorV2StaleWindow != 0
+                || mActorV2DeadLiveSuppressedWindow != 0
+                || mActorV2IdentityZeroTransformSkippedWindow != 0
+                || mActorV2PresentationInvalidActorIdWindow != 0
+                || mActorV2PresentationMissingIdentityWindow != 0
+                || mActorV2PresentationStaleWindow != 0
+                || mActorV2PresentationDeadLiveSuppressedWindow != 0
+                || mActorV2AttackInvalidActorIdWindow != 0
+                || mActorV2AttackMissingIdentityWindow != 0
+                || mActorV2AttackDuplicateWindow != 0
+                || mActorV2AttackDeadSuppressedWindow != 0
+                || noisiestMissingCount != 0;
+            if (importantV2ReceiveDiagnostics)
+            {
+                Log(Debug::Info) << "[MP] ActorSync v2: receive diagnostics"
+                                 << " snapshots=" << mActorV2SnapshotsWindow
+                                 << " invalidActorNetId=" << mActorV2InvalidActorIdWindow
+                                 << " firstInvalidActorKey=" << describeActorInstanceId(firstInvalidActorNetId)
+                                 << " missingIdentity=" << mActorV2MissingIdentityWindow
+                                 << " firstMissingActorNetId=" << firstMissingActorNetId
+                                 << " firstMissingActorKey=" << describeActorInstanceId(firstMissingActorNetId)
+                                 << " noisiestMissingActorNetId=" << noisiestMissingActorNetId
+                                 << " noisiestMissingActorKey=" << describeActorInstanceId(noisiestMissingActorNetId)
+                                 << " noisiestMissingCount=" << noisiestMissingCount
+                                 << " stale=" << mActorV2StaleWindow
+                                 << " deadLiveSuppressed=" << mActorV2DeadLiveSuppressedWindow
+                                 << " positionMoving=" << mActorV2PositionMovingWindow
+                                 << " positionAttacking=" << mActorV2PositionAttackingWindow
+                                 << " positionWeaponDrawn=" << mActorV2PositionWeaponDrawnWindow
+                                 << " identityTransformPreserved=" << mActorV2IdentityTransformPreservedWindow
+                                 << " identityZeroTransformSkipped=" << mActorV2IdentityZeroTransformSkippedWindow
+                                 << " presentationSent=" << mActorV2PresentationSentWindow
+                                 << " presentationApplied=" << mActorV2PresentationAppliedWindow
+                                 << " presentationInvalidActorNetId="
+                                 << mActorV2PresentationInvalidActorIdWindow
+                                 << " presentationMissingIdentity=" << mActorV2PresentationMissingIdentityWindow
+                                 << " presentationStale=" << mActorV2PresentationStaleWindow
+                                 << " presentationDeadLiveSuppressed="
+                                 << mActorV2PresentationDeadLiveSuppressedWindow
+                                 << " presentationStopForced=" << mActorV2PresentationStopForcedWindow
+                                 << " presentationGroupChanged=" << mActorV2PresentationGroupChangedWindow
+                                 << " attackSent=" << mActorV2AttackSentWindow
+                                 << " attackApplied=" << mActorV2AttackAppliedWindow
+                                 << " attackInvalidActorNetId=" << mActorV2AttackInvalidActorIdWindow
+                                 << " attackMissingIdentity=" << mActorV2AttackMissingIdentityWindow
+                                 << " attackDuplicate=" << mActorV2AttackDuplicateWindow
+                                 << " attackDeadSuppressed=" << mActorV2AttackDeadSuppressedWindow
+                                 << " primaryActors=" << mActorsByNetId.size()
+                                 << " seq=" << list.sequence;
+            }
             mActorV2DiagnosticsLastLogMs = now;
             mActorV2SnapshotsWindow = 0;
             mActorV2InvalidActorIdWindow = 0;
@@ -2103,29 +2092,9 @@ namespace mwmp
 
     void ActorSync::onActorAttack(const ActorList& list)
     {
-        auto& cell = mCells[list.cellId];
-        if (!shouldAcceptSnapshot(cell, list, "ActorAttack"))
-            return;
-
-        Log(Debug::Info) << "[MP] ActorSync: onActorAttack received cellId=" << list.cellId
-                         << " actors=" << list.actors.size();
-        cell.latest.snapshotSequence = list.snapshotSequence;
-        cell.latest.serverTimestamp = list.serverTimestamp;
-
-        for (const auto& actorState : list.actors)
-        {
-            auto& runtime = runtimeForPacketActor(list.cellId, cell, actorState);
-            mergeActorState(runtime, actorState, false);
-            logWatchedBorderActor("ActorAttack", list.cellId, actorState, &runtime, runtime.boundActor,
-                runtime.actorNetId != 0 ? "primary-or-v2" : "cell-runtime");
-            fastForwardRuntimeToLatestSnapshot(runtime, "ActorAttack", list.serverTimestamp);
-            runtime.state.attack = actorState.attack;
-            runtime.pendingAttack = true;
-            // The authority already does edge detection, so each received packet
-            // represents a new attack event. Reset lastAttackPressed so that
-            // applyBoundActorState() will see a proper rising edge.
-            runtime.lastAttackPressed = false;
-        }
+        Log(Debug::Verbose) << "[MP] ActorSync: ignored retired legacy ActorAttack"
+                            << " cell=" << list.cellId
+                            << " actors=" << list.actors.size();
     }
 
     void ActorSync::onActorAttackV2(const ActorAttackV2List& list)
@@ -4184,27 +4153,28 @@ namespace mwmp
                 cell.positionDiagnosticsTimer = 0.f;
                 constexpr float kPositionDiagnosticsInfoAge = 0.25f;
                 const bool importantPositionBudget = invalidPositionIdentity != 0
-                    || maxPositionSendAge >= kPositionDiagnosticsInfoAge
-                    || sentHeddvild
-                    || sentMp2601;
-                Log(importantPositionBudget ? Debug::Info : Debug::Verbose)
-                    << "[MP] ActorSync: position send budget"
-                    << " cell=" << outgoing.cellId
-                    << " outgoing=" << outgoing.actors.size()
-                    << " priority=" << priorityCount
-                    << " normal=" << normalCount
-                    << " chunks=" << chunksSent
-                    << " sent=" << sentActorCount
-                    << " invalidIdentity=" << invalidPositionIdentity
-                    << " priorityCursor=" << cell.priorityPositionSendCursor
-                    << " normalCursor=" << cell.positionSendCursor
-                    << " maxAgeMs=" << (maxPositionSendAge * 1000.f)
-                    << " includesHeddvild=" << includesHeddvild
-                    << " sentHeddvild=" << sentHeddvild
-                    << " heddvildMpNums=" << includedHeddvildMpNums
-                    << " sentHeddvildMpNums=" << sentHeddvildMpNums
-                    << " includesMp2601=" << includesMp2601
-                    << " sentMp2601=" << sentMp2601;
+                    || maxPositionSendAge >= kPositionDiagnosticsInfoAge;
+                if (importantPositionBudget)
+                {
+                    Log(Debug::Info)
+                        << "[MP] ActorSync: position send budget"
+                        << " cell=" << outgoing.cellId
+                        << " outgoing=" << outgoing.actors.size()
+                        << " priority=" << priorityCount
+                        << " normal=" << normalCount
+                        << " chunks=" << chunksSent
+                        << " sent=" << sentActorCount
+                        << " invalidIdentity=" << invalidPositionIdentity
+                        << " priorityCursor=" << cell.priorityPositionSendCursor
+                        << " normalCursor=" << cell.positionSendCursor
+                        << " maxAgeMs=" << (maxPositionSendAge * 1000.f)
+                        << " includesHeddvild=" << includesHeddvild
+                        << " sentHeddvild=" << sentHeddvild
+                        << " heddvildMpNums=" << includedHeddvildMpNums
+                        << " sentHeddvildMpNums=" << sentHeddvildMpNums
+                        << " includesMp2601=" << includesMp2601
+                        << " sentMp2601=" << sentMp2601;
+                }
             }
         }
 
@@ -4218,11 +4188,6 @@ namespace mwmp
         deathUpdate.cellId = outgoing.cellId;
         deathUpdate.isAuthority = true;
         deathUpdate.authorityGuid = outgoing.authorityGuid;
-
-        ActorList attackUpdate;
-        attackUpdate.cellId = outgoing.cellId;
-        attackUpdate.isAuthority = true;
-        attackUpdate.authorityGuid = outgoing.authorityGuid;
 
         ActorAttackV2List attackV2Update;
         attackV2Update.protocolVersion = ActorSyncProtocolVersionV2;
@@ -4374,9 +4339,16 @@ namespace mwmp
                     }
                 }
 
-                attackUpdate.actors.push_back(atkActor);
                 const ActorInstanceId actorNetId = actorNetIdForActorState(actor);
-                if (actorNetId != 0)
+                if (actorNetId == 0)
+                {
+                    Log(Debug::Verbose) << "[MP] ActorSync: skipped attack without v2 actor identity"
+                                        << " refId=" << actor.refId
+                                        << " refNum=" << actor.refNum
+                                        << " mpNum=" << actor.mpNum
+                                        << " cell=" << actor.cellId;
+                }
+                else
                 {
                     ActorRuntime& runtime = cell.actors[key];
                     runtime.actorNetId = actorNetId;
@@ -4387,7 +4359,6 @@ namespace mwmp
                         event.eventId = runtime.nextAttackEventId++;
                     event.attack = atkActor.attack;
                     attackV2Update.events.push_back(event);
-                    attackUpdate.actors.pop_back();
                 }
             }
 
@@ -4571,15 +4542,8 @@ namespace mwmp
             attackPkt.setAttackList(&attackV2Update);
             mClient.sendReliable(attackPkt.encode());
             mActorV2AttackSentWindow += attackV2Update.events.size();
-            Log(Debug::Info) << "[MP] ActorSync: sent ActorAttackV2 packet with " << attackV2Update.events.size() << " events";
-        }
-
-        if (!attackUpdate.actors.empty())
-        {
-            PacketActorAttack attackPkt;
-            attackPkt.setActorList(&attackUpdate);
-            mClient.sendReliable(attackPkt.encode());
-            Log(Debug::Info) << "[MP] ActorSync: sent ActorAttack packet with " << attackUpdate.actors.size() << " actors";
+            Log(Debug::Verbose) << "[MP] ActorSync: sent ActorAttackV2 packet with "
+                                << attackV2Update.events.size() << " events";
         }
 
         if (!castUpdate.actors.empty())

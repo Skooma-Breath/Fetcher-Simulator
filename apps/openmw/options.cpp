@@ -101,7 +101,16 @@ namespace OpenMW
             "connect to multiplayer server, e.g. --connect=127.0.0.1:25565");
         addOption("mp-name",
             bpo::value<std::string>()->default_value(""),
-            "multiplayer player name (required when --connect is set)");
+            "multiplayer account name (legacy alias, required when --connect is set)");
+        addOption("mp-account",
+            bpo::value<std::string>()->default_value(""),
+            "multiplayer account name (preferred for automated login)");
+        addOption("mp-character",
+            bpo::value<std::string>()->default_value(""),
+            "multiplayer character name to auto-select after login when --mp-auto-enter is set");
+        addOption("mp-auto-enter",
+            bpo::value<bool>()->implicit_value(true)->default_value(false),
+            "auto-select --mp-character, bypass startup menu/videos, and enter the world after login");
         addOption("mp-password",
             bpo::value<std::string>()->default_value(""),
             "multiplayer server password (leave empty for open servers)");

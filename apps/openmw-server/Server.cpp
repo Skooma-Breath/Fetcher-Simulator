@@ -1656,11 +1656,11 @@ void MPServer::sendActorIdentityToClient(HSteamNetConnection conn, const std::st
             ++clientIt->second.actorV2IdentitySentWindow;
     }
 
-    Log(Debug::Info) << "[Server] ActorSync v2 identity sent"
-                     << " to=" << clientIt->second.name
-                     << " cell=" << cellId
-                     << " actors=" << identityList.actors.size()
-                     << " seq=" << identityList.sequence;
+    Log(Debug::Verbose) << "[Server] ActorSync v2 identity sent"
+                        << " to=" << clientIt->second.name
+                        << " cell=" << cellId
+                        << " actors=" << identityList.actors.size()
+                        << " seq=" << identityList.sequence;
 }
 
 void MPServer::broadcastActorIdentityForCell(
@@ -2498,30 +2498,33 @@ void MPServer::broadcastActorPositionV2ToCell(
                 || client.actorV2BytesSentWindow > 12000
                 || client.actorV2DeferredWindow > 1200;
 
-            Log(logAtInfo ? Debug::Info : Debug::Verbose) << "[Server] ActorSync v2 budget"
-                             << " receiver=" << client.guid
-                             << " cell=" << cellId
-                             << " interested=" << actorList.actors.size()
-                             << " identitySent=" << client.actorV2IdentitySentWindow
-                             << " identityAcked=" << client.actorV2IdentityAckedWindow
-                             << " snapshots=" << client.actorV2SnapshotsSentWindow
-                             << " bytes=" << client.actorV2BytesSentWindow
-                             << " presentationSent=" << client.actorV2PresentationSentWindow
-                             << " presentationBytes=" << client.actorV2PresentationBytesSentWindow
-                             << " attackSent=" << client.actorV2AttackSentWindow
-                             << " attackSuppressedUntilIdentityKnown=" << client.actorV2AttackSuppressedUntilIdentityKnownWindow
-                             << " budget=" << kBudgetBytes
-                             << " deferred=" << client.actorV2DeferredWindow
-                             << " positionSuppressedUntilIdentityKnown=" << client.actorV2PositionSuppressedUntilIdentityKnownWindow
-                             << " presentationSuppressedUntilIdentityKnown=" << client.actorV2PresentationSuppressedUntilIdentityKnownWindow
-                             << " missingIdentityActorNetId=" << noisiestMissingActorNetId
-                             << " missingIdentityActorKey=" << describeActorInstanceId(noisiestMissingActorNetId)
-                             << " missingIdentityCount=" << noisiestMissingCount
-                             << " tier0=" << client.actorV2TierCounts[0]
-                             << " tier1=" << client.actorV2TierCounts[1]
-                             << " tier2=" << client.actorV2TierCounts[2]
-                             << " tier3=" << client.actorV2TierCounts[3]
-                             << " tier4=" << client.actorV2TierCounts[4];
+            if (logAtInfo)
+            {
+                Log(Debug::Info) << "[Server] ActorSync v2 budget"
+                                 << " receiver=" << client.guid
+                                 << " cell=" << cellId
+                                 << " interested=" << actorList.actors.size()
+                                 << " identitySent=" << client.actorV2IdentitySentWindow
+                                 << " identityAcked=" << client.actorV2IdentityAckedWindow
+                                 << " snapshots=" << client.actorV2SnapshotsSentWindow
+                                 << " bytes=" << client.actorV2BytesSentWindow
+                                 << " presentationSent=" << client.actorV2PresentationSentWindow
+                                 << " presentationBytes=" << client.actorV2PresentationBytesSentWindow
+                                 << " attackSent=" << client.actorV2AttackSentWindow
+                                 << " attackSuppressedUntilIdentityKnown=" << client.actorV2AttackSuppressedUntilIdentityKnownWindow
+                                 << " budget=" << kBudgetBytes
+                                 << " deferred=" << client.actorV2DeferredWindow
+                                 << " positionSuppressedUntilIdentityKnown=" << client.actorV2PositionSuppressedUntilIdentityKnownWindow
+                                 << " presentationSuppressedUntilIdentityKnown=" << client.actorV2PresentationSuppressedUntilIdentityKnownWindow
+                                 << " missingIdentityActorNetId=" << noisiestMissingActorNetId
+                                 << " missingIdentityActorKey=" << describeActorInstanceId(noisiestMissingActorNetId)
+                                 << " missingIdentityCount=" << noisiestMissingCount
+                                 << " tier0=" << client.actorV2TierCounts[0]
+                                 << " tier1=" << client.actorV2TierCounts[1]
+                                 << " tier2=" << client.actorV2TierCounts[2]
+                                 << " tier3=" << client.actorV2TierCounts[3]
+                                 << " tier4=" << client.actorV2TierCounts[4];
+            }
             client.actorV2DiagnosticsLastLogMs = now;
             client.actorV2IdentitySentWindow = 0;
             client.actorV2IdentityAckedWindow = 0;
@@ -4797,7 +4800,7 @@ void MPServer::handleActorPosition(ConnectedClient& c, const uint8_t* data, size
 {
     if (c.actorSyncProtocolVersion >= ActorSyncProtocolVersionV2)
     {
-        Log(Debug::Warning) << "[Server] Ignoring legacy ActorPosition from v2 client"
+        Log(Debug::Verbose) << "[Server] Ignoring retired legacy ActorPosition from v2 client"
                             << " from=" << c.name
                             << " protocol=" << c.actorSyncProtocolVersion;
         return;
@@ -5549,6 +5552,14 @@ void MPServer::handleActorAnimPlay(ConnectedClient& c, const uint8_t* data, size
 // ---------------------------------------------------------------------------
 void MPServer::handleActorAttack(ConnectedClient& c, const uint8_t* data, size_t size)
 {
+    if (c.actorSyncProtocolVersion >= ActorSyncProtocolVersionV2)
+    {
+        Log(Debug::Verbose) << "[Server] Ignoring retired legacy ActorAttack from v2 client"
+                            << " from=" << c.name
+                            << " protocol=" << c.actorSyncProtocolVersion;
+        return;
+    }
+
     ActorList incoming;
     PacketActorAttack pkt;
     pkt.setActorList(&incoming);

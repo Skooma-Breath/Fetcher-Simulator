@@ -924,7 +924,13 @@ void OMW::Engine::prepareEngine()
     auto dataLoading = std::async(std::launch::async,
         [&] { mWorld->loadData(mFileCollections, mContentFiles, mGroundcoverFiles, mEncoder.get(), &asyncListener); });
 
-    if (!mSkipMenu)
+#ifdef BUILD_MULTIPLAYER
+    const bool mpAutoLaunch = mMPEnabled && mMPAutoEnter && !mMPCharacterName.empty();
+#else
+    const bool mpAutoLaunch = false;
+#endif
+
+    if (!mSkipMenu && !mpAutoLaunch)
     {
         std::string_view logo = Fallback::Map::getString("Movies_Company_Logo");
         if (!logo.empty())
@@ -1032,10 +1038,22 @@ void OMW::Engine::go()
     if (stats.is_open())
         Resource::collectStatistics(*mViewer);
 
-    // Start the game
+#ifdef BUILD_MULTIPLAYER
+    const bool mpAutoLaunch = mMPEnabled && mMPAutoEnter && !mMPCharacterName.empty();
+#else
+    const bool mpAutoLaunch = false;
+#endif
+
+    // Start the game. Multiplayer auto-launch intentionally leaves the state as
+    // State_NoGame here: CharacterData will drive enterSelectedCharacterWorld(),
+    // which starts/restores the world after the server has selected a character.
     if (!mSaveGameFile.empty())
     {
         mStateManager->loadGame(mSaveGameFile);
+    }
+    else if (mpAutoLaunch)
+    {
+        Log(Debug::Info) << "[MP] Auto launch skipping startup menu/videos";
     }
     else if (!mSkipMenu)
     {
@@ -1065,7 +1083,8 @@ void OMW::Engine::go()
     if (mMPEnabled)
     {
         Log(Debug::Info) << "Initialising multiplayer: " << mMPServerAddress << ":" << mMPServerPort;
-        if (!mwmp::Main::init(mMPServerAddress, mMPServerPort, mMPPlayerName, mMPPasswordHash))
+        if (!mwmp::Main::init(mMPServerAddress, mMPServerPort, mMPPlayerName, mMPPasswordHash,
+                false, true, mMPAutoEnter ? mMPCharacterName : std::string{}))
             Log(Debug::Error) << "Multiplayer init failed — continuing in single-player mode";
     }
 #endif
