@@ -38,6 +38,7 @@
 #include "../../mwmechanics/movement.hpp"
 #include "../../mwmechanics/npcstats.hpp"
 #include "../../mwrender/animation.hpp"
+#include "../../mwrender/vismask.hpp"
 #include "../../mwworld/cellstore.hpp"
 #include "../../mwworld/class.hpp"
 #include "../../mwworld/esmstore.hpp"
@@ -69,6 +70,20 @@
 
 namespace
 {
+    constexpr const char* FreshSnapshotHiddenUserValue = "mp_hide_until_fresh_actor_snapshot";
+
+    void setHiddenUntilFreshSnapshot(const MWWorld::Ptr& ptr, bool hidden)
+    {
+        if (ptr.isEmpty())
+            return;
+
+        if (auto* baseNode = ptr.getRefData().getBaseNode())
+        {
+            baseNode->setUserValue(FreshSnapshotHiddenUserValue, hidden);
+            baseNode->setNodeMask(hidden ? 0u : MWRender::Mask_Actor);
+        }
+    }
+
     std::string makeActorKey(const mwmp::BaseActor& actor)
     {
         if (actor.mpNum != 0)
@@ -958,6 +973,8 @@ namespace mwmp
 
     void ActorSync::update(float dt)
     {
+        updateLocalCellBootstrapState();
+
         std::size_t primaryActors = 0;
         for (auto& [actorNetId, actor] : mActorsByNetId)
         {
@@ -996,7 +1013,14 @@ namespace mwmp
 
             advanceSmoothing(actor, dt);
             if (resolveActorBinding(actor.state.cellId, actor))
+            {
+                if (actor.waitingForFreshCellBootstrap)
+                {
+                    setHiddenUntilFreshSnapshot(actor.boundActor, true);
+                    continue;
+                }
                 applyBoundActorState(actor);
+            }
             ++primaryActors;
         }
 
@@ -1028,7 +1052,14 @@ namespace mwmp
 
                 advanceSmoothing(actor, dt);
                 if (resolveActorBinding(cellId, actor))
+                {
+                    if (actor.waitingForFreshCellBootstrap)
+                    {
+                        setHiddenUntilFreshSnapshot(actor.boundActor, true);
+                        continue;
+                    }
                     applyBoundActorState(actor);
+                }
             }
             if (cellShadowSuppressedByPrimary > 0)
                 Log(Debug::Verbose) << "[MP] ActorSync v2: cellShadowSuppressedByPrimary=" << cellShadowSuppressedByPrimary
@@ -1124,6 +1155,36 @@ namespace mwmp
                              << " for " << list.cellId
                              << " owner=" << list.authorityGuid
                              << " localGuid=" << localGuid;
+
+            if (previous && !hasLocalAuthority)
+            {
+                std::size_t rebaseMarked = 0;
+                auto markRuntimeForRebase = [&](ActorRuntime& runtime)
+                {
+                    runtime.rebaseOnNextAuthoritativeSnapshot = true;
+                    runtime.hasStationaryHoldPosition = false;
+                    runtime.stationaryReleaseTimer = 0.f;
+                    runtime.snapshots.clear();
+                    runtime.hasInterpolationRenderTimestamp = false;
+                    ++rebaseMarked;
+                };
+
+                for (auto& [actorKey, runtime] : cell.actors)
+                    markRuntimeForRebase(runtime);
+
+                for (auto& [actorNetId, runtime] : mActorsByNetId)
+                {
+                    const bool runtimeInCell = runtime.state.cellId == list.cellId
+                        || (!runtime.boundActor.isEmpty() && cellIdForPtr(runtime.boundActor) == list.cellId);
+                    if (runtimeInCell)
+                        markRuntimeForRebase(runtime);
+                }
+
+                Log(Debug::Info) << "[MP] ActorSync: authority revoke queued actor rebase"
+                                 << " cell=" << list.cellId
+                                 << " actors=" << rebaseMarked
+                                 << " gen=" << list.authorityGeneration;
+            }
         }
     }
 
@@ -1361,6 +1422,7 @@ namespace mwmp
                 synthetic.snapshotSequence = list.sequence;
                 synthetic.serverTimestamp = list.serverTimestamp;
                 queueSnapshot(runtime, actorState, synthetic);
+                completeFreshCellBootstrap(runtime, "ActorIdentity", list.serverTimestamp);
                 ++baselineApplied;
             }
             rememberServerSpawnedActorTimestamp(actorState.mpNum, list.serverTimestamp);
@@ -1494,10 +1556,21 @@ namespace mwmp
                 const bool deathBaseline = actorState.isDead && !zeroActorListTransform;
                 if (hadPrimaryRuntime && !deathBaseline)
                 {
-                    runtime.state.refId = actorState.refId;
-                    runtime.state.refNum = actorState.refNum;
-                    runtime.state.mpNum = actorState.mpNum;
-                    runtime.state.cellId = list.cellId;
+                    const bool useActorListTransformForFreshBootstrap = runtime.waitingForFreshCellBootstrap
+                        && !zeroActorListTransform;
+                    if (useActorListTransformForFreshBootstrap)
+                    {
+                        mergeActorState(runtime, actorState, true);
+                        queueSnapshot(runtime, actorState, list);
+                        completeFreshCellBootstrap(runtime, "ActorList", list.serverTimestamp);
+                    }
+                    else
+                    {
+                        runtime.state.refId = actorState.refId;
+                        runtime.state.refNum = actorState.refNum;
+                        runtime.state.mpNum = actorState.mpNum;
+                        runtime.state.cellId = list.cellId;
+                    }
                     if (hasAnyEquipmentItem(actorState.equipment))
                     {
                         runtime.state.equipment = actorState.equipment;
@@ -1528,6 +1601,7 @@ namespace mwmp
                     if (actorState.isDead)
                         markDeadBaselineState(runtime, actorState, replayDeadBaseline);
                     queueSnapshot(runtime, actorState, list);
+                    completeFreshCellBootstrap(runtime, "ActorList", list.serverTimestamp);
                 }
                 rememberServerSpawnedActorTimestamp(actorState.mpNum, list.serverTimestamp);
                 rememberActorNetId(actorNetId, runtime.state);
@@ -1548,6 +1622,7 @@ namespace mwmp
             if (actorState.isDead)
                 markDeadBaselineState(runtime, actorState, replayDeadBaseline);
             queueSnapshot(runtime, actorState, list);
+            completeFreshCellBootstrap(runtime, "ActorList", list.serverTimestamp);
             rememberServerSpawnedActorTimestamp(actorState.mpNum, list.serverTimestamp);
             updatedActors[actorKey] = std::move(runtime);
         }
@@ -1766,6 +1841,7 @@ namespace mwmp
             synthetic.serverTimestamp = list.serverTimestamp;
             mergeActorState(runtime, actorState, true);
             queueSnapshot(runtime, actorState, synthetic);
+            completeFreshCellBootstrap(runtime, "ActorPositionV2", list.serverTimestamp);
             rememberServerSpawnedActorTimestamp(actorState.mpNum, list.serverTimestamp);
             if (isWatchedBorderActor(runtime.state, runtime.state.cellId))
             {
@@ -2857,6 +2933,25 @@ namespace mwmp
     void ActorSync::queueSnapshot(ActorRuntime& actor, const BaseActor& state, const ActorList& list)
     {
         actor.hasAuthoritativeTransform = true;
+        actor.lastClientSnapshotReceiveTimeMs = currentClientTimeMs();
+        const bool rebase = actor.rebaseOnNextAuthoritativeSnapshot;
+        if (rebase)
+        {
+            actor.rebaseOnNextAuthoritativeSnapshot = false;
+            actor.snapshots.clear();
+            actor.smoothedPosition = state.position;
+            actor.hasSmoothedPosition = true;
+            actor.hasStationaryHoldPosition = false;
+            actor.stationaryReleaseTimer = 0.f;
+            actor.stationaryReleasePosition = state.position;
+            actor.latestSnapshotAge = 0.f;
+            actor.interpolationRenderTimestamp = list.serverTimestamp != 0
+                ? static_cast<double>(list.serverTimestamp) : 0.0;
+            actor.hasInterpolationRenderTimestamp = list.serverTimestamp != 0;
+            actor.state.position = state.position;
+            actor.state.velocity = state.velocity;
+        }
+
         BufferedSnapshot snapshot;
         snapshot.position = state.position;
         snapshot.velocity = state.velocity;
@@ -2872,6 +2967,25 @@ namespace mwmp
         snapshot.currentAnimGroup = state.animFlags.currentAnimGroup;
         if (snapshot.serverTimestamp != 0)
             actor.lastServerTimestamp = std::max(actor.lastServerTimestamp, snapshot.serverTimestamp);
+
+        const bool smoothBootstrapCorrection = actor.smoothFreshBootstrapCorrection
+            && actor.hasSmoothedPosition
+            && snapshot.serverTimestamp != 0
+            && !snapshot.position.isTeleporting
+            && !state.isDead;
+        actor.smoothFreshBootstrapCorrection = false;
+        if (smoothBootstrapCorrection)
+        {
+            BufferedSnapshot predicted = snapshot;
+            predicted.position = actor.smoothedPosition;
+            predicted.serverTimestamp = snapshot.serverTimestamp > 80
+                ? snapshot.serverTimestamp - 80 : snapshot.serverTimestamp;
+            predicted.sequence = snapshot.sequence > 0 ? snapshot.sequence - 1 : 1;
+            actor.snapshots.clear();
+            actor.snapshots.push_back(predicted);
+            actor.interpolationRenderTimestamp = static_cast<double>(predicted.serverTimestamp);
+            actor.hasInterpolationRenderTimestamp = true;
+        }
 
         const bool wasEmpty = actor.snapshots.empty();
         if (!actor.snapshots.empty() && actor.snapshots.back().sequence == snapshot.sequence)
@@ -2902,6 +3016,17 @@ namespace mwmp
             actor.smoothedPosition = state.position;
             actor.hasSmoothedPosition = true;
         }
+
+        if (rebase && isWatchedPresentationActor(actor.state, actor.actorNetId))
+        {
+            Log(Debug::Verbose) << "[MP] ActorSync v2: rebased actor after authority revoke"
+                                << " actorNetId=" << actor.actorNetId
+                                << " refId=" << actor.state.refId
+                                << " mpNum=" << actor.state.mpNum
+                                << " cell=" << actor.state.cellId
+                                << " seq=" << list.snapshotSequence
+                                << " ts=" << list.serverTimestamp;
+        }
     }
 
     void ActorSync::mergeActorState(ActorRuntime& actor, const BaseActor& state, bool includeTransform)
@@ -2930,6 +3055,224 @@ namespace mwmp
             // can replay the exact same animation (walk, idle variant, etc.).
             actor.state.animFlags.currentAnimGroup = state.animFlags.currentAnimGroup;
         }
+    }
+
+    void ActorSync::updateLocalCellBootstrapState()
+    {
+        MWBase::World* world = MWBase::Environment::get().getWorld();
+        if (!world)
+            return;
+
+        MWWorld::Ptr player = world->getPlayerPtr();
+        if (player.isEmpty() || !player.isInCell())
+            return;
+
+        const std::string currentCellId = cellIdForPtr(player);
+        if (currentCellId.empty())
+            return;
+
+        if (!mHaveLastLocalCellId)
+        {
+            mLastLocalCellId = currentCellId;
+            mHaveLastLocalCellId = true;
+            return;
+        }
+
+        if (currentCellId == mLastLocalCellId)
+            return;
+
+        const std::string oldCellId = mLastLocalCellId;
+        mLastLocalCellId = currentCellId;
+        markActorsNeedFreshCellBootstrap(oldCellId, currentCellId);
+    }
+
+    void ActorSync::markActorsNeedFreshCellBootstrap(const std::string& oldCellId, const std::string& newCellId)
+    {
+        if (!isExteriorActorCellId(newCellId))
+            return;
+
+        const uint64_t now = currentClientTimeMs();
+        constexpr uint64_t kFreshBootstrapReceiveWindowMs = 250;
+        MWBase::World* world = MWBase::Environment::get().getWorld();
+        std::size_t marked = 0;
+        std::size_t alreadyFresh = 0;
+        std::size_t stationaryVisible = 0;
+        std::size_t predictedVisible = 0;
+        for (auto& [actorNetId, actor] : mActorsByNetId)
+        {
+            if (actorNetId == 0 || actor.state.isDead || actor.deathAlreadyApplied)
+                continue;
+
+            if (actor.state.cellId.empty())
+                continue;
+
+            if (actor.lastClientSnapshotReceiveTimeMs != 0
+                && now - actor.lastClientSnapshotReceiveTimeMs <= kFreshBootstrapReceiveWindowMs)
+            {
+                actor.waitingForFreshCellBootstrap = false;
+                actor.freshCellBootstrapMinServerTimestamp = 0;
+                setHiddenUntilFreshSnapshot(actor.boundActor, false);
+                ++alreadyFresh;
+                continue;
+            }
+
+            if ((actor.snapshots.empty() || actor.lastClientSnapshotReceiveTimeMs == 0)
+                && !actor.state.cellId.empty())
+            {
+                auto cellIt = mCells.find(actor.state.cellId);
+                if (cellIt != mCells.end())
+                {
+                    auto sidecarIt = cellIt->second.actors.find(makeActorKey(actor.state));
+                    if (sidecarIt != cellIt->second.actors.end()
+                        && !sidecarIt->second.snapshots.empty())
+                    {
+                        actor.snapshots = sidecarIt->second.snapshots;
+                        actor.lastClientSnapshotReceiveTimeMs = sidecarIt->second.lastClientSnapshotReceiveTimeMs;
+                        actor.lastServerTimestamp = std::max(
+                            actor.lastServerTimestamp, sidecarIt->second.lastServerTimestamp);
+                        actor.state.velocity = sidecarIt->second.state.velocity;
+                    }
+                }
+            }
+
+            if (!shouldHideForFreshCellBootstrap(actor))
+            {
+                actor.waitingForFreshCellBootstrap = false;
+                actor.freshCellBootstrapMinServerTimestamp = 0;
+                setHiddenUntilFreshSnapshot(actor.boundActor, false);
+                ++stationaryVisible;
+                continue;
+            }
+
+            if (world
+                && actor.state.mpNum != 0
+                && actor.lastClientSnapshotReceiveTimeMs != 0
+                && now >= actor.lastClientSnapshotReceiveTimeMs
+                && now - actor.lastClientSnapshotReceiveTimeMs <= 1500
+                && !actor.boundActor.isEmpty()
+                && !actor.snapshots.empty())
+            {
+                const BufferedSnapshot& latest = actor.snapshots.back();
+                const float speedSq = latest.velocity.linear[0] * latest.velocity.linear[0]
+                    + latest.velocity.linear[1] * latest.velocity.linear[1]
+                    + latest.velocity.linear[2] * latest.velocity.linear[2];
+                const bool hasMovementAxes = std::abs(latest.animFwd) > 0.1f
+                    || std::abs(latest.animSide) > 0.1f;
+                constexpr float kPredictiveBootstrapVelocitySq = 20.f * 20.f;
+                const bool canPredict = latest.isMoving
+                    && (hasMovementAxes || speedSq >= kPredictiveBootstrapVelocitySq);
+                if (canPredict)
+                {
+                    const double extrapolationMs = std::min<double>(
+                        static_cast<double>(now - actor.lastClientSnapshotReceiveTimeMs) + 50.0, 750.0);
+                    Position predicted = extrapolatePosition(latest.position, latest.velocity, extrapolationMs);
+                    if (exteriorCellIdForPosition(predicted) == actor.state.cellId)
+                    {
+                        actor.state.position = predicted;
+                        actor.smoothedPosition = predicted;
+                        actor.hasSmoothedPosition = true;
+                        actor.hasStationaryHoldPosition = false;
+                        actor.stationaryReleaseTimer = 0.f;
+                        actor.snapshots.clear();
+                        actor.hasInterpolationRenderTimestamp = false;
+                        actor.waitingForFreshCellBootstrap = false;
+                        actor.freshCellBootstrapMinServerTimestamp = 0;
+                        actor.smoothFreshBootstrapCorrection = true;
+                        setHiddenUntilFreshSnapshot(actor.boundActor, false);
+                        actor.boundActor = world->moveObject(actor.boundActor,
+                            osg::Vec3f(predicted.pos[0], predicted.pos[1], predicted.pos[2]));
+                        ++predictedVisible;
+                        continue;
+                    }
+                }
+            }
+
+            actor.waitingForFreshCellBootstrap = true;
+            actor.freshCellBootstrapMinServerTimestamp = actor.lastServerTimestamp;
+            actor.snapshots.clear();
+            actor.hasSmoothedPosition = false;
+            actor.hasInterpolationRenderTimestamp = false;
+            actor.hasStationaryHoldPosition = false;
+            actor.stationaryReleaseTimer = 0.f;
+            setHiddenUntilFreshSnapshot(actor.boundActor, true);
+            ++marked;
+        }
+
+        if (marked != 0 || alreadyFresh != 0 || stationaryVisible != 0 || predictedVisible != 0)
+        {
+            Log(Debug::Info) << "[MP] ActorSync: deferred actor visuals until fresh exterior bootstrap"
+                             << " from=" << oldCellId
+                             << " to=" << newCellId
+                             << " marked=" << marked
+                             << " alreadyFresh=" << alreadyFresh
+                             << " stationaryVisible=" << stationaryVisible
+                             << " predictedVisible=" << predictedVisible;
+        }
+    }
+
+    void ActorSync::completeFreshCellBootstrap(ActorRuntime& actor, const char* source, uint64_t serverTimestamp)
+    {
+        if (!actor.waitingForFreshCellBootstrap)
+            return;
+
+        if (actor.freshCellBootstrapMinServerTimestamp != 0
+            && serverTimestamp != 0
+            && serverTimestamp < actor.freshCellBootstrapMinServerTimestamp)
+            return;
+
+        actor.waitingForFreshCellBootstrap = false;
+        actor.freshCellBootstrapMinServerTimestamp = 0;
+        setHiddenUntilFreshSnapshot(actor.boundActor, false);
+
+        Log(Debug::Verbose) << "[MP] ActorSync: fresh exterior bootstrap received"
+                            << " source=" << source
+                            << " actorNetId=" << actor.actorNetId
+                            << " refId=" << actor.state.refId
+                            << " refNum=" << actor.state.refNum
+                            << " mpNum=" << actor.state.mpNum
+                            << " cell=" << actor.state.cellId
+                            << " ts=" << serverTimestamp;
+    }
+
+    bool ActorSync::shouldHideForFreshCellBootstrap(const ActorRuntime& actor) const
+    {
+        if (actor.state.mpNum != 0)
+            return true;
+
+        const auto isMovingSnapshot = [](const BufferedSnapshot& snapshot)
+        {
+            if (snapshot.isMoving || snapshot.isAttackingOrCasting)
+                return true;
+            if (std::abs(snapshot.animFwd) > 0.1f || std::abs(snapshot.animSide) > 0.1f)
+                return true;
+            const float speedSq = snapshot.velocity.linear[0] * snapshot.velocity.linear[0]
+                + snapshot.velocity.linear[1] * snapshot.velocity.linear[1]
+                + snapshot.velocity.linear[2] * snapshot.velocity.linear[2];
+            static constexpr float kFreshBootstrapMovingVelocitySq = 20.f * 20.f;
+            return speedSq >= kFreshBootstrapMovingVelocitySq
+                || isLocomotionAnimGroup(snapshot.currentAnimGroup);
+        };
+
+        if (actor.state.isMoving || actor.state.isAttackingOrCasting)
+            return true;
+        if (actor.state.ai.type == BaseActor::AIAction::Type::Combat)
+            return true;
+        if (std::abs(actor.state.animFlags.animFwd) > 0.1f || std::abs(actor.state.animFlags.animSide) > 0.1f)
+            return true;
+        if (isLocomotionAnimGroup(actor.state.animFlags.currentAnimGroup))
+            return true;
+
+        const float speedSq = actor.state.velocity.linear[0] * actor.state.velocity.linear[0]
+            + actor.state.velocity.linear[1] * actor.state.velocity.linear[1]
+            + actor.state.velocity.linear[2] * actor.state.velocity.linear[2];
+        static constexpr float kFreshBootstrapMovingVelocitySq = 20.f * 20.f;
+        if (speedSq >= kFreshBootstrapMovingVelocitySq)
+            return true;
+
+        if (!actor.snapshots.empty() && isMovingSnapshot(actor.snapshots.back()))
+            return true;
+
+        return false;
     }
 
     bool ActorSync::shouldReplayDeadBaselineAsRealtime(const ActorRuntime& actor, const BaseActor& state) const
@@ -4695,6 +5038,22 @@ namespace mwmp
             if (actor.boundActor.isEmpty())
                 return false;
 
+            if (actor.waitingForFreshCellBootstrap)
+            {
+                setHiddenUntilFreshSnapshot(actor.boundActor, true);
+                if (logTrackedActor)
+                {
+                    Log(Debug::Verbose) << "[MP] ActorSync: skipped cross-cell move pending fresh bootstrap"
+                                        << " targetCell=" << targetCellId
+                                        << " refId=" << actor.state.refId
+                                        << " refNum=" << actor.state.refNum
+                                        << " mpNum=" << actor.state.mpNum
+                                        << " actorNetId=" << actor.actorNetId
+                                        << " runtimeTs=" << actor.lastServerTimestamp;
+                }
+                return false;
+            }
+
             const std::string currentBoundCellId = cellIdForPtr(actor.boundActor);
             if (!canMoveBoundActorAcrossCells)
                 return false;
@@ -4821,7 +5180,14 @@ namespace mwmp
             {
                 if (expectsServerSpawn)
                     rememberServerSpawnedActor(boundCellId, actor.boundActor, actor.state.mpNum);
-                return moveBoundActorToTargetCell();
+                if (actor.waitingForFreshCellBootstrap)
+                {
+                    setHiddenUntilFreshSnapshot(actor.boundActor, true);
+                    actor.boundActor = MWWorld::Ptr();
+                    actor.bindingLogged = false;
+                }
+                else
+                    return moveBoundActorToTargetCell();
             }
 
             if ((!expectsServerSpawn || mappedMpNumForPtr(targetCellId, actor.boundActor) == actor.state.mpNum)
@@ -4878,6 +5244,13 @@ namespace mwmp
                     {
                         actor.boundActor = mappedIt->second;
                         rememberServerSpawnedActor(mappedCellId, actor.boundActor, actor.state.mpNum);
+                        if (actor.waitingForFreshCellBootstrap)
+                        {
+                            setHiddenUntilFreshSnapshot(actor.boundActor, true);
+                            actor.boundActor = MWWorld::Ptr();
+                            actor.bindingLogged = false;
+                            return false;
+                        }
                         return moveBoundActorToTargetCell();
                     }
                 }
@@ -4910,6 +5283,9 @@ namespace mwmp
         {
             for (const auto& [candidateCellId, candidateCell] : mCells)
             {
+                if (actor.waitingForFreshCellBootstrap)
+                    break;
+
                 if (candidateCellId == targetCellId)
                     continue;
 
@@ -4963,6 +5339,12 @@ namespace mwmp
                     return false;
                 }
 
+                if (actor.waitingForFreshCellBootstrap)
+                {
+                    setHiddenUntilFreshSnapshot(actor.boundActor, true);
+                    return false;
+                }
+
                 if (expectsServerSpawn
                     && isExteriorActorCellId(targetCellId)
                     && isZeroIdentityPosition(actor.state.position)
@@ -4993,6 +5375,12 @@ namespace mwmp
         {
             try
             {
+                if (actor.waitingForFreshCellBootstrap)
+                {
+                    actor.boundActor = MWWorld::Ptr();
+                    return false;
+                }
+
                 const float spawnX = actor.state.position.pos[0];
                 const float spawnY = actor.state.position.pos[1];
                 const float spawnZ = actor.state.position.pos[2];
@@ -5092,6 +5480,14 @@ namespace mwmp
         MWBase::World* world = MWBase::Environment::get().getWorld();
         if (!world)
             return;
+
+        if (actor.waitingForFreshCellBootstrap)
+        {
+            setHiddenUntilFreshSnapshot(actor.boundActor, true);
+            return;
+        }
+        setHiddenUntilFreshSnapshot(actor.boundActor, false);
+
         const float frameDuration = MWBase::Environment::get().getFrameDuration();
         actor.animGroupHoldTimer = std::max(0.f, actor.animGroupHoldTimer - frameDuration);
         actor.attackDrawHoldTimer = std::max(0.f, actor.attackDrawHoldTimer - frameDuration);

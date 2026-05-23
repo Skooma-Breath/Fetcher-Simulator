@@ -152,6 +152,42 @@ namespace mwmp
             return true;
         }
 
+        bool sameCosmeticEquipment(
+            const std::array<EquipmentItem, BasePlayer::NUM_EQUIPMENT_SLOTS>& left,
+            const std::array<EquipmentItem, BasePlayer::NUM_EQUIPMENT_SLOTS>& right)
+        {
+            for (int slot = 0; slot < BasePlayer::NUM_EQUIPMENT_SLOTS; ++slot)
+            {
+                if (!sameCosmeticItem(left[slot].item, right[slot].item))
+                    return false;
+            }
+
+            return true;
+        }
+
+        bool equipmentSlotsMatchState(
+            MWWorld::InventoryStore& inv,
+            const std::array<EquipmentItem, BasePlayer::NUM_EQUIPMENT_SLOTS>& equipment)
+        {
+            for (int slot = 0; slot < BasePlayer::NUM_EQUIPMENT_SLOTS; ++slot)
+            {
+                const std::string& targetRefId = equipment[slot].item.refId;
+                MWWorld::ContainerStoreIterator current = inv.getSlot(slot);
+                if (targetRefId.empty())
+                {
+                    if (current != inv.end())
+                        return false;
+                    continue;
+                }
+
+                if (current == inv.end()
+                    || current->getCellRef().getRefId().serializeText() != targetRefId)
+                    return false;
+            }
+
+            return true;
+        }
+
         void playItemSoundForActor(const MWWorld::Ptr& actor, const Item& item, bool pickedUp)
         {
             if (actor.isEmpty() || item.refId.empty())
@@ -1051,13 +1087,24 @@ namespace mwmp
     }
 
     // ---------------------------------------------------------------------------
-    void RemotePlayer::onPositionUpdate(const BasePlayer& state)
+    void RemotePlayer::onPositionUpdate(const BasePlayer& state, uint32_t sequence)
     {
         // NOTE: PacketPlayerPosition does NOT serialise the cell field.
         // The incoming state.cell is just a zeroed BasePlayer default.
         // Do NOT copy state.cell here — cell ownership belongs exclusively to
         // onCellChange().  Clobbering mState.cell here was the root cause of
         // the remote='' / spurious-despawn bug observed in testing.
+        if (sequence != 0 && mLastCellChangeSequence != 0 && sequence < mLastCellChangeSequence)
+        {
+            Log(Debug::Verbose) << "[MP] RemotePlayer " << mName
+                                << ": ignored stale position before cell change"
+                                << " posSeq=" << sequence
+                                << " cellSeq=" << mLastCellChangeSequence;
+            return;
+        }
+        if (sequence != 0)
+            mLastPositionSequence = std::max(mLastPositionSequence, sequence);
+
         Log(Debug::Verbose) << "[MP] onPositionUpdate(" << mName << " guid=" << mGuid << "): pos=("
                             << state.position.pos[0] << "," << state.position.pos[1] << "," << state.position.pos[2]
                             << ")"
@@ -1228,6 +1275,12 @@ namespace mwmp
         }
 
         MWWorld::InventoryStore& inv = mNpcPtr.getClass().getInventoryStore(mNpcPtr);
+        if (sameCosmeticEquipment(previousEquipment, state.equipment)
+            && equipmentSlotsMatchState(inv, state.equipment))
+        {
+            return;
+        }
+
         for (int slot = 0; slot < BasePlayer::NUM_EQUIPMENT_SLOTS; ++slot)
         {
             const std::string& targetRefId = state.equipment[slot].item.refId;
@@ -1278,8 +1331,19 @@ namespace mwmp
     }
 
     // ---------------------------------------------------------------------------
-    void RemotePlayer::onCellChange(const BasePlayer& state)
+    void RemotePlayer::onCellChange(const BasePlayer& state, uint32_t sequence)
     {
+        if (sequence != 0 && mLastCellChangeSequence != 0 && sequence < mLastCellChangeSequence)
+        {
+            Log(Debug::Verbose) << "[MP] RemotePlayer " << mName
+                                << ": ignored stale cell change"
+                                << " seq=" << sequence
+                                << " last=" << mLastCellChangeSequence;
+            return;
+        }
+        if (sequence != 0)
+            mLastCellChangeSequence = sequence;
+
         const CellId oldCellState = mState.cell;
         const bool cellNameChanged = (oldCellState.cellName != state.cell.cellName);
         const bool exteriorChanged = (oldCellState.isExterior != state.cell.isExterior);
@@ -1290,6 +1354,9 @@ namespace mwmp
         const std::string oldCell = mState.cell.cellName;
         mState.cell = state.cell;
         mState.position = state.position;
+        mState.velocity = {};
+        mTimeSinceLastPosUpdate = 0.f;
+        mJumpArcPrimed = false;
 
         // Snap interpolation to new position so trySpawn has valid coordinates
         mInterp.cx = state.position.pos[0];
@@ -1303,6 +1370,7 @@ namespace mwmp
         mInterp.lastRecvX = mInterp.cx;
         mInterp.lastRecvY = mInterp.cy;
         mInterp.lastRecvZ = mInterp.cz;
+        mInterp.targetVz = 0.f;
         mInterp.hasTarget = true;
         mInterp.hasSnapped = true;
 

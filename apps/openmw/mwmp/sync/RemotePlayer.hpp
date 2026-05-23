@@ -39,10 +39,10 @@ namespace mwmp
 
         // --- Phase 6 packet handlers ---
         void onBaseInfoUpdate    (const BasePlayer& state);
-        void onPositionUpdate    (const BasePlayer& state);
+        void onPositionUpdate    (const BasePlayer& state, uint32_t sequence = 0);
         void onEquipmentUpdate   (const BasePlayer& state);
         void onStatsDynamicUpdate(const BasePlayer& state);
-        void onCellChange        (const BasePlayer& state);
+        void onCellChange        (const BasePlayer& state, uint32_t sequence = 0);
         void onDeath             (const BasePlayer& state);
         void onResurrect         (const BasePlayer& state);
 
@@ -105,7 +105,7 @@ namespace mwmp
 
         // --- trySpawn cooldown ---
         float mSpawnRetryTimer = 0.f;
-        static constexpr float SPAWN_RETRY_RATE = 0.2f;
+        static constexpr float SPAWN_RETRY_RATE = 0.05f;
 
         // --- interpolation state ---
         struct InterpState
@@ -155,6 +155,8 @@ namespace mwmp
         bool mIsStrafing = false;
         // Tracking age of last position packet for extrapolation braking
         float mTimeSinceLastPosUpdate = 0.f;
+        uint32_t mLastCellChangeSequence = 0;
+        uint32_t mLastPositionSequence = 0;
     };
 
     // -----------------------------------------------------------------------

@@ -1244,6 +1244,15 @@ namespace MWMechanics
 #ifdef BUILD_MULTIPLAYER
         {
             auto* baseNode = ptr.getRefData().getBaseNode();
+            bool mpHiddenUntilFresh = false;
+            if (baseNode
+                && baseNode->getUserValue("mp_hide_until_fresh_actor_snapshot", mpHiddenUntilFresh)
+                && mpHiddenUntilFresh)
+            {
+                baseNode->setNodeMask(0);
+                return;
+            }
+
             std::string mpName;
             if (baseNode && baseNode->getUserValue("mp_player_name", mpName))
                 return;
@@ -1710,6 +1719,16 @@ namespace MWMechanics
 #ifdef BUILD_MULTIPLAYER
                     {
                         auto* baseNode = actor.getPtr().getRefData().getBaseNode();
+                        bool mpHiddenUntilFresh = false;
+                        if (baseNode
+                            && baseNode->getUserValue("mp_hide_until_fresh_actor_snapshot", mpHiddenUntilFresh)
+                            && mpHiddenUntilFresh)
+                        {
+                            baseNode->setNodeMask(0);
+                            world->setActorActive(actor.getPtr(), false);
+                            continue;
+                        }
+
                         std::string mpName;
                         if (baseNode && baseNode->getUserValue("mp_player_name", mpName))
                             goto mp_actor_continue; // remote MP player — skip culling
@@ -1721,6 +1740,18 @@ namespace MWMechanics
                 }
 #ifdef BUILD_MULTIPLAYER
                 mp_actor_continue:;
+                {
+                    auto* baseNode = actor.getPtr().getRefData().getBaseNode();
+                    bool mpHiddenUntilFresh = false;
+                    if (baseNode
+                        && baseNode->getUserValue("mp_hide_until_fresh_actor_snapshot", mpHiddenUntilFresh)
+                        && mpHiddenUntilFresh)
+                    {
+                        baseNode->setNodeMask(0);
+                        world->setActorActive(actor.getPtr(), false);
+                        continue;
+                    }
+                }
 #endif
 
                 world->setActorActive(actor.getPtr(), true);

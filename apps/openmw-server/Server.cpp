@@ -26,6 +26,7 @@
 #include <stdexcept>
 #include <string_view>
 #include <thread>
+#include <tuple>
 #include <unordered_set>
 #include <variant>
 
@@ -485,6 +486,162 @@ namespace
         return std::any_of(items.begin(), items.end(), [&](const mwmp::Item& item) {
             return sameItemIdentity(item, target);
         });
+    }
+
+    bool sameItemStack(const mwmp::Item& left, const mwmp::Item& right)
+    {
+        return sameItemIdentity(left, right) && left.count == right.count;
+    }
+
+    bool sameCosmeticItemStack(const mwmp::Item& left, const mwmp::Item& right)
+    {
+        return left.refId == right.refId && left.count == right.count;
+    }
+
+    bool itemStackLess(const mwmp::Item& left, const mwmp::Item& right)
+    {
+        return std::tie(left.refId, left.charge, left.enchantmentCharge, left.soul, left.count)
+            < std::tie(right.refId, right.charge, right.enchantmentCharge, right.soul, right.count);
+    }
+
+    bool cosmeticItemStackLess(const mwmp::Item& left, const mwmp::Item& right)
+    {
+        return std::tie(left.refId, left.count) < std::tie(right.refId, right.count);
+    }
+
+    bool sameInventorySnapshot(std::vector<mwmp::Item> left, std::vector<mwmp::Item> right)
+    {
+        left.erase(std::remove_if(left.begin(), left.end(), [](const mwmp::Item& item) {
+            return item.refId.empty() || item.count <= 0;
+        }), left.end());
+        right.erase(std::remove_if(right.begin(), right.end(), [](const mwmp::Item& item) {
+            return item.refId.empty() || item.count <= 0;
+        }), right.end());
+
+        std::sort(left.begin(), left.end(), itemStackLess);
+        std::sort(right.begin(), right.end(), itemStackLess);
+        if (left.size() != right.size())
+            return false;
+
+        for (std::size_t i = 0; i < left.size(); ++i)
+        {
+            if (!sameItemStack(left[i], right[i]))
+                return false;
+        }
+        return true;
+    }
+
+    bool sameCosmeticInventorySnapshot(std::vector<mwmp::Item> left, std::vector<mwmp::Item> right)
+    {
+        left.erase(std::remove_if(left.begin(), left.end(), [](const mwmp::Item& item) {
+            return item.refId.empty() || item.count <= 0;
+        }), left.end());
+        right.erase(std::remove_if(right.begin(), right.end(), [](const mwmp::Item& item) {
+            return item.refId.empty() || item.count <= 0;
+        }), right.end());
+
+        std::sort(left.begin(), left.end(), cosmeticItemStackLess);
+        std::sort(right.begin(), right.end(), cosmeticItemStackLess);
+        if (left.size() != right.size())
+            return false;
+
+        for (std::size_t i = 0; i < left.size(); ++i)
+        {
+            if (!sameCosmeticItemStack(left[i], right[i]))
+                return false;
+        }
+        return true;
+    }
+
+    bool looksLikeRestoredInventoryRegression(
+        const mwmp::BasePlayer::InventoryChanges& incoming,
+        const std::vector<mwmp::Item>& restored)
+    {
+        if (incoming.action != mwmp::BasePlayer::InventoryChanges::Action::Set || restored.empty())
+            return false;
+        if (sameInventorySnapshot(incoming.items, restored)
+            || sameCosmeticInventorySnapshot(incoming.items, restored))
+            return false;
+
+        std::size_t restoredPositive = 0;
+        std::size_t incomingPositive = 0;
+        for (const auto& item : restored)
+        {
+            if (!item.refId.empty() && item.count > 0)
+                ++restoredPositive;
+        }
+        for (const auto& item : incoming.items)
+        {
+            if (!item.refId.empty() && item.count > 0)
+                ++incomingPositive;
+        }
+
+        if (incomingPositive < restoredPositive)
+            return true;
+
+        return std::any_of(restored.begin(), restored.end(), [&](const mwmp::Item& item) {
+            return !item.refId.empty() && item.count > 0
+                && !inventoryContainsItemIdentity(incoming.items, item);
+        });
+    }
+
+    std::size_t equippedItemCount(
+        const std::array<mwmp::EquipmentItem, mwmp::BasePlayer::NUM_EQUIPMENT_SLOTS>& equipment)
+    {
+        return static_cast<std::size_t>(std::count_if(equipment.begin(), equipment.end(),
+            [](const mwmp::EquipmentItem& entry) { return !entry.item.refId.empty() && entry.item.count > 0; }));
+    }
+
+    bool sameEquipmentSnapshot(
+        const std::array<mwmp::EquipmentItem, mwmp::BasePlayer::NUM_EQUIPMENT_SLOTS>& left,
+        const std::array<mwmp::EquipmentItem, mwmp::BasePlayer::NUM_EQUIPMENT_SLOTS>& right)
+    {
+        for (int slot = 0; slot < mwmp::BasePlayer::NUM_EQUIPMENT_SLOTS; ++slot)
+        {
+            if (left[slot].slot != right[slot].slot)
+                return false;
+            if (!sameItemStack(left[slot].item, right[slot].item))
+                return false;
+        }
+        return true;
+    }
+
+    bool sameCosmeticEquipmentSnapshot(
+        const std::array<mwmp::EquipmentItem, mwmp::BasePlayer::NUM_EQUIPMENT_SLOTS>& left,
+        const std::array<mwmp::EquipmentItem, mwmp::BasePlayer::NUM_EQUIPMENT_SLOTS>& right)
+    {
+        for (int slot = 0; slot < mwmp::BasePlayer::NUM_EQUIPMENT_SLOTS; ++slot)
+        {
+            if (left[slot].slot != right[slot].slot)
+                return false;
+            if (!sameCosmeticItemStack(left[slot].item, right[slot].item))
+                return false;
+        }
+        return true;
+    }
+
+    bool looksLikeRestoredEquipmentRegression(
+        const std::array<mwmp::EquipmentItem, mwmp::BasePlayer::NUM_EQUIPMENT_SLOTS>& incoming,
+        const std::array<mwmp::EquipmentItem, mwmp::BasePlayer::NUM_EQUIPMENT_SLOTS>& restored)
+    {
+        const std::size_t restoredCount = equippedItemCount(restored);
+        if (restoredCount == 0 || sameEquipmentSnapshot(incoming, restored)
+            || sameCosmeticEquipmentSnapshot(incoming, restored))
+            return false;
+        if (equippedItemCount(incoming) < restoredCount)
+            return true;
+
+        for (int slot = 0; slot < mwmp::BasePlayer::NUM_EQUIPMENT_SLOTS; ++slot)
+        {
+            const mwmp::EquipmentItem& restoredEntry = restored[slot];
+            if (restoredEntry.item.refId.empty() || restoredEntry.item.count <= 0)
+                continue;
+
+            const mwmp::EquipmentItem& incomingEntry = incoming[slot];
+            if (!sameCosmeticItemStack(incomingEntry.item, restoredEntry.item))
+                return true;
+        }
+        return false;
     }
 
     void applyContainerDelta(std::vector<mwmp::ContainerItem>& items,
@@ -949,9 +1106,17 @@ bool MPServer::teleportPlayer(uint32_t guid, const std::string& cellId, const Po
         const auto encoded = cellChange.encode();
         sendTo(client->conn, encoded);
         broadcastToAll(encoded, client->conn);
+        {
+            PacketPlayerPosition positionPacket;
+            positionPacket.setPlayer(&client->player);
+            const auto positionEncoded = positionPacket.encode();
+            sendTo(client->conn, positionEncoded);
+            broadcastToAll(positionEncoded, client->conn);
+        }
 
         if (!newCell.empty())
             sendCellStateToClient(client->conn, newCell);
+        sendPlayerStateBootstrapToClient(*client);
     }
     else
     {
@@ -3653,6 +3818,16 @@ void MPServer::handleCharacterSelect(ConnectedClient& c, const uint8_t* data, si
     c.hasRestoredStatsSnapshot = false;
     c.acceptedPlayerStatsThisSession = false;
     c.playerStatsRestoreGuardUntilMs = 0;
+    c.restoredInventorySnapshot.clear();
+    c.restoredEquipmentSnapshot = {};
+    c.hasRestoredInventorySnapshot = false;
+    c.hasRestoredEquipmentSnapshot = false;
+    c.acceptedPlayerInventoryThisSession = false;
+    c.acceptedPlayerEquipmentThisSession = false;
+    c.playerInventoryRestoreGuardUntilMs = 0;
+    c.playerEquipmentRestoreGuardUntilMs = 0;
+    c.lastPlayerInventoryRestoreCorrectionLogMs = 0;
+    c.lastPlayerEquipmentRestoreCorrectionLogMs = 0;
 
     for (int slot = 0; slot < BasePlayer::NUM_EQUIPMENT_SLOTS; ++slot)
         c.player.equipment[slot].slot = slot;
@@ -3744,6 +3919,9 @@ void MPServer::handleCharacterSelect(ConnectedClient& c, const uint8_t* data, si
                     {
                         c.player.inventoryChanges.action = BasePlayer::InventoryChanges::Action::Set;
                         c.player.inventoryChanges.items = mPlayerDb->loadCharacterInventory(rec->characterId);
+                        c.restoredInventorySnapshot = c.player.inventoryChanges.items;
+                        c.hasRestoredInventorySnapshot = true;
+                        c.playerInventoryRestoreGuardUntilMs = currentServerTimeMs() + 5000;
                         sendSavedInventory = true;
                     }
 
@@ -3758,6 +3936,9 @@ void MPServer::handleCharacterSelect(ConnectedClient& c, const uint8_t* data, si
                                 continue;
                             c.player.equipment[entry.slot] = entry;
                         }
+                        c.restoredEquipmentSnapshot = c.player.equipment;
+                        c.hasRestoredEquipmentSnapshot = true;
+                        c.playerEquipmentRestoreGuardUntilMs = currentServerTimeMs() + 5000;
                         sendSavedEquipment = true;
                     }
 
@@ -3837,6 +4018,11 @@ void MPServer::handleCharacterSelect(ConnectedClient& c, const uint8_t* data, si
         PacketPlayerInventory inventory;
         inventory.setPlayer(&c.player);
         sendTo(c.conn, inventory.encode());
+        Log(Debug::Info) << "[PlayerDB] sent player inventory restore"
+                         << " guid=" << c.guid
+                         << " charId=" << c.dbCharacterId
+                         << " name=" << c.slotName
+                         << " stacks=" << c.player.inventoryChanges.items.size();
     }
 
     if (sendSavedEquipment)
@@ -3844,6 +4030,11 @@ void MPServer::handleCharacterSelect(ConnectedClient& c, const uint8_t* data, si
         PacketPlayerEquipment equipment;
         equipment.setPlayer(&c.player);
         sendTo(c.conn, equipment.encode());
+        Log(Debug::Info) << "[PlayerDB] sent player equipment restore"
+                         << " guid=" << c.guid
+                         << " charId=" << c.dbCharacterId
+                         << " name=" << c.slotName
+                         << " equipped=" << equippedItemCount(c.player.equipment);
     }
 
     // Late-join catch-up: send state of all in-world players to the new joiner.
@@ -3868,9 +4059,9 @@ void MPServer::handleCharacterSelect(ConnectedClient& c, const uint8_t* data, si
             || existingClient.player.position.pos[1] != 0.f
             || existingClient.player.position.pos[2] != 0.f)
         {
-            PacketPlayerPosition position;
-            position.setPlayer(&existingClient.player);
-            sendTo(c.conn, position.encode());
+            PacketPlayerPosition positionPacket;
+            positionPacket.setPlayer(&existingClient.player);
+            sendTo(c.conn, positionPacket.encode());
         }
     }
 
@@ -3981,6 +4172,9 @@ void MPServer::handlePlayerCellChange(ConnectedClient& c, const uint8_t* data, s
     PacketPlayerCellChange pkt;
     pkt.setPlayer(&c.player);
     if (!pkt.decode(data, size)) return;
+    const uint32_t cellChangeSequence = pkt.getSequence();
+    c.player.velocity = {};
+    c.player.position.isTeleporting = true;
 
     const std::string newCell = makeCellKey(c.player.cell);
     Log(Debug::Info) << "[Server] " << c.name << " → cell: " << newCell;
@@ -3994,9 +4188,15 @@ void MPServer::handlePlayerCellChange(ConnectedClient& c, const uint8_t* data, s
         refreshActorAuthorityForCell(newCell, c.guid);
 
     broadcastToAll(std::vector<uint8_t>(data, data + size), c.conn);
+    {
+        PacketPlayerPosition positionPacket;
+        positionPacket.setPlayer(&c.player);
+        broadcastToAll(positionPacket.encode(cellChangeSequence), c.conn);
+    }
     const std::string cellKey = makeCellKey(c.player.cell);
     if (!cellKey.empty())
         sendCellStateToClient(c.conn, cellKey);
+    sendPlayerStateBootstrapToClient(c);
 }
 
 void MPServer::handlePlayerLoadedCells(ConnectedClient& c, const uint8_t* data, size_t size)
@@ -4107,7 +4307,37 @@ void MPServer::handlePlayerEquipment(ConnectedClient& c, const uint8_t* data, si
     PacketPlayerEquipment pkt;
     pkt.setPlayer(&incoming);
     if (!pkt.decode(data, size)) return;
+
+    const uint64_t nowMs = currentServerTimeMs();
+    if (c.hasRestoredEquipmentSnapshot
+        && !c.acceptedPlayerEquipmentThisSession
+        && nowMs < c.playerEquipmentRestoreGuardUntilMs
+        && looksLikeRestoredEquipmentRegression(incoming.equipment, c.restoredEquipmentSnapshot))
+    {
+        if (c.lastPlayerEquipmentRestoreCorrectionLogMs == 0
+            || nowMs - c.lastPlayerEquipmentRestoreCorrectionLogMs >= 1000)
+        {
+            c.lastPlayerEquipmentRestoreCorrectionLogMs = nowMs;
+            Log(Debug::Info) << "[PlayerDB] ignored startup player equipment overwrite"
+                             << " charId=" << c.dbCharacterId
+                             << " name=" << c.slotName
+                             << " incomingEquipped=" << equippedItemCount(incoming.equipment)
+                             << " restoredEquipped=" << equippedItemCount(c.restoredEquipmentSnapshot);
+        }
+
+        BasePlayer correction = c.player;
+        correction.guid = c.guid;
+        PacketPlayerEquipment correctionPkt;
+        correctionPkt.setPlayer(&correction);
+        sendTo(c.conn, correctionPkt.encode());
+        return;
+    }
+
     c.player.equipment = incoming.equipment;
+    c.acceptedPlayerEquipmentThisSession = true;
+    c.restoredEquipmentSnapshot = c.player.equipment;
+    c.hasRestoredEquipmentSnapshot = true;
+    c.playerEquipmentRestoreGuardUntilMs = 0;
 
     if (mPlayerDb && c.dbCharacterId != 0)
     {
@@ -4178,6 +4408,32 @@ void MPServer::handlePlayerInventory(ConnectedClient& c, const uint8_t* data, si
             && left.soul == right.soul;
     };
 
+    const uint64_t nowMs = currentServerTimeMs();
+    if (c.hasRestoredInventorySnapshot
+        && !c.acceptedPlayerInventoryThisSession
+        && nowMs < c.playerInventoryRestoreGuardUntilMs
+        && looksLikeRestoredInventoryRegression(incoming.inventoryChanges, c.restoredInventorySnapshot))
+    {
+        if (c.lastPlayerInventoryRestoreCorrectionLogMs == 0
+            || nowMs - c.lastPlayerInventoryRestoreCorrectionLogMs >= 1000)
+        {
+            c.lastPlayerInventoryRestoreCorrectionLogMs = nowMs;
+            Log(Debug::Info) << "[PlayerDB] ignored startup player inventory overwrite"
+                             << " charId=" << c.dbCharacterId
+                             << " name=" << c.slotName
+                             << " incomingItems=" << incoming.inventoryChanges.items.size()
+                             << " restoredItems=" << c.restoredInventorySnapshot.size();
+        }
+
+        BasePlayer correction = c.player;
+        correction.guid = c.guid;
+        correction.inventoryChanges.action = BasePlayer::InventoryChanges::Action::Set;
+        PacketPlayerInventory correctionPkt;
+        correctionPkt.setPlayer(&correction);
+        sendTo(c.conn, correctionPkt.encode());
+        return;
+    }
+
     if (c.player.inventoryChanges.action != InventoryAction::Set)
         c.player.inventoryChanges.action = InventoryAction::Set;
 
@@ -4215,6 +4471,11 @@ void MPServer::handlePlayerInventory(ConnectedClient& c, const uint8_t* data, si
                 c.player.inventoryChanges.items.erase(it);
         }
     }
+
+    c.acceptedPlayerInventoryThisSession = true;
+    c.restoredInventorySnapshot = c.player.inventoryChanges.items;
+    c.hasRestoredInventorySnapshot = true;
+    c.playerInventoryRestoreGuardUntilMs = 0;
 
     if (mPlayerDb && c.dbCharacterId != 0)
     {
@@ -7746,6 +8007,50 @@ void MPServer::sendAuthoritativeEquipment(ConnectedClient& c, bool includeOthers
     sendTo(c.conn, encoded);
     if (includeOthers)
         broadcastToAll(encoded, c.conn);
+}
+
+// ---------------------------------------------------------------------------
+void MPServer::sendPlayerStateBootstrapToClient(ConnectedClient& receiver)
+{
+    if (!receiver.charSelectComplete)
+        return;
+
+    std::size_t sent = 0;
+    for (auto& [conn, client] : mClients)
+    {
+        if (conn == receiver.conn || !client.charSelectComplete)
+            continue;
+
+        PacketPlayerBaseInfo baseInfo;
+        baseInfo.setPlayer(&client.player);
+        sendTo(receiver.conn, baseInfo.encode());
+
+        PacketPlayerCellChange cellChange;
+        cellChange.setPlayer(&client.player);
+        sendTo(receiver.conn, cellChange.encode());
+
+        PacketPlayerEquipment equipment;
+        equipment.setPlayer(&client.player);
+        sendTo(receiver.conn, equipment.encode());
+
+        if (client.player.position.pos[0] != 0.f
+            || client.player.position.pos[1] != 0.f
+            || client.player.position.pos[2] != 0.f)
+        {
+            PacketPlayerPosition positionPacket;
+            positionPacket.setPlayer(&client.player);
+            sendTo(receiver.conn, positionPacket.encode());
+        }
+
+        ++sent;
+    }
+
+    if (sent != 0)
+    {
+        Log(Debug::Verbose) << "[Server] Sent player bootstrap to " << receiver.name
+                            << " players=" << sent
+                            << " cell=" << makeCellKey(receiver.player.cell);
+    }
 }
 
 // ---------------------------------------------------------------------------

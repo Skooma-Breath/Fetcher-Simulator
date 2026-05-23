@@ -798,7 +798,7 @@ void Main::registerProtocolHandlers()
             if (tmp.guid == 0) return;
 
             auto* rp = mPlayerList->getPlayer(tmp.guid);
-            if (rp) rp->onPositionUpdate(tmp);
+            if (rp) rp->onPositionUpdate(tmp, pkt.getSequence());
         });
 
     // --- Remote player cell change ---
@@ -816,7 +816,7 @@ void Main::registerProtocolHandlers()
             }
 
             auto* rp = mPlayerList->getPlayer(tmp.guid);
-            if (rp) rp->onCellChange(tmp);
+            if (rp) rp->onCellChange(tmp, pkt.getSequence());
         });
 
     // --- Remote player base info (join / appearance) ---

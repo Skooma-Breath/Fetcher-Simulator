@@ -55,6 +55,7 @@
 #include <components/esm3/loadskil.hpp>
 #include <components/esm3/loadweap.hpp>
 #include "../../mwmechanics/movement.hpp"
+#include "../../mwrender/npcanimation.hpp"
 #include <components/openmw-mp/Packets/Player/PacketPlayerAnimFlags.hpp>
 #include <components/openmw-mp/Packets/Player/PacketPlayerAttack.hpp>
 #include <components/openmw-mp/Packets/Player/PacketPlayerCast.hpp>
@@ -82,6 +83,28 @@ namespace
     bool sameEquipment(const EquipmentItem& left, const EquipmentItem& right)
     {
         return left.slot == right.slot && sameItem(left.item, right.item);
+    }
+
+    std::size_t equippedItemCount(const std::array<EquipmentItem, BasePlayer::NUM_EQUIPMENT_SLOTS>& equipment)
+    {
+        std::size_t count = 0;
+        for (const EquipmentItem& entry : equipment)
+        {
+            if (!entry.item.refId.empty() && entry.item.count > 0)
+                ++count;
+        }
+        return count;
+    }
+
+    std::size_t inventoryStackCount(const std::vector<Item>& items)
+    {
+        std::size_t count = 0;
+        for (const Item& item : items)
+        {
+            if (!item.refId.empty() && item.count > 0)
+                ++count;
+        }
+        return count;
     }
 
     bool sameDynamicStat(const DynamicStat& left, const DynamicStat& right)
@@ -142,20 +165,6 @@ namespace
     bool hasRecordId(const MWWorld::ESMStore& store, const std::string& refId)
     {
         return !refId.empty() && store.find(ESM::RefId::stringRefId(refId)) != 0;
-    }
-
-    std::string findFirstMissingInventoryRefId(const MWWorld::ESMStore& store, const std::vector<Item>& items)
-    {
-        for (const Item& item : items)
-        {
-            if (item.refId.empty() || item.count <= 0)
-                continue;
-
-            if (!hasRecordId(store, item.refId))
-                return item.refId;
-        }
-
-        return {};
     }
 
     bool inventoryOrder(const Item& left, const Item& right)
@@ -458,6 +467,12 @@ void PlayerSync::queueAuthoritativeEquipment(const BasePlayer& authoritative)
         mAuthoritativeEquipment[slot].slot = slot;
     mPendingEquipmentRestore = true;
 
+    Log(Debug::Info) << "[MP] PlayerSync: queued authoritative equipment"
+                     << " guid=" << authoritative.guid
+                     << " localGuid=" << mLocal.guid
+                     << " equipped=" << equippedItemCount(mAuthoritativeEquipment)
+                     << " state=" << static_cast<int>(MWBase::Environment::get().getStateManager()->getState());
+
     // During MP auto-enter the server can send saved equipment immediately after
     // CharacterData while OpenMW is still in State_NoGame. Do not apply to the
     // pre-game/template player; newGame(true) would recreate the player and wipe
@@ -478,6 +493,12 @@ void PlayerSync::queueAuthoritativeInventory(const BasePlayer& authoritative)
     mAuthoritativeInventory = authoritative.inventoryChanges;
     mAuthoritativeInventory.action = BasePlayer::InventoryChanges::Action::Set;
     mPendingInventoryRestore = true;
+
+    Log(Debug::Info) << "[MP] PlayerSync: queued authoritative inventory"
+                     << " guid=" << authoritative.guid
+                     << " localGuid=" << mLocal.guid
+                     << " stacks=" << inventoryStackCount(mAuthoritativeInventory.items)
+                     << " state=" << static_cast<int>(MWBase::Environment::get().getStateManager()->getState());
 
     // During MP auto-enter the server can send saved inventory immediately after
     // CharacterData while OpenMW is still in State_NoGame. Do not apply to the
@@ -1822,26 +1843,26 @@ void PlayerSync::applyPendingAuthoritativeState(const MWWorld::Ptr& player)
     MWWorld::ContainerStore& containerStore = invStore;
     const MWWorld::ESMStore& store = world->getStore();
     bool applied = false;
+    bool inventoryRestoreApplied = false;
 
     if (mPendingInventoryRestore)
     {
-        const std::string missingRefId = findFirstMissingInventoryRefId(store, mAuthoritativeInventory.items);
-        if (!missingRefId.empty())
-        {
-            if (mLastPendingInventoryMissingRefId != missingRefId)
-            {
-                Log(Debug::Verbose) << "[MP] Delaying inventory restore until record is available: " << missingRefId;
-                mLastPendingInventoryMissingRefId = missingRefId;
-            }
-            return;
-        }
-
+        std::size_t skippedMissingInventory = 0;
+        std::string firstMissingInventoryRefId;
         mLastPendingInventoryMissingRefId.clear();
         invStore.clear();
         for (const Item& item : mAuthoritativeInventory.items)
         {
             if (item.refId.empty() || item.count <= 0)
                 continue;
+
+            if (!hasRecordId(store, item.refId))
+            {
+                if (firstMissingInventoryRefId.empty())
+                    firstMissingInventoryRefId = item.refId;
+                ++skippedMissingInventory;
+                continue;
+            }
 
             MWWorld::ContainerStoreIterator it = containerStore.add(
                 ESM::RefId::stringRefId(item.refId), item.count, false);
@@ -1855,11 +1876,27 @@ void PlayerSync::applyPendingAuthoritativeState(const MWWorld::Ptr& player)
         }
         mPendingInventoryRestore = false;
         applied = true;
+        inventoryRestoreApplied = true;
+
+        Log(Debug::Info) << "[MP] PlayerSync: applied authoritative inventory"
+                         << " requestedStacks=" << inventoryStackCount(mAuthoritativeInventory.items)
+                         << " skippedMissing=" << skippedMissingInventory
+                         << " firstMissing=" << firstMissingInventoryRefId;
+    }
+
+    if (inventoryRestoreApplied
+        && !mPendingEquipmentRestore
+        && equippedItemCount(mAuthoritativeEquipment) > 0)
+    {
+        mPendingEquipmentRestore = true;
+        Log(Debug::Info) << "[MP] PlayerSync: reapplying authoritative equipment after inventory restore"
+                         << " equipped=" << equippedItemCount(mAuthoritativeEquipment);
     }
 
     if (mPendingEquipmentRestore)
     {
         std::string missingEquipRefId;
+        std::size_t recoveredMissingEquippedItems = 0;
         for (int slot = 0; slot < BasePlayer::NUM_EQUIPMENT_SLOTS; ++slot)
         {
             const EquipmentItem& target = mAuthoritativeEquipment[slot];
@@ -1889,8 +1926,25 @@ void PlayerSync::applyPendingAuthoritativeState(const MWWorld::Ptr& player)
 
             if (!found)
             {
-                missingEquipRefId = target.item.refId;
-                break;
+                if (!hasRecordId(store, target.item.refId))
+                {
+                    missingEquipRefId = target.item.refId;
+                    break;
+                }
+
+                MWWorld::ContainerStoreIterator added = containerStore.add(
+                    ESM::RefId::stringRefId(target.item.refId), std::max(1, target.item.count), false);
+                if (added == invStore.end())
+                {
+                    missingEquipRefId = target.item.refId;
+                    break;
+                }
+
+                MWWorld::CellRef& cellRef = added->getCellRef();
+                cellRef.setCharge(target.item.charge);
+                cellRef.setEnchantmentCharge(target.item.enchantmentCharge);
+                cellRef.setSoul(target.item.soul.empty() ? ESM::RefId() : ESM::RefId::deserializeText(target.item.soul));
+                ++recoveredMissingEquippedItems;
             }
         }
 
@@ -1934,14 +1988,25 @@ void PlayerSync::applyPendingAuthoritativeState(const MWWorld::Ptr& player)
         }
         mPendingEquipmentRestore = false;
         applied = true;
+
+        Log(Debug::Info) << "[MP] PlayerSync: applied authoritative equipment"
+                         << " equipped=" << equippedItemCount(mAuthoritativeEquipment)
+                         << " recoveredMissingItems=" << recoveredMissingEquippedItems;
     }
 
     if (applied)
     {
+        if (auto* anim = dynamic_cast<MWRender::NpcAnimation*>(world->getAnimation(player)))
+            anim->equipmentChanged();
+        MWBase::Environment::get().getWindowManager()->updatePlayer();
         captureInventory(player);
         captureEquipment(player);
         snapshotInventory();
         snapshotEquipment();
+
+        Log(Debug::Info) << "[MP] PlayerSync: local authoritative restore snapshot"
+                         << " liveInventoryStacks=" << inventoryStackCount(mLocal.inventoryChanges.items)
+                         << " liveEquipped=" << equippedItemCount(mLocal.equipment);
     }
 }
 

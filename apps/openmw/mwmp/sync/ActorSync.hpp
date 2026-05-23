@@ -95,6 +95,7 @@ namespace mwmp
             float latestSnapshotAge = 0.f;
             uint64_t lastServerTimestamp = 0;
             uint64_t lastPresentationServerTimestamp = 0;
+            uint64_t lastClientSnapshotReceiveTimeMs = 0;
             bool hasInterpolationRenderTimestamp = false;
             MWWorld::Ptr boundActor;
             bool pendingAnimPlay = false;
@@ -182,6 +183,10 @@ namespace mwmp
             ActorInstanceId actorNetId = 0;
             bool hasAuthoritativeTransform = false;
             bool hasAuthoritativeEquipment = false;
+            bool waitingForFreshCellBootstrap = false;
+            bool rebaseOnNextAuthoritativeSnapshot = false;
+            bool smoothFreshBootstrapCorrection = false;
+            uint64_t freshCellBootstrapMinServerTimestamp = 0;
         };
 
         struct CellRuntime
@@ -206,6 +211,10 @@ namespace mwmp
 
         void queueSnapshot(ActorRuntime& actor, const BaseActor& state, const ActorList& list);
         void mergeActorState(ActorRuntime& actor, const BaseActor& state, bool includeTransform);
+        void updateLocalCellBootstrapState();
+        void markActorsNeedFreshCellBootstrap(const std::string& oldCellId, const std::string& newCellId);
+        void completeFreshCellBootstrap(ActorRuntime& actor, const char* source, uint64_t serverTimestamp);
+        bool shouldHideForFreshCellBootstrap(const ActorRuntime& actor) const;
         bool shouldReplayDeadBaselineAsRealtime(const ActorRuntime& actor, const BaseActor& state) const;
         void markDeadBaselineState(ActorRuntime& actor, const BaseActor& state, bool replayRealtime);
         ActorInstanceId actorNetIdForActorState(const BaseActor& actor) const;
@@ -243,6 +252,8 @@ namespace mwmp
         std::unordered_map<ActorInstanceId, ActorRuntime>   mActorsByNetId;
         std::unordered_map<std::string, std::unordered_set<ActorInstanceId>> mCellActorIds;
         std::unordered_map<std::string, ActorInstanceId>    mActorNetIdsByKey;
+        std::string mLastLocalCellId;
+        bool mHaveLastLocalCellId = false;
         uint64_t mActorV2DiagnosticsLastLogMs = 0;
         std::size_t mActorV2SnapshotsWindow = 0;
         std::size_t mActorV2InvalidActorIdWindow = 0;

@@ -54,6 +54,16 @@ struct ConnectedClient
     bool                hasRestoredStatsSnapshot = false;
     bool                acceptedPlayerStatsThisSession = false;
     uint64_t            playerStatsRestoreGuardUntilMs = 0;
+    std::vector<Item>   restoredInventorySnapshot;
+    std::array<EquipmentItem, BasePlayer::NUM_EQUIPMENT_SLOTS> restoredEquipmentSnapshot{};
+    bool                hasRestoredInventorySnapshot = false;
+    bool                hasRestoredEquipmentSnapshot = false;
+    bool                acceptedPlayerInventoryThisSession = false;
+    bool                acceptedPlayerEquipmentThisSession = false;
+    uint64_t            playerInventoryRestoreGuardUntilMs = 0;
+    uint64_t            playerEquipmentRestoreGuardUntilMs = 0;
+    uint64_t            lastPlayerInventoryRestoreCorrectionLogMs = 0;
+    uint64_t            lastPlayerEquipmentRestoreCorrectionLogMs = 0;
 
     // Ed25519 challenge-response state (valid between receiving PacketHandshake
     // with a publicKey and receiving PacketChallengeResponse)
@@ -286,6 +296,7 @@ private:
     void syncLuaAuthorityState();
     void sendAuthoritativeInventory(ConnectedClient& c);
     void sendAuthoritativeEquipment(ConnectedClient& c, bool includeOthers = true);
+    void sendPlayerStateBootstrapToClient(ConnectedClient& receiver);
     void startAdminHttpServer();
     void stopAdminHttpServer();
     AdminHttpServer::Response handleAdminHttpRequest(
