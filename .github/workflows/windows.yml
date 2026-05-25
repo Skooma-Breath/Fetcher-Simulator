@@ -92,9 +92,37 @@ jobs:
       working-directory: ${{ github.workspace }}/deps/Qt
       run: .\aqt_x64.exe install-qt windows desktop 6.6.3 win64_msvc2019_64
 
-    - name: Install Protobuf via vcpkg
+    - name: Build Protobuf
+      shell: pwsh
+      working-directory: ${{ github.workspace }}/deps
       run: |
-        ${{ github.workspace }}/deps/vcpkg-x64-windows-${{ inputs.msvc }}-${{ inputs.vcpkg-deps-tag }}/vcpkg.exe install protobuf:x64-windows
+        New-Item -ItemType Directory -Force "${{ github.workspace }}/ci-logs" | Out-Null
+        $protobufTag = "v3.21.12"
+        $protobufSrc = "${{ github.workspace }}/deps/protobuf-src-$protobufTag"
+        $protobufInstall = "${{ github.workspace }}/deps/protobuf-install-$protobufTag"
+        if (-not (Test-Path "$protobufInstall/lib/libprotobufd.lib")) {
+          if (-not (Test-Path $protobufSrc)) {
+            git clone --depth 1 --branch $protobufTag https://github.com/protocolbuffers/protobuf.git $protobufSrc 2>&1 | Tee-Object -FilePath "${{ github.workspace }}/ci-logs/01-build-protobuf.txt"
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          }
+          $protobufBuild = "$protobufSrc/build"
+          Remove-Item -Recurse -Force $protobufBuild -ErrorAction SilentlyContinue
+          New-Item -ItemType Directory -Force $protobufBuild | Out-Null
+          cmake "$protobufSrc/cmake" `
+            -B $protobufBuild `
+            -G "Visual Studio 17 2022" `
+            -A x64 `
+            -Dprotobuf_BUILD_TESTS=OFF `
+            -Dprotobuf_BUILD_PROTOC_BINARIES=ON `
+            -Dprotobuf_MSVC_STATIC_RUNTIME=OFF `
+            -DCMAKE_INSTALL_PREFIX="$protobufInstall" 2>&1 | Tee-Object -FilePath "${{ github.workspace }}/ci-logs/01-build-protobuf.txt" -Append
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cmake --build $protobufBuild --config Release --target install 2>&1 | Tee-Object -FilePath "${{ github.workspace }}/ci-logs/01-build-protobuf.txt" -Append
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cmake --build $protobufBuild --config Debug --target install 2>&1 | Tee-Object -FilePath "${{ github.workspace }}/ci-logs/01-build-protobuf.txt" -Append
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+        }
+        "PROTOBUF_INSTALL=$protobufInstall" >> $env:GITHUB_ENV
 
     - uses: ilammy/msvc-dev-cmd@v1
 
@@ -119,7 +147,18 @@ jobs:
           '-D', 'BUILD_OPENCS_TESTS=${{ ! inputs.package }}',
           '-D', 'OPENMW_USE_SYSTEM_SQLITE3=OFF',
           '-D', 'OPENMW_USE_SYSTEM_YAML_CPP=OFF',
-          '-D', 'OPENMW_LTO_BUILD=ON'
+          '-D', 'OPENMW_LTO_BUILD=ON',
+          '-D', 'BUILD_MULTIPLAYER=ON',
+          '-D', 'BUILD_DEDICATED_SERVER=ON',
+          '-D', 'USE_CRYPTO=BCrypt',
+          '-D', 'USE_CRYPTO25519=Reference',
+          '-D', "Protobuf_INCLUDE_DIR=$env:PROTOBUF_INSTALL/include",
+          '-D', "Protobuf_LIBRARY=$env:PROTOBUF_INSTALL/lib/libprotobuf.lib",
+          '-D', "Protobuf_LIBRARY_DEBUG=$env:PROTOBUF_INSTALL/lib/libprotobufd.lib",
+          '-D', "Protobuf_LITE_LIBRARY=$env:PROTOBUF_INSTALL/lib/libprotobuf-lite.lib",
+          '-D', "Protobuf_LITE_LIBRARY_DEBUG=$env:PROTOBUF_INSTALL/lib/libprotobuf-lited.lib",
+          '-D', "Protobuf_PROTOC_EXECUTABLE=$env:PROTOBUF_INSTALL/bin/protoc.exe",
+          '-D', 'Protobuf_USE_STATIC_LIBS=ON'
         )
         if ('${{ inputs.package }}' -eq 'true') {
           $configureArgs += @(
