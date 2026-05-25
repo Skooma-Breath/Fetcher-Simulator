@@ -314,6 +314,8 @@ jobs:
     - name: Run components tests
       if: ${{ ! inputs.package }}
       shell: pwsh
+      env:
+        OPENMW_DEBUG_LEVEL: Verbose
       run: |
         build/components-tests.exe 2>&1 | Tee-Object -FilePath "${{ github.workspace }}/ci-logs/04-components-tests.txt"
         if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
