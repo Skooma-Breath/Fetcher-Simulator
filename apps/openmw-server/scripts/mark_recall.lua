@@ -2,9 +2,21 @@ local mp = require("mp")
 
 local M = {}
 
-local DEFAULT_SURF_CELLS = {
-    "surf_mesa_mw",
-    "surf_utopia_mw",
+local DEFAULT_SURF_CELL_SETTINGS = {
+    surf_mesa_mw = { enabled = true },
+    surf_utopia_mw = { enabled = true },
+    surf_kitsune_mw = {
+        enabled = true,
+        gravity = 1.6,
+        airAccel = 600.0,
+        maxAirSpeed = 2000.0,
+        friction = 5.0,
+        groundAccel = 10.0,
+        overbounce = 4.0,
+        rampAngle = 0.8,
+        impactOverbounce = 1.1,
+        impactVelocityThreshold = 200.0,
+    },
 }
 
 local function trim(text)
@@ -198,8 +210,8 @@ function M.handleChat(player, data, env)
 end
 
 function M.onServerInit()
-    for _, cellId in ipairs(DEFAULT_SURF_CELLS) do
-        mp.setCellPhysics(cellId, { enabled = true })
+    for cellId, settings in pairs(DEFAULT_SURF_CELL_SETTINGS) do
+        mp.setCellPhysics(cellId, settings)
     end
 end
 

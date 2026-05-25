@@ -9,6 +9,7 @@ local recordDynamicTest = require("recorddynamic_test")
 local recordStore = require("recordstore")
 local destructibleSpawners = require("destructible_spawners")
 local surfCommands = require("surf_commands")
+local surfTimer = require("surf_timer")
 
 ------------------------------------------------------------------------
 -- Config
@@ -1422,6 +1423,7 @@ return {
             admins[data.guid] = nil
             markRecallCommands.onPlayerDisconnect(data)
             surfCommands.onPlayerDisconnect(data)
+            surfTimer.onPlayerDisconnect(data)
             if ANNOUNCE_JOIN_LEAVE then
                 mp.broadcast("<< " .. data.name .. " has left.  (" .. (data.reason or "Disconnected") .. ")")
             end
@@ -1446,6 +1448,10 @@ return {
                 mp.log(string.format("[core] TestPing from pid=%d ts=%s", data.pid, tostring(ts)))
                 mp.send(data.pid, "TestPong", { ts = ts })
             end
+        end,
+
+        SurfTimerTrigger = function(data)
+            surfTimer.handleTrigger(data)
         end,
 
         Activate = function(data)
