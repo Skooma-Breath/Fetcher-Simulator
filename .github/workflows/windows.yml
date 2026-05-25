@@ -24,6 +24,12 @@ on:
       release:
         default: false
         type: boolean
+      release-tag:
+        default: ""
+        type: string
+      release-name:
+        default: ""
+        type: string
 
 jobs:
   Windows:
@@ -360,10 +366,27 @@ jobs:
         if-no-files-found: ignore
         retention-days: 14
 
-    - name: Create prerelease
+    - name: Stage OpenMW release assets
+      if: ${{ inputs.release }}
+      shell: pwsh
+      run: |
+        $assets = "${{ github.workspace }}\release-assets"
+        New-Item -ItemType Directory -Force $assets | Out-Null
+        if ("${{ inputs.package }}" -eq "true") {
+          Copy-Item -Path "${{ github.workspace }}\install\*.exe" -Destination $assets
+        } else {
+          $zip = Join-Path $assets "openmw-windows-${{ inputs.msvc }}-${{ github.sha }}.zip"
+          Compress-Archive -Path "${{ github.workspace }}\install\*" -DestinationPath $zip -CompressionLevel Optimal -Force
+        }
+
+    - name: Create OpenMW client prerelease
       if: ${{ inputs.release }}
       uses: softprops/action-gh-release@v2
       with:
-        files: ${{ github.workspace }}/install/*.exe
+        tag_name: ${{ inputs.release-tag || format('openmw-windows-{0}-{1}', inputs.msvc, github.sha) }}
+        target_commitish: ${{ github.sha }}
+        name: ${{ inputs.release-name || format('OpenMW Windows {0} {1}', inputs.msvc, github.sha) }}
+        files: ${{ github.workspace }}/release-assets/*
         prerelease: true
-        draft: true
+        draft: false
+        make_latest: false

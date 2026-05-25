@@ -7,6 +7,9 @@ param(
     [ValidateSet("RelWithDebInfo", "Release", "Debug")]
     [string]$BuildType = "RelWithDebInfo",
     [bool]$Package = $false,
+    [bool]$Release = $false,
+    [string]$ReleaseTag = "",
+    [string]$ReleaseName = "",
     [string]$RunLabel = "codex",
     [string]$OutDir = "remote-workflow-logs"
 )
@@ -54,6 +57,7 @@ if ($LASTEXITCODE -ne 0) {
 
 New-Item -ItemType Directory -Force $OutDir | Out-Null
 $packageInput = $Package.ToString().ToLowerInvariant()
+$releaseInput = $Release.ToString().ToLowerInvariant()
 
 $existingRuns = Invoke-GhJson @(
     "run", "list",
@@ -69,15 +73,23 @@ foreach ($run in $existingRuns) {
 }
 
 Write-Host "Triggering $Workflow on $Repo@$Ref..."
-Invoke-GhChecked @(
+$workflowRunArgs = @(
     "workflow", "run", $Workflow,
     "--repo", $Repo,
     "--ref", $Ref,
     "-f", "image=$Image",
     "-f", "build-type=$BuildType",
     "-f", "package=$packageInput",
+    "-f", "release=$releaseInput",
     "-f", "run-label=$RunLabel"
 )
+if ($ReleaseTag) {
+    $workflowRunArgs += @("-f", "release-tag=$ReleaseTag")
+}
+if ($ReleaseName) {
+    $workflowRunArgs += @("-f", "release-name=$ReleaseName")
+}
+Invoke-GhChecked $workflowRunArgs
 
 $runId = $null
 $deadline = (Get-Date).AddMinutes(2)

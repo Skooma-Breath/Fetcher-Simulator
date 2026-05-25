@@ -26,6 +26,21 @@ on:
         required: true
         default: false
         type: boolean
+      release:
+        description: Publish the OpenMW client build artifact as a GitHub prerelease
+        required: true
+        default: false
+        type: boolean
+      release-tag:
+        description: Optional release tag; defaults to openmw-windows-<msvc>-<sha>
+        required: false
+        default: ""
+        type: string
+      release-name:
+        description: Optional release title
+        required: false
+        default: ""
+        type: string
       run-label:
         description: Optional label to make this run easy to find in gh run list
         required: false
@@ -33,7 +48,7 @@ on:
         type: string
 
 permissions:
-  contents: read
+  contents: write
   actions: read
 
 concurrency:
@@ -64,4 +79,7 @@ jobs:
       vcpkg-deps-tag: ${{ needs.Output-Envs.outputs.VCPKG_DEPS_TAG }}
       build-type: ${{ inputs.build-type }}
       package: ${{ inputs.package }}
+      release: ${{ inputs.release }}
+      release-tag: ${{ inputs.release-tag }}
+      release-name: ${{ inputs.release-name }}
     secrets: inherit
