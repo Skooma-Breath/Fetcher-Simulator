@@ -67,7 +67,10 @@ if (-not (Test-Path symstore-venv\Scripts\symstore.exe) -or -not ((symstore-venv
     }
 }
 
-$artifacts = $artifacts | Where-Object { Test-Path $_ }
+$symbolArtifactExtensions = @(".dll", ".exe", ".pdb")
+$artifacts = $artifacts | Where-Object {
+    (Test-Path $_) -and ($symbolArtifactExtensions -contains [System.IO.Path]::GetExtension($_).ToLowerInvariant())
+}
 
 Write-Output "Storing symbols..."
 

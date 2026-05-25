@@ -33,6 +33,7 @@ jobs:
 
     env:
       archive: FAILEDTODOWNLOAD
+      SCCACHE_GHA_ENABLED: "true"
 
     steps:
     - name: Install NSIS
@@ -48,6 +49,9 @@ jobs:
       run: |
         git -C "${{ github.workspace }}/extern/GameNetworkingSockets" apply "${{ github.workspace }}/CI/patches/gamenetworkingsockets-winmm-timer.patch"
         if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+    - name: Set up sccache
+      uses: mozilla-actions/sccache-action@v0.0.10
 
     - name: Create directories for dependencies
       run: |
@@ -98,6 +102,12 @@ jobs:
       working-directory: ${{ github.workspace }}/deps/Qt
       run: .\aqt_x64.exe install-qt windows desktop 6.6.3 win64_msvc2019_64
 
+    - name: Cache Protobuf
+      uses: actions/cache@v4
+      with:
+        path: ${{ github.workspace }}/deps/protobuf-install-v3.21.12
+        key: protobuf-windows-${{ inputs.image }}-${{ inputs.msvc }}-v3.21.12-msvc-md-v1
+
     - name: Build Protobuf
       shell: pwsh
       working-directory: ${{ github.workspace }}/deps
@@ -127,6 +137,8 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           cmake --build $protobufBuild --config Debug --target install 2>&1 | Tee-Object -FilePath "${{ github.workspace }}/ci-logs/01-build-protobuf.txt" -Append
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+        } else {
+          "Using cached Protobuf install at $protobufInstall" | Tee-Object -FilePath "${{ github.workspace }}/ci-logs/01-build-protobuf.txt"
         }
         "PROTOBUF_INSTALL=$protobufInstall" >> $env:GITHUB_ENV
 
@@ -143,6 +155,8 @@ jobs:
           '-B', '${{ github.workspace }}/build',
           '-G', 'Ninja',
           '-D', 'CMAKE_BUILD_TYPE=${{ inputs.build-type }}',
+          '-D', 'CMAKE_C_COMPILER_LAUNCHER=sccache',
+          '-D', 'CMAKE_CXX_COMPILER_LAUNCHER=sccache',
           '-D', 'CMAKE_TOOLCHAIN_FILE=${{ github.workspace }}/deps/vcpkg-x64-windows-${{ inputs.msvc }}-${{ inputs.vcpkg-deps-tag }}/scripts/buildsystems/vcpkg.cmake',
           '-D', 'CMAKE_PREFIX_PATH=${{ github.workspace }}/deps/Qt/6.6.3/msvc2019_64',
           '-D', 'LuaJit_INCLUDE_DIR=${{ github.workspace }}/deps/vcpkg-x64-windows-${{ inputs.msvc }}-${{ inputs.vcpkg-deps-tag }}/installed/x64-windows/include/luajit',
@@ -182,6 +196,18 @@ jobs:
         New-Item -ItemType Directory -Force "${{ github.workspace }}/ci-logs" | Out-Null
         cmake --build ${{ github.workspace }}/build 2>&1 | Tee-Object -FilePath "${{ github.workspace }}/ci-logs/03-build.txt"
         if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+    - name: Show sccache stats
+      if: always()
+      shell: pwsh
+      run: |
+        if ($env:SCCACHE_PATH) {
+          & $env:SCCACHE_PATH --show-stats
+        } elseif (Get-Command sccache -ErrorAction SilentlyContinue) {
+          sccache --show-stats
+        } else {
+          Write-Warning "sccache was not found."
+        }
 
     - name: Copy missing DLLs
       run: |
