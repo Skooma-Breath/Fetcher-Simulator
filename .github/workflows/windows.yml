@@ -43,6 +43,12 @@ jobs:
       with:
         submodules: recursive
 
+    - name: Patch GameNetworkingSockets for Windows timer APIs
+      shell: pwsh
+      run: |
+        git -C "${{ github.workspace }}/extern/GameNetworkingSockets" apply "${{ github.workspace }}/CI/patches/gamenetworkingsockets-winmm-timer.patch"
+        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
     - name: Create directories for dependencies
       run: |
         mkdir -p ${{ github.workspace }}/deps

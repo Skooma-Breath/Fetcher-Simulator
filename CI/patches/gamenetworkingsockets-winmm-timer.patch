@@ -1,0 +1,18 @@
+diff --git a/src/steamnetworkingsockets/clientlib/steamnetworkingsockets_lowlevel.cpp b/src/steamnetworkingsockets/clientlib/steamnetworkingsockets_lowlevel.cpp
+index 51092f3..125204a 100644
+--- a/src/steamnetworkingsockets/clientlib/steamnetworkingsockets_lowlevel.cpp
++++ b/src/steamnetworkingsockets/clientlib/steamnetworkingsockets_lowlevel.cpp
+@@ -55,6 +55,13 @@
+ 	#include <combaseapi.h>
+ #endif
+ 
++#ifdef _WIN32
++	#ifdef MMNOTIMER
++		#undef MMNOTIMER
++	#endif
++	#include <mmsystem.h>
++#endif
++
+ // Time low level send/recv calls and packet processing
+ //#define STEAMNETWORKINGSOCKETS_LOWLEVEL_TIME_SOCKET_CALLS
+ 
