@@ -159,6 +159,7 @@ jobs:
           '-D', 'CMAKE_CXX_COMPILER_LAUNCHER=sccache',
           '-D', 'CMAKE_POLICY_DEFAULT_CMP0141=NEW',
           '-D', 'CMAKE_MSVC_DEBUG_INFORMATION_FORMAT=Embedded',
+          '-D', 'PRECOMPILE_HEADERS_WITH_MSVC=OFF',
           '-D', 'CMAKE_TOOLCHAIN_FILE=${{ github.workspace }}/deps/vcpkg-x64-windows-${{ inputs.msvc }}-${{ inputs.vcpkg-deps-tag }}/scripts/buildsystems/vcpkg.cmake',
           '-D', 'CMAKE_PREFIX_PATH=${{ github.workspace }}/deps/Qt/6.6.3/msvc2019_64',
           '-D', 'LuaJit_INCLUDE_DIR=${{ github.workspace }}/deps/vcpkg-x64-windows-${{ inputs.msvc }}-${{ inputs.vcpkg-deps-tag }}/installed/x64-windows/include/luajit',
