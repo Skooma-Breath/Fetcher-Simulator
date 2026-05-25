@@ -2,8 +2,12 @@ name: Release
 
 on:
   push:
-      tags:
-        - openmw-**
+    tags:
+      - openmw-**
+  workflow_dispatch:
+
+permissions:
+  contents: write
 
 jobs:
   Output-Envs:
