@@ -1,0 +1,67 @@
+name: Codex Windows client build
+
+run-name: codex windows client (${{ inputs.image }}, ${{ inputs.build-type }}, package=${{ inputs.package }}, ${{ inputs.run-label }})
+
+on:
+  workflow_dispatch:
+    inputs:
+      image:
+        description: Windows runner image suffix
+        required: true
+        default: "2022"
+        type: choice
+        options:
+          - "2022"
+      build-type:
+        description: CMake build type
+        required: true
+        default: RelWithDebInfo
+        type: choice
+        options:
+          - RelWithDebInfo
+          - Release
+          - Debug
+      package:
+        description: Create installer/package artifacts instead of test install artifacts
+        required: true
+        default: false
+        type: boolean
+      run-label:
+        description: Optional label to make this run easy to find in gh run list
+        required: false
+        default: codex
+        type: string
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: codex-windows-client-${{ github.ref }}-${{ inputs.run-label }}
+  cancel-in-progress: false
+
+jobs:
+  Output-Envs:
+    name: Read .env file and expose it as output
+    runs-on: ubuntu-latest
+    outputs:
+      VCPKG_DEPS_TAG: ${{ steps.github-env.outputs.VCPKG_DEPS_TAG }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Load CI/github.env
+        id: github-env
+        shell: bash
+        run: |
+          cat "${{ github.workspace }}/CI/github.env" >> "$GITHUB_ENV"
+          cat "${{ github.workspace }}/CI/github.env" >> "$GITHUB_OUTPUT"
+
+  Windows:
+    needs:
+      - Output-Envs
+    uses: ./.github/workflows/windows.yml
+    with:
+      image: ${{ inputs.image }}
+      vcpkg-deps-tag: ${{ needs.Output-Envs.outputs.VCPKG_DEPS_TAG }}
+      build-type: ${{ inputs.build-type }}
+      package: ${{ inputs.package }}
+    secrets: inherit

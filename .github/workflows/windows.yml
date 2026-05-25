@@ -51,14 +51,17 @@ jobs:
     - name: Download prebuilt vcpkg packages
       working-directory: ${{ github.workspace }}/deps
       run: |
+        New-Item -ItemType Directory -Force "${{ github.workspace }}/ci-logs" | Out-Null
         $MANIFEST = "vcpkg-x64-windows-${{ inputs.msvc }}-${{ inputs.vcpkg-deps-tag }}-manifest.txt"
-        curl --fail --retry 3 -L -o "$MANIFEST" "https://gitlab.com/OpenMW/openmw-deps/-/raw/main/windows/$MANIFEST"
+        curl --fail --retry 3 -L -o "$MANIFEST" "https://gitlab.com/OpenMW/openmw-deps/-/raw/main/windows/$MANIFEST" 2>&1 | Tee-Object -FilePath "${{ github.workspace }}/ci-logs/01-download-vcpkg.txt"
+        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
         $lines = Get-Content "$MANIFEST"
         $URL = $lines[0]
         $split = -split $lines[1]
         $HASH = $split[0]
         $FILE = $split[1]
-        curl --fail --retry 3 -L -o "$FILE" "$URL"
+        curl --fail --retry 3 -L -o "$FILE" "$URL" 2>&1 | Tee-Object -FilePath "${{ github.workspace }}/ci-logs/01-download-vcpkg.txt" -Append
+        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
         $filehash = Get-FileHash "$FILE" -Algorithm SHA512
         if ( $filehash.hash -ne "$HASH" ) {
           exit 1
@@ -89,34 +92,51 @@ jobs:
       working-directory: ${{ github.workspace }}/deps/Qt
       run: .\aqt_x64.exe install-qt windows desktop 6.6.3 win64_msvc2019_64
 
+    - name: Install Protobuf via vcpkg
+      run: |
+        ${{ github.workspace }}/deps/vcpkg-x64-windows-${{ inputs.msvc }}-${{ inputs.vcpkg-deps-tag }}/vcpkg.exe install protobuf:x64-windows
+
     - uses: ilammy/msvc-dev-cmd@v1
 
     - uses: seanmiddleditch/gha-setup-ninja@master
 
     - name: Configure OpenMW
-      run: >
-        cmake
-        -S .
-        -B ${{ github.workspace }}/build
-        -G Ninja
-        -D CMAKE_BUILD_TYPE=${{ inputs.build-type }}
-        -D CMAKE_TOOLCHAIN_FILE='${{ github.workspace }}/deps/vcpkg-x64-windows-${{ inputs.msvc }}-${{ inputs.vcpkg-deps-tag }}/scripts/buildsystems/vcpkg.cmake'
-        -D CMAKE_PREFIX_PATH='${{ github.workspace }}/deps/Qt/6.6.3/msvc2019_64'
-        ${{ inputs.package && '-D CMAKE_CXX_FLAGS_RELEASE="/O2 /Ob2 /DNDEBUG /Zi"' || '' }}
-        ${{ inputs.package && '-D "CMAKE_EXE_LINKER_FLAGS_RELEASE=/DEBUG /INCREMENTAL:NO"' || '' }}
-        -D LuaJit_INCLUDE_DIR='${{ github.workspace }}/deps/vcpkg-x64-windows-${{ inputs.msvc }}-${{ inputs.vcpkg-deps-tag }}/installed/x64-windows/include/luajit'
-        -D LuaJit_LIBRARY='${{ github.workspace }}/deps/vcpkg-x64-windows-${{ inputs.msvc }}-${{ inputs.vcpkg-deps-tag }}/installed/x64-windows/lib/lua51.lib'
-        -D BUILD_BENCHMARKS=${{ ! inputs.package }}
-        -D BUILD_COMPONENTS_TESTS=${{ ! inputs.package }}
-        -D BUILD_OPENMW_TESTS=${{ ! inputs.package }}
-        -D BUILD_OPENCS_TESTS=${{ ! inputs.package }}
-        -D OPENMW_USE_SYSTEM_SQLITE3=OFF
-        -D OPENMW_USE_SYSTEM_YAML_CPP=OFF
-        -D OPENMW_LTO_BUILD=ON
-        ${{ inputs.package && '-D "VCREDIST64=$env:VCToolsRedistDir/vc_redist.x64.exe"' || '' }}
+      shell: pwsh
+      run: |
+        New-Item -ItemType Directory -Force "${{ github.workspace }}/ci-logs" | Out-Null
+        $configureArgs = @(
+          '-S', '.',
+          '-B', '${{ github.workspace }}/build',
+          '-G', 'Ninja',
+          '-D', 'CMAKE_BUILD_TYPE=${{ inputs.build-type }}',
+          '-D', 'CMAKE_TOOLCHAIN_FILE=${{ github.workspace }}/deps/vcpkg-x64-windows-${{ inputs.msvc }}-${{ inputs.vcpkg-deps-tag }}/scripts/buildsystems/vcpkg.cmake',
+          '-D', 'CMAKE_PREFIX_PATH=${{ github.workspace }}/deps/Qt/6.6.3/msvc2019_64',
+          '-D', 'LuaJit_INCLUDE_DIR=${{ github.workspace }}/deps/vcpkg-x64-windows-${{ inputs.msvc }}-${{ inputs.vcpkg-deps-tag }}/installed/x64-windows/include/luajit',
+          '-D', 'LuaJit_LIBRARY=${{ github.workspace }}/deps/vcpkg-x64-windows-${{ inputs.msvc }}-${{ inputs.vcpkg-deps-tag }}/installed/x64-windows/lib/lua51.lib',
+          '-D', 'BUILD_BENCHMARKS=${{ ! inputs.package }}',
+          '-D', 'BUILD_COMPONENTS_TESTS=${{ ! inputs.package }}',
+          '-D', 'BUILD_OPENMW_TESTS=${{ ! inputs.package }}',
+          '-D', 'BUILD_OPENCS_TESTS=${{ ! inputs.package }}',
+          '-D', 'OPENMW_USE_SYSTEM_SQLITE3=OFF',
+          '-D', 'OPENMW_USE_SYSTEM_YAML_CPP=OFF',
+          '-D', 'OPENMW_LTO_BUILD=ON'
+        )
+        if ('${{ inputs.package }}' -eq 'true') {
+          $configureArgs += @(
+            '-D', 'CMAKE_CXX_FLAGS_RELEASE=/O2 /Ob2 /DNDEBUG /Zi',
+            '-D', 'CMAKE_EXE_LINKER_FLAGS_RELEASE=/DEBUG /INCREMENTAL:NO',
+            '-D', "VCREDIST64=$env:VCToolsRedistDir/vc_redist.x64.exe"
+          )
+        }
+        cmake @configureArgs 2>&1 | Tee-Object -FilePath "${{ github.workspace }}/ci-logs/02-configure.txt"
+        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
     - name: Build OpenMW
-      run: cmake --build ${{ github.workspace }}/build
+      shell: pwsh
+      run: |
+        New-Item -ItemType Directory -Force "${{ github.workspace }}/ci-logs" | Out-Null
+        cmake --build ${{ github.workspace }}/build 2>&1 | Tee-Object -FilePath "${{ github.workspace }}/ci-logs/03-build.txt"
+        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
     - name: Copy missing DLLs
       run: |
@@ -220,15 +240,24 @@ jobs:
 
     - name: Run components tests
       if: ${{ ! inputs.package }}
-      run: build/components-tests.exe
+      shell: pwsh
+      run: |
+        build/components-tests.exe 2>&1 | Tee-Object -FilePath "${{ github.workspace }}/ci-logs/04-components-tests.txt"
+        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
     - name: Run OpenMW tests
       if: ${{ ! inputs.package }}
-      run: build/openmw-tests.exe
+      shell: pwsh
+      run: |
+        build/openmw-tests.exe 2>&1 | Tee-Object -FilePath "${{ github.workspace }}/ci-logs/05-openmw-tests.txt"
+        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
     - name: Run OpenMW-CS tests
       if: ${{ ! inputs.package }}
-      run: build/openmw-cs-tests.exe
+      shell: pwsh
+      run: |
+        build/openmw-cs-tests.exe 2>&1 | Tee-Object -FilePath "${{ github.workspace }}/ci-logs/06-openmw-cs-tests.txt"
+        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
     - name: Run detournavigator navmeshtilescache benchmark
       if: ${{ ! inputs.package }}
@@ -241,6 +270,15 @@ jobs:
     - name: Run esm refid benchmark
       if: ${{ ! inputs.package }}
       run: build/openmw_esm_refid_benchmark.exe
+
+    - name: Store Windows workflow logs
+      if: always()
+      uses: actions/upload-artifact@v4
+      with:
+        name: openmw-windows-${{ inputs.msvc }}-logs-${{ github.run_id }}
+        path: ${{ github.workspace }}/ci-logs/*
+        if-no-files-found: ignore
+        retention-days: 14
 
     - name: Create prerelease
       if: ${{ inputs.release }}
