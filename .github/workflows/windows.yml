@@ -238,12 +238,14 @@ jobs:
         cp plugins/iconengines/qsvgicon.dll ${{ github.workspace }}/build/iconengines
 
     - name: Create symbol server directory structure
+      if: ${{ inputs.package }}
       working-directory: ${{ github.workspace }}/build
       run: |
         ${{ github.workspace }}\CI\Store-Symbols.ps1
         Move-Item ${{ github.workspace }}\build\SymStore ${{ github.workspace }}
 
     - name: Move pdb files
+      if: ${{ inputs.package }}
       run: |
         robocopy build pdb *.pdb /MOVE
         if ($lastexitcode -lt 8) {
@@ -274,10 +276,11 @@ jobs:
       run: |
         job_url=$(gh run --repo ${{ github.repository }} view ${{ github.run_id }} --json jobs --jq '.jobs[] | select(.name == "windows-${{ inputs.msvc }}") | .url')
         printf "Ref ${{ github.ref }}\nJob ${job_url}\nCommit ${{ github.sha }}\n" > install/CI-ID.txt
-        cp install/CI-ID.txt pdb/CI-ID.txt
-        cp install/CI-ID.txt SymStore/CI-ID.txt
+        if [ -d pdb ]; then cp install/CI-ID.txt pdb/CI-ID.txt; fi
+        if [ -d SymStore ]; then cp install/CI-ID.txt SymStore/CI-ID.txt; fi
 
     - name: Store OpenMW archived pdb files
+      if: ${{ inputs.package }}
       uses: actions/upload-artifact@v4
       with:
         name: openmw-windows-${{ inputs.msvc }}-pdb-${{ github.sha }}
@@ -290,6 +293,7 @@ jobs:
         path: ${{ github.workspace }}/install/*
 
     - name: Store symbol server artifacts
+      if: ${{ inputs.package }}
       uses: actions/upload-artifact@v4
       with:
         name: openmw-windows-${{ inputs.msvc }}-sym-store-${{ github.sha }}
