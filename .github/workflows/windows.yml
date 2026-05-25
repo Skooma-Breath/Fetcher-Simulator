@@ -40,6 +40,8 @@ jobs:
       run: choco install nsis
 
     - uses: actions/checkout@v4
+      with:
+        submodules: recursive
 
     - name: Create directories for dependencies
       run: |
