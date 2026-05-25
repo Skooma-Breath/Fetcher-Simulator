@@ -245,7 +245,6 @@ jobs:
         Move-Item ${{ github.workspace }}\build\SymStore ${{ github.workspace }}
 
     - name: Move pdb files
-      if: ${{ inputs.package }}
       run: |
         robocopy build pdb *.pdb /MOVE
         if ($lastexitcode -lt 8) {
@@ -266,6 +265,7 @@ jobs:
       if: ${{ ! inputs.package }}
       shell: bash
       run: |
+        find install -name '*.pdb' -delete
         rm -rf install/bin
         rm -rf install/_deps
 
