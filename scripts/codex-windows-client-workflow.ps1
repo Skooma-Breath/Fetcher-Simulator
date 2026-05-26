@@ -10,6 +10,9 @@ param(
     [bool]$Release = $false,
     [string]$ReleaseTag = "",
     [string]$ReleaseName = "",
+    [string]$ModBundleUrl = "",
+    [string]$ModBundleReleaseTag = "",
+    [string]$ModBundleAsset = "openmw-client-mods.zip",
     [string]$RunLabel = "codex",
     [string]$OutDir = "remote-workflow-logs"
 )
@@ -88,6 +91,15 @@ if ($ReleaseTag) {
 }
 if ($ReleaseName) {
     $workflowRunArgs += @("-f", "release-name=$ReleaseName")
+}
+if ($ModBundleUrl) {
+    $workflowRunArgs += @("-f", "mod-bundle-url=$ModBundleUrl")
+}
+if ($ModBundleReleaseTag) {
+    $workflowRunArgs += @("-f", "mod-bundle-release-tag=$ModBundleReleaseTag")
+}
+if ($ModBundleAsset -ne "openmw-client-mods.zip") {
+    $workflowRunArgs += @("-f", "mod-bundle-asset=$ModBundleAsset")
 }
 Invoke-GhChecked $workflowRunArgs
 

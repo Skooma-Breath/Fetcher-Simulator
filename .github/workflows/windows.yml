@@ -30,6 +30,15 @@ on:
       release-name:
         default: ""
         type: string
+      mod-bundle-url:
+        default: ""
+        type: string
+      mod-bundle-release-tag:
+        default: ""
+        type: string
+      mod-bundle-asset:
+        default: "openmw-client-mods.zip"
+        type: string
 
 jobs:
   Windows:
@@ -274,6 +283,19 @@ jobs:
         find install -name '*.pdb' -delete
         rm -rf install/bin
         rm -rf install/_deps
+
+    - name: Package bundled client mods
+      if: ${{ inputs.mod-bundle-url != '' || inputs.mod-bundle-release-tag != '' }}
+      shell: pwsh
+      env:
+        GH_TOKEN: ${{ github.token }}
+      run: |
+        ${{ github.workspace }}\CI\Package-WindowsClientMods.ps1 `
+          -InstallDir "${{ github.workspace }}\install" `
+          -ModBundleUrl "${{ inputs.mod-bundle-url }}" `
+          -ModBundleReleaseTag "${{ inputs.mod-bundle-release-tag }}" `
+          -ModBundleAsset "${{ inputs.mod-bundle-asset }}" `
+          -Repository "${{ github.repository }}"
 
     - name: Generate CI-ID.txt
       shell: bash
