@@ -83,12 +83,19 @@ elseif ($ModBundleReleaseTag) {
     if (-not $Repository) {
         throw "Repository is required when ModBundleReleaseTag is set."
     }
-    if (-not (Get-Command gh -ErrorAction SilentlyContinue)) {
-        throw "GitHub CLI 'gh' is required to download mod bundle release assets."
-    }
+    $directUrl = "https://github.com/$Repository/releases/download/$ModBundleReleaseTag/$ModBundleAsset"
     Write-Output "Downloading mod bundle $ModBundleAsset from release $ModBundleReleaseTag..."
-    Invoke-Checked -Description "gh release download" -Command {
-        gh release download $ModBundleReleaseTag --repo $Repository --pattern $ModBundleAsset --dir $workDir --clobber
+    try {
+        Invoke-WebRequest -Uri $directUrl -OutFile $bundlePath
+    }
+    catch {
+        Write-Warning "Direct release asset download failed: $($_.Exception.Message)"
+        if (-not (Get-Command gh -ErrorAction SilentlyContinue)) {
+            throw "GitHub CLI 'gh' is required to download mod bundle release assets when direct download fails."
+        }
+        Invoke-Checked -Description "gh release download" -Command {
+            gh release download $ModBundleReleaseTag --repo $Repository --pattern $ModBundleAsset --dir $workDir --clobber
+        }
     }
 }
 
