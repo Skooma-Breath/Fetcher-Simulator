@@ -220,7 +220,10 @@ $settingsLines = @(
     "object paging active grid = true",
     "",
     "[Fog]",
-    "use distant fog = false"
+    "use distant fog = false",
+    "",
+    "[Video]",
+    "antialiasing = 16"
 )
 $settingsCfg = Join-Path $installPath "settings.cfg"
 Set-Content -LiteralPath $settingsCfg -Encoding ASCII -Value $settingsLines
