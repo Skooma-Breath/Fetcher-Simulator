@@ -54,6 +54,23 @@ bool Wizard::ExistingInstallationPage::validatePage()
     // Or failed to be detected due to the target being a symlink
 
     QString path(field(QLatin1String("installation.path")).toString());
+    if (path.isEmpty() && installationsList->currentItem() != nullptr)
+    {
+        path = installationsList->currentItem()->text();
+        mWizard->setField(QLatin1String("installation.path"), path);
+    }
+
+    if (path.isEmpty() || !mWizard->mInstallations.contains(path))
+        return false;
+
+    if (mWizard->mInstallations[path].iniPath.isEmpty())
+    {
+        QDir dir(path);
+        dir.cdUp();
+        const QString iniPath = dir.filePath(QLatin1String("Morrowind.ini"));
+        if (QFile::exists(iniPath))
+            mWizard->mInstallations[path].iniPath = iniPath;
+    }
 
     if (!QFile::exists(mWizard->mInstallations[path].iniPath))
     {
