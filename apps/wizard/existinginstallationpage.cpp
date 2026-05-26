@@ -80,18 +80,33 @@ bool Wizard::ExistingInstallationPage::validatePage()
         msgBox.setStandardButtons(QMessageBox::Cancel);
         msgBox.setText(
             QObject::tr("<br><b>Could not find Morrowind.ini</b><br><br>"
-                        "The Wizard needs to update settings in this file.<br><br>"
-                        "Press \"Browse...\" to specify the location manually.<br>"));
+                        "The Wizard can continue using the selected Data Files directory, but settings "
+                        "import from Morrowind.ini will be skipped.<br><br>"
+                        "Press \"Browse...\" to specify the location manually, or continue without importing.<br>"));
 
         QAbstractButton* browseButton2 = msgBox.addButton(QObject::tr("B&rowse..."), QMessageBox::ActionRole);
+        QAbstractButton* continueButton
+            = msgBox.addButton(QObject::tr("&Continue without importing"), QMessageBox::AcceptRole);
 
         msgBox.exec();
 
         QString iniFile;
         if (msgBox.clickedButton() == browseButton2)
         {
-            iniFile = QFileDialog::getOpenFileName(this, QObject::tr("Select configuration file"), QDir::currentPath(),
-                QString(tr("Morrowind configuration file (*.ini)")));
+            QDir dir(path);
+            dir.cdUp();
+
+            iniFile = QFileDialog::getOpenFileName(this, QObject::tr("Select Morrowind.ini"),
+                dir.exists() ? dir.absolutePath() : QDir::currentPath(),
+                QString(tr("Morrowind.ini (Morrowind.ini);;INI files (*.ini *.INI);;All files (*)")), nullptr,
+                QFileDialog::DontResolveSymlinks);
+        }
+        else if (msgBox.clickedButton() == continueButton)
+        {
+            mWizard->setField(QLatin1String("installation.import-settings"), false);
+            mWizard->setField(QLatin1String("installation.import-addons"), false);
+            mWizard->setField(QLatin1String("installation.import-fonts"), false);
+            return true;
         }
 
         if (iniFile.isEmpty())
@@ -101,6 +116,17 @@ bool Wizard::ExistingInstallationPage::validatePage()
 
         // A proper Morrowind.ini was selected, set it
         QFileInfo info(iniFile);
+        if (info.fileName().compare(QLatin1String("Morrowind.ini"), Qt::CaseInsensitive) != 0)
+        {
+            QMessageBox msgBox2;
+            msgBox2.setWindowTitle(tr("Invalid configuration file"));
+            msgBox2.setIcon(QMessageBox::Warning);
+            msgBox2.setStandardButtons(QMessageBox::Ok);
+            msgBox2.setText(QObject::tr("Please select Morrowind.ini."));
+            msgBox2.exec();
+            return false;
+        }
+
         mWizard->mInstallations[path].iniPath = info.absoluteFilePath();
     }
 

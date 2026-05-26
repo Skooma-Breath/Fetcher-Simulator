@@ -3,6 +3,7 @@
 #include <QDateTime>
 #include <QDebug>
 #include <QDir>
+#include <QFile>
 #include <QMessageBox>
 #include <QProcess>
 
@@ -195,6 +196,12 @@ void Wizard::MainWizard::runSettingsImporter()
     writeSettings();
 
     QString path(field(QLatin1String("installation.path")).toString());
+    if (field(QLatin1String("installation.retailDisc")).toBool() == false
+        && (!mInstallations.contains(path) || !QFile::exists(mInstallations[path].iniPath)))
+    {
+        qDebug() << "Skipping Morrowind.ini import because no configuration file is available";
+        return;
+    }
 
     QFile file(Files::getUserConfigPathQString(mCfgMgr));
 
