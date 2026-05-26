@@ -14,6 +14,9 @@ set(BUILTIN_DATA_FILES
     textures/menu_directconnect.dds
     textures/menu_directconnect_over.dds
     textures/menu_directconnect_pressed.dds
+    textures/menu_mainmenu.dds
+    textures/menu_mainmenu_over.dds
+    textures/menu_mainmenu_pressed.dds
     textures/menu_serverbrowser.dds
     textures/menu_serverbrowser_over.dds
     textures/menu_serverbrowser_pressed.dds
