@@ -70,7 +70,9 @@ Wizard::MainWizard::MainWizard(Files::ConfigurationManager&& cfgMgr, QWidget* pa
 
     for (const std::filesystem::path& installationPath : mCfgMgr.getInstallPaths())
     {
-        addInstallation(Files::pathToQString(installationPath / "Data Files"));
+        const QString dataFilesPath = Files::pathToQString(installationPath / "Data Files");
+        if (findFiles(QLatin1String("Morrowind"), dataFilesPath))
+            addInstallation(dataFilesPath);
     }
 }
 
@@ -351,9 +353,24 @@ void Wizard::MainWizard::writeSettings()
     // Write the installation path so that openmw can find them
     QString path(field(QLatin1String("installation.path")).toString());
 
-    // Make sure the installation path is the last data= entry
-    mGameSettings.removeDataDir(path);
-    mGameSettings.addDataDir({ path });
+    QList<Config::SettingValue> dataDirs = mGameSettings.getDataDirs();
+    mGameSettings.remove(QLatin1String("data"));
+
+    const QString canonicalPath = QFileInfo(path).canonicalFilePath();
+    for (const Config::SettingValue& dataDir : dataDirs)
+    {
+        if (!QDir(dataDir.value).exists())
+            continue;
+
+        if (!canonicalPath.isEmpty() && QFileInfo(dataDir.value).canonicalFilePath() == canonicalPath)
+            continue;
+
+        mGameSettings.setMultiValue(QLatin1String("data"), dataDir);
+    }
+
+    // Make sure the installation path is the last data= entry.
+    if (!path.isEmpty() && QDir(path).exists())
+        mGameSettings.setMultiValue(QLatin1String("data"), { path });
 
     QString userPath(Files::pathToQString(mCfgMgr.getUserConfigPath()));
     QDir dir(userPath);

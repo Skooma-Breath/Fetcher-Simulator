@@ -63,6 +63,20 @@ bool Wizard::ExistingInstallationPage::validatePage()
     if (path.isEmpty() || !mWizard->mInstallations.contains(path))
         return false;
 
+    if (!QDir(path).exists() || !mWizard->findFiles(QLatin1String("Morrowind"), path))
+    {
+        QMessageBox msgBox;
+        msgBox.setWindowTitle(tr("Invalid Morrowind installation"));
+        msgBox.setIcon(QMessageBox::Warning);
+        msgBox.setStandardButtons(QMessageBox::Ok);
+        msgBox.setText(
+            QObject::tr("<br><b>The selected Data Files directory is not usable.</b><br><br>"
+                        "Press \"Browse...\" and select Morrowind.esm inside the Data Files directory for "
+                        "the Morrowind installation on this computer.<br>"));
+        msgBox.exec();
+        return false;
+    }
+
     if (mWizard->mInstallations[path].iniPath.isEmpty())
     {
         QDir dir(path);

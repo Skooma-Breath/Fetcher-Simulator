@@ -45,23 +45,23 @@ namespace Files
             if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, subKey, 0, flags, &key.mKey) == ERROR_SUCCESS)
             {
                 // Key existed, let's try to read the install dir
-                std::wstring buffer;
-                buffer.reserve(MAX_PATH);
-                DWORD len = static_cast<DWORD>(MAX_PATH * sizeof(wchar_t));
+                std::wstring buffer(MAX_PATH, L'\0');
+                DWORD len = static_cast<DWORD>(buffer.size() * sizeof(wchar_t));
 
                 auto result = RegQueryValueExW(
                     key.mKey, valueName, nullptr, nullptr, reinterpret_cast<LPBYTE>(buffer.data()), &len);
                 if (result == ERROR_MORE_DATA)
                 {
-                    buffer.reserve(len / sizeof(wchar_t));
+                    buffer.resize(len / sizeof(wchar_t));
                     result = RegQueryValueExW(
                         key.mKey, valueName, nullptr, nullptr, reinterpret_cast<LPBYTE>(buffer.data()), &len);
                 }
-                if (result == ERROR_SUCCESS)
+                if (result == ERROR_SUCCESS && len % sizeof(wchar_t) == 0)
                 {
-                    // This should always be true. Note that we don't need to care above because of the trailing \0
-                    if (len % sizeof(wchar_t) == 0)
-                        return std::filesystem::path(buffer.data(), buffer.data() + len / sizeof(wchar_t));
+                    buffer.resize(len / sizeof(wchar_t));
+                    while (!buffer.empty() && buffer.back() == L'\0')
+                        buffer.pop_back();
+                    return std::filesystem::path(buffer);
                 }
             }
             return {};
