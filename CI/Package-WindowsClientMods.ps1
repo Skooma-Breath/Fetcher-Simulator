@@ -42,6 +42,7 @@ function Copy-DirectoryContents {
 }
 
 $installPath = (Resolve-Path -LiteralPath $InstallDir).Path
+$repoRoot = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot "..")).Path
 $workDir = Join-Path $installPath "_client_mod_package"
 $extractDir = Join-Path $workDir "extract"
 $bundlePath = Join-Path $workDir $ModBundleAsset
@@ -108,13 +109,22 @@ if (Test-Path -LiteralPath $bundlePath) {
     }
 }
 
-$menuTextureSource = Join-Path $installPath "resources\vfs\textures"
+$menuTextureSources = @(
+    (Join-Path $installPath "resources\vfs\textures"),
+    (Join-Path $repoRoot "files\data\textures")
+)
 $menuTextureDest = Join-Path $installPath "Data Files\textures"
 New-Item -ItemType Directory -Force $menuTextureDest | Out-Null
 foreach ($texture in @("menu_mainmenu.dds", "menu_mainmenu_over.dds", "menu_mainmenu_pressed.dds")) {
-    $source = Join-Path $menuTextureSource $texture
-    if (Test-Path -LiteralPath $source) {
+    $source = $menuTextureSources |
+        ForEach-Object { Join-Path $_ $texture } |
+        Where-Object { Test-Path -LiteralPath $_ } |
+        Select-Object -First 1
+    if ($source) {
         Copy-Item -LiteralPath $source -Destination (Join-Path $menuTextureDest $texture) -Force
+    }
+    else {
+        Write-Warning "Could not find $texture in any known OpenMW texture source."
     }
 }
 

@@ -276,6 +276,10 @@ jobs:
         cpack --config "${{ github.workspace }}/build/CPackConfig.cmake" -B "${{ github.workspace }}/install"
         rm -r -Force "${{ github.workspace }}/install/_CPack_Packages"
 
+    - name: Install OpenMW portable package tree
+      if: ${{ inputs.package }}
+      run: cmake --install ${{ github.workspace }}/build --prefix ${{ github.workspace }}/portable-install
+
     - name: Remove extra pdb files
       if: ${{ ! inputs.package }}
       shell: bash
@@ -290,8 +294,12 @@ jobs:
       env:
         GH_TOKEN: ${{ github.token }}
       run: |
+        $clientInstallDir = "${{ github.workspace }}\install"
+        if ("${{ inputs.package }}" -eq "true") {
+          $clientInstallDir = "${{ github.workspace }}\portable-install"
+        }
         ${{ github.workspace }}\CI\Package-WindowsClientMods.ps1 `
-          -InstallDir "${{ github.workspace }}\install" `
+          -InstallDir $clientInstallDir `
           -ModBundleUrl "${{ inputs.mod-bundle-url }}" `
           -ModBundleReleaseTag "${{ inputs.mod-bundle-release-tag }}" `
           -ModBundleAsset "${{ inputs.mod-bundle-asset }}" `
@@ -304,6 +312,7 @@ jobs:
       run: |
         job_url=$(gh run --repo ${{ github.repository }} view ${{ github.run_id }} --json jobs --jq '.jobs[] | select(.name == "windows-${{ inputs.msvc }}") | .url')
         printf "Ref ${{ github.ref }}\nJob ${job_url}\nCommit ${{ github.sha }}\n" > install/CI-ID.txt
+        if [ -d portable-install ]; then cp install/CI-ID.txt portable-install/CI-ID.txt; fi
         if [ -d pdb ]; then cp install/CI-ID.txt pdb/CI-ID.txt; fi
         if [ -d SymStore ]; then cp install/CI-ID.txt SymStore/CI-ID.txt; fi
 
@@ -314,11 +323,26 @@ jobs:
         name: openmw-windows-${{ inputs.msvc }}-pdb-${{ github.sha }}
         path: ${{ github.workspace }}/pdb/*
 
+    - name: Store OpenMW installer artifacts
+      if: ${{ inputs.package }}
+      uses: actions/upload-artifact@v4
+      with:
+        name: openmw-windows-${{ inputs.msvc }}-installer-${{ github.sha }}
+        path: ${{ github.workspace }}/install/*
+
     - name: Store OpenMW build artifacts
+      if: ${{ ! inputs.package }}
       uses: actions/upload-artifact@v4
       with:
         name: openmw-windows-${{ inputs.msvc }}-${{ github.sha }}
         path: ${{ github.workspace }}/install/*
+
+    - name: Store OpenMW portable build artifacts
+      if: ${{ inputs.package }}
+      uses: actions/upload-artifact@v4
+      with:
+        name: openmw-windows-${{ inputs.msvc }}-${{ github.sha }}
+        path: ${{ github.workspace }}/portable-install/*
 
     - name: Store symbol server artifacts
       if: ${{ inputs.package }}
@@ -394,12 +418,13 @@ jobs:
       run: |
         $assets = "${{ github.workspace }}\release-assets"
         New-Item -ItemType Directory -Force $assets | Out-Null
+        $portableRoot = "${{ github.workspace }}\install"
         if ("${{ inputs.package }}" -eq "true") {
           Copy-Item -Path "${{ github.workspace }}\install\*.exe" -Destination $assets
-        } else {
-          $zip = Join-Path $assets "openmw-windows-${{ inputs.msvc }}-${{ github.sha }}.zip"
-          Compress-Archive -Path "${{ github.workspace }}\install\*" -DestinationPath $zip -CompressionLevel Optimal -Force
+          $portableRoot = "${{ github.workspace }}\portable-install"
         }
+        $zip = Join-Path $assets "openmw-windows-${{ inputs.msvc }}-${{ github.sha }}.zip"
+        Compress-Archive -Path "$portableRoot\*" -DestinationPath $zip -CompressionLevel Optimal -Force
 
     - name: Create OpenMW client prerelease
       if: ${{ inputs.release }}
