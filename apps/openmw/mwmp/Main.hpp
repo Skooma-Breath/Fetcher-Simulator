@@ -130,6 +130,7 @@ namespace mwmp
         void onDisconnected();
         void tryAutoSelectCharacter();
         void tryAutoEnterWorld();
+        void applySelectedCharacterSpawn(const std::string& spawnCell, const char* context);
 
         static Main* sInstance;
 

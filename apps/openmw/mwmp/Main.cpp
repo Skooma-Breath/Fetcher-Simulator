@@ -485,6 +485,7 @@ bool Main::enterSelectedCharacterWorld(bool allowNewCharacterUi)
     {
         Log(Debug::Info) << "[MP] New character - spawning in: " << spawnCell;
         MWBase::Environment::get().getStateManager()->newGame(true);
+        applySelectedCharacterSpawn(spawnCell, "new character");
         windowManager->updatePlayer();
         if (!worldName.empty())
             MWBase::Environment::get().getMechanicsManager()->setPlayerName(worldName);
@@ -540,6 +541,17 @@ bool Main::enterSelectedCharacterWorld(bool allowNewCharacterUi)
         Log(Debug::Warning) << "[MP] Chargen restore error: " << e.what();
     }
 
+    applySelectedCharacterSpawn(spawnCell, "returning player");
+
+    getPlayerSync().applyRestoredStatsToPlayer();
+    Log(Debug::Info) << "[MP] Returning player restore complete - sending full sync";
+    getPlayerSync().forceFullSync(false);
+    return true;
+}
+
+// ---------------------------------------------------------------------------
+void Main::applySelectedCharacterSpawn(const std::string& spawnCell, const char* context)
+{
     const std::string targetCell = spawnCell.empty() ? "toddtest" : spawnCell;
     const float sx = getSpawnX();
     const float sy = getSpawnY();
@@ -586,10 +598,9 @@ bool Main::enterSelectedCharacterWorld(bool allowNewCharacterUi)
             world->changeToInteriorCell(targetCell, dest, true);
     }
 
-    getPlayerSync().applyRestoredStatsToPlayer();
-    Log(Debug::Info) << "[MP] Returning player restore complete - sending full sync";
-    getPlayerSync().forceFullSync(false);
-    return true;
+    Log(Debug::Info) << "[MP] Applied " << context << " spawn: cell=" << targetCell
+                     << " pos=(" << dest.pos[0] << "," << dest.pos[1] << "," << dest.pos[2] << ")"
+                     << " rot=(" << dest.rot[0] << "," << dest.rot[1] << "," << dest.rot[2] << ")";
 }
 
 // ---------------------------------------------------------------------------
@@ -768,6 +779,8 @@ void Main::registerProtocolHandlers()
                              << (mIsNewCharacter ? "yes" : "no")
                              << " charName=" << mCharacterName
                              << " cell=" << mSpawnCell
+                             << " pos=(" << mSpawnPos[0] << "," << mSpawnPos[1] << "," << mSpawnPos[2] << ")"
+                             << " rot=(" << mSpawnRot[0] << "," << mSpawnRot[1] << "," << mSpawnRot[2] << ")"
                              << " race=" << mRestoredRace
                              << " class=" << mRestoredClassName;
 
