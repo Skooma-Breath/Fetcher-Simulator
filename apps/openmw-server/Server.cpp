@@ -4210,13 +4210,23 @@ void MPServer::handlePlayerCharGen(ConnectedClient& c, const uint8_t* data, size
                 c.player.birthSign,
                 encodeClassData(c.player.charClass.mData));
 
-            mPlayerDb->markChargenComplete(c.dbCharacterId);
-            c.dbChargenCompletePending = false;
-            c.player.charGenComplete = true;
-            Log(Debug::Info) << "[Server] Chargen complete for " << c.name
-                             << " race=" << c.player.race
-                             << " class=" << c.player.charClass.mId.toString()
-                             << " birthSign=" << c.player.birthSign;
+            if (pkt.isComplete)
+            {
+                mPlayerDb->markChargenComplete(c.dbCharacterId);
+                c.dbChargenCompletePending = false;
+                c.player.charGenComplete = true;
+                Log(Debug::Info) << "[Server] Chargen complete for " << c.name
+                                 << " race=" << c.player.race
+                                 << " class=" << c.player.charClass.mId.toString()
+                                 << " birthSign=" << c.player.birthSign;
+            }
+            else
+            {
+                Log(Debug::Info) << "[Server] Chargen update for " << c.name
+                                 << " race=" << c.player.race
+                                 << " class=" << c.player.charClass.mId.toString()
+                                 << " birthSign=" << c.player.birthSign;
+            }
         }
         catch (const std::exception& e)
         {
@@ -4225,39 +4235,6 @@ void MPServer::handlePlayerCharGen(ConnectedClient& c, const uint8_t* data, size
     }
 }
 
-// ---------------------------------------------------------------------------
-void MPServer::markChargenCompleteIfPending(ConnectedClient& c, const char* reason)
-{
-    if (!c.dbChargenCompletePending || !mPlayerDb || c.dbCharacterId == 0)
-        return;
-
-    try
-    {
-        if (!c.player.race.empty())
-        {
-            mPlayerDb->saveChargenData(c.dbCharacterId,
-                c.player.race,
-                c.player.headMesh,
-                c.player.hairMesh,
-                c.player.isMale,
-                c.player.charClass.mId.serializeText(),
-                c.player.charClass.mName,
-                c.player.birthSign,
-                encodeClassData(c.player.charClass.mData));
-        }
-        mPlayerDb->markChargenComplete(c.dbCharacterId);
-        c.dbChargenCompletePending = false;
-        c.player.charGenComplete = true;
-        Log(Debug::Info) << "[Server] Auto-marked chargen complete for " << c.name
-                         << " after " << reason;
-    }
-    catch (const std::exception& e)
-    {
-        Log(Debug::Warning) << "[PlayerDB] auto chargen complete error: " << e.what();
-    }
-}
-
-// ---------------------------------------------------------------------------
 void MPServer::handlePlayerBaseInfo(ConnectedClient& c, const uint8_t* data, size_t size)
 {
     PacketPlayerBaseInfo pkt;
@@ -4270,7 +4247,6 @@ void MPServer::handlePlayerBaseInfo(ConnectedClient& c, const uint8_t* data, siz
     // This also keeps c.player.name in sync so the late-join catch-up loop
     // (which re-encodes from existingClient.player) sends the right name too.
     c.player.name = c.name;
-    markChargenCompleteIfPending(c, "base info");
 
     // Re-encode with the corrected name so all receivers get the nickname.
     broadcastToAll(pkt.encode(), c.conn);
@@ -4322,7 +4298,6 @@ void MPServer::handlePlayerCellChange(ConnectedClient& c, const uint8_t* data, s
 
     syncLuaSnapshot();
     mLua.onPlayerCellChange(c.guid, c.name, newCell, oldCell);
-    markChargenCompleteIfPending(c, "cell change");
 
     if (!oldCell.empty() && oldCell != newCell)
         refreshActorAuthorityForCell(oldCell);

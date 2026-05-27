@@ -289,7 +289,6 @@ private:
 
     // ── Validation ────────────────────────────────────────────────────────
     bool validateMovement(const ConnectedClient& c, const BasePlayer& proposed) const;
-    void markChargenCompleteIfPending(ConnectedClient& c, const char* reason);
 
     // ── Packet builders ───────────────────────────────────────────────────
     std::vector<uint8_t> buildWorldTimePacket()    const;

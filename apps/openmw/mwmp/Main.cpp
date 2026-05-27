@@ -247,6 +247,7 @@ void Main::frame(float dt)
     mWorldStateSync->update(dt);
 
     mChatWindow->update(dt);
+    pollChargenAppearance(dt);
 
     // ── Chargen completion watcher ──────────────────────────────────────────
     // Fires once when the player is in a cell after chargen dialogs are shown.
@@ -265,54 +266,7 @@ void Main::frame(float dt)
 
                 Log(Debug::Info) << "[MP] Chargen complete — notifying server";
 
-                // Read the player's chosen race/class/birthsign from the world
-                // so the server can persist them for future logins.
-                try
-                {
-                    MWBase::World* world = MWBase::Environment::get().getWorld();
-                    MWWorld::Ptr playerPtr = world->getPlayerPtr();
-                    const ESM::NPC* npc = playerPtr.get<ESM::NPC>()->mBase;
-                    const MWWorld::Player& player = world->getPlayer();
-                    const ESM::RefId& birthSign = player.getBirthSign();
-
-                    BasePlayer& local = mPlayerSync->localPlayer();
-                    // Use serializeText() so index-based RefIds (e.g. built-in
-                    // classes like "0xb") round-trip correctly through DB and wire.
-                    local.race     = npc->mRace.serializeText();
-                    local.headMesh = npc->mHead.serializeText();
-                    local.hairMesh = npc->mHair.serializeText();
-                    local.isMale   = npc->isMale();
-
-                    // Class
-                    const ESM::Class* cls = world->getStore()
-                        .get<ESM::Class>().search(npc->mClass);
-                    if (cls)
-                    {
-                        local.charClass     = *cls;
-                        local.charClass.mId = npc->mClass;
-                    }
-                    local.birthSign = birthSign.serializeText();
-
-                    Log(Debug::Info) << "[MP] Chargen data: race=" << local.race
-                                     << " class=" << local.charClass.mId.toString()
-                                     << " birthSign=" << local.birthSign;
-                }
-                catch (const std::exception& e)
-                {
-                    Log(Debug::Warning) << "[MP] Could not read chargen data: " << e.what();
-                }
-
-                // Tell server: chargen complete + send all data
-                PacketPlayerCharGen pkt;
-                pkt.setPlayer(&mPlayerSync->localPlayer());
-                mClient->sendReliable(pkt.encode());
-
-                // New characters need the same post-appearance full sync that
-                // returning players send after their race/head/hair are live in
-                // the player NPC record. Without this, already connected peers
-                // never receive PlayerBaseInfo for the freshly created character
-                // and won't spawn them until a later relog.
-                mPlayerSync->forceFullSync();
+                sendChargenUpdate(true, "complete", true);
 
             }
 
@@ -323,6 +277,120 @@ void Main::frame(float dt)
             mCharGenWatching = false;
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+bool Main::captureCurrentChargenData(const char* context)
+{
+    try
+    {
+        MWBase::World* world = MWBase::Environment::get().getWorld();
+        if (!world)
+            return false;
+
+        MWWorld::Ptr playerPtr = world->getPlayerPtr();
+        if (playerPtr.isEmpty())
+            return false;
+
+        const auto* npcRef = playerPtr.get<ESM::NPC>();
+        if (!npcRef || !npcRef->mBase)
+            return false;
+
+        const ESM::NPC* npc = npcRef->mBase;
+        BasePlayer& local = mPlayerSync->localPlayer();
+
+        local.race = npc->mRace.serializeText();
+        local.headMesh = npc->mHead.serializeText();
+        local.hairMesh = npc->mHair.serializeText();
+        local.isMale = npc->isMale();
+
+        const ESM::Class* cls = world->getStore().get<ESM::Class>().search(npc->mClass);
+        if (cls)
+        {
+            local.charClass = *cls;
+            local.charClass.mId = npc->mClass;
+        }
+        else
+            local.charClass.mId = npc->mClass;
+
+        local.birthSign = world->getPlayer().getBirthSign().serializeText();
+        return true;
+    }
+    catch (const std::exception& e)
+    {
+        Log(Debug::Warning) << "[MP] Could not read chargen data for " << context << ": " << e.what();
+        return false;
+    }
+}
+
+// ---------------------------------------------------------------------------
+std::string Main::currentChargenDataKey()
+{
+    const BasePlayer& local = mPlayerSync->localPlayer();
+    std::ostringstream key;
+    key << local.race << '\n'
+        << local.headMesh << '\n'
+        << local.hairMesh << '\n'
+        << local.isMale << '\n'
+        << local.charClass.mId.serializeText() << '\n'
+        << local.charClass.mName << '\n'
+        << local.birthSign;
+    return key.str();
+}
+
+// ---------------------------------------------------------------------------
+void Main::sendChargenUpdate(bool complete, const char* reason, bool includeInventoryAndEquipment)
+{
+    if (!mClient || !mClient->isConnected())
+        return;
+
+    if (!captureCurrentChargenData(reason))
+        return;
+
+    PacketPlayerCharGen pkt;
+    pkt.setPlayer(&mPlayerSync->localPlayer());
+    pkt.isComplete = complete;
+    mClient->sendReliable(pkt.encode());
+
+    const BasePlayer& local = mPlayerSync->localPlayer();
+    Log(Debug::Info) << "[MP] Chargen update sent: reason=" << reason
+                     << " complete=" << complete
+                     << " race=" << local.race
+                     << " head=" << local.headMesh
+                     << " hair=" << local.hairMesh
+                     << " class=" << local.charClass.mId.toString()
+                     << " birthSign=" << local.birthSign;
+
+    mLastCharGenDataKey = currentChargenDataKey();
+    mPlayerSync->forceFullSync(includeInventoryAndEquipment);
+}
+
+// ---------------------------------------------------------------------------
+void Main::pollChargenAppearance(float dt)
+{
+    if (!mIsNewCharacter || !mClient || !mClient->isConnected())
+    {
+        mCharGenAppearanceSyncTimer = 0.f;
+        return;
+    }
+
+    mCharGenAppearanceSyncTimer -= dt;
+    if (mCharGenAppearanceSyncTimer > 0.f)
+        return;
+    mCharGenAppearanceSyncTimer = 0.25f;
+
+    if (!captureCurrentChargenData("live"))
+        return;
+
+    const std::string key = currentChargenDataKey();
+    if (mLastCharGenDataKey.empty())
+    {
+        mLastCharGenDataKey = key;
+        return;
+    }
+
+    if (key != mLastCharGenDataKey)
+        sendChargenUpdate(false, "live", false);
 }
 
 // ---------------------------------------------------------------------------
@@ -484,6 +552,8 @@ bool Main::enterSelectedCharacterWorld(bool allowNewCharacterUi)
     if (isNew)
     {
         Log(Debug::Info) << "[MP] New character - spawning in: " << spawnCell;
+        mLastCharGenDataKey.clear();
+        mCharGenAppearanceSyncTimer = 0.f;
         MWBase::Environment::get().getStateManager()->newGame(true);
         applySelectedCharacterSpawn(spawnCell, "new character");
         windowManager->updatePlayer();

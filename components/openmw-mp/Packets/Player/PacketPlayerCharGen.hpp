@@ -11,13 +11,14 @@ namespace mwmp
     // has completed character creation (Review Dialog "Done" clicked and
     // the Morrowind script set sCharGenState = -1).
     //
-    // Zero payload: the server only needs to know it happened so it can
-    // mark the DB record is_new=0 and optionally trigger a spawn teleport.
+    // Also used while chargen is still open to persist/broadcast live
+    // race/head/hair/class updates without clearing the DB is_new flag yet.
     // -----------------------------------------------------------------------
     class PacketPlayerCharGen : public PlayerPacket
     {
     public:
         PacketPlayerCharGen() : PlayerPacket(PacketType::PlayerCharGen) {}
+        bool isComplete = true;
 
     protected:
         void pack(WriteStream& ws) override
@@ -37,6 +38,7 @@ namespace mwmp
                 for (auto v : row) ws.write(v);
             ws.write(mPlayer->charClass.mData.mIsPlayable);
             ws.write(mPlayer->charClass.mData.mServices);
+            ws.write(isComplete);
         }
 
         void unpack(ReadStream& rs) override
@@ -55,6 +57,9 @@ namespace mwmp
                 for (auto& v : row) rs.read(v);
             rs.read(mPlayer->charClass.mData.mIsPlayable);
             rs.read(mPlayer->charClass.mData.mServices);
+            isComplete = true;
+            if (!rs.eof())
+                rs.read(isComplete);
         }
     };
 

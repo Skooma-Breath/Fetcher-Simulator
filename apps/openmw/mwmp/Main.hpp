@@ -131,6 +131,10 @@ namespace mwmp
         void tryAutoSelectCharacter();
         void tryAutoEnterWorld();
         void applySelectedCharacterSpawn(const std::string& spawnCell, const char* context);
+        bool captureCurrentChargenData(const char* context);
+        std::string currentChargenDataKey();
+        void sendChargenUpdate(bool complete, const char* reason, bool includeInventoryAndEquipment);
+        void pollChargenAppearance(float dt);
 
         static Main* sInstance;
 
@@ -158,6 +162,8 @@ namespace mwmp
         std::string mLocalPublicKey;               ///< base64 public key for current server
         std::vector<CharacterEntry> mCharacterList;
         bool        mCharGenWatching  = false;
+        float       mCharGenAppearanceSyncTimer = 0.f;
+        std::string mLastCharGenDataKey;
         std::string mSpawnCell;
         float       mSpawnPos[3] = {0.f, 0.f, 0.f};
         float       mSpawnRot[3] = {0.f, 0.f, 0.f};
