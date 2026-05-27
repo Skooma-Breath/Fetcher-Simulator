@@ -74,6 +74,14 @@ namespace mwmp
             return current + diff * alpha;
         }
 
+        float distanceSquared3(float ax, float ay, float az, const Position& position)
+        {
+            const float dx = position.pos[0] - ax;
+            const float dy = position.pos[1] - ay;
+            const float dz = position.pos[2] - az;
+            return dx * dx + dy * dy + dz * dz;
+        }
+
         void clearTransientLocomotion(AnimFlags& flags)
         {
             flags.animFwd = 0.f;
@@ -1102,6 +1110,14 @@ namespace mwmp
                                 << " cellSeq=" << mLastCellChangeSequence;
             return;
         }
+        if (sequence != 0 && mLastPositionSequence != 0 && sequence < mLastPositionSequence)
+        {
+            Log(Debug::Verbose) << "[MP] RemotePlayer " << mName
+                                << ": ignored out-of-order position"
+                                << " posSeq=" << sequence
+                                << " last=" << mLastPositionSequence;
+            return;
+        }
         if (sequence != 0)
             mLastPositionSequence = std::max(mLastPositionSequence, sequence);
 
@@ -1122,12 +1138,8 @@ namespace mwmp
         mState.position = state.position;
         mState.velocity = state.velocity;
 
-        // --- Explicit Teleport Snap ---
-        // If the sender explicitly flagged this movement as a teleport (coc, scripts, doors),
-        // we hard-snap all interpolation state immediately. There is no need for 
-        // distance heuristics or smoothing in this path.
-        if (state.position.isTeleporting)
-        {
+        auto hardSnapPosition = [&](const char* reason) {
+            mState.velocity = {};
             mInterp.cx = state.position.pos[0];
             mInterp.cy = state.position.pos[1];
             mInterp.cz = state.position.pos[2];
@@ -1143,9 +1155,24 @@ namespace mwmp
             mInterp.lastRecvX = mInterp.cx;
             mInterp.lastRecvY = mInterp.cy;
             mInterp.lastRecvZ = mInterp.cz;
+            mInterp.targetVz = 0.f;
             mInterp.hasTarget = true;
             mInterp.hasSnapped = true;
-            Log(Debug::Verbose) << "[MP] RemotePlayer " << mName << " teleported: hard-snapping.";
+            mInterpPlanarSpeed = 0.f;
+            mJumpArcPrimed = false;
+            Log(Debug::Verbose) << "[MP] RemotePlayer " << mName << " teleported: hard-snapping (" << reason << ").";
+        };
+
+        // If the sender explicitly flagged this movement as a teleport (coc, scripts, doors),
+        // hard-snap all interpolation state immediately. The distance fallback covers
+        // stale/missing teleport flags after server-side Lua teleports.
+        constexpr float kTeleportFallbackDistance = static_cast<float>(Constants::CellSizeInUnits) * 0.25f;
+        const bool largePositionJump = mInterp.hasSnapped
+            && distanceSquared3(mInterp.lastRecvX, mInterp.lastRecvY, mInterp.lastRecvZ, state.position)
+                > kTeleportFallbackDistance * kTeleportFallbackDistance;
+        if (state.position.isTeleporting || largePositionJump)
+        {
+            hardSnapPosition(state.position.isTeleporting ? "flag" : "large position jump");
             return;
         }
 

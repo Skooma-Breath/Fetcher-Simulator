@@ -65,6 +65,10 @@ struct ConnectedClient
     uint64_t            playerEquipmentRestoreGuardUntilMs = 0;
     uint64_t            lastPlayerInventoryRestoreCorrectionLogMs = 0;
     uint64_t            lastPlayerEquipmentRestoreCorrectionLogMs = 0;
+    bool                pendingScriptedTeleportAck = false;
+    Position            scriptedTeleportTarget;
+    uint64_t            scriptedTeleportGuardUntilMs = 0;
+    uint64_t            lastScriptedTeleportRejectLogMs = 0;
 
     // Ed25519 challenge-response state (valid between receiving PacketHandshake
     // with a publicKey and receiving PacketChallengeResponse)

@@ -901,6 +901,14 @@ namespace
             && std::abs(position.pos[2]) <= 0.001f;
     }
 
+    float positionDistanceSquared(const mwmp::Position& lhs, const mwmp::Position& rhs)
+    {
+        const float dx = lhs.pos[0] - rhs.pos[0];
+        const float dy = lhs.pos[1] - rhs.pos[1];
+        const float dz = lhs.pos[2] - rhs.pos[2];
+        return dx * dx + dy * dy + dz * dz;
+    }
+
     bool sameDeadVanillaActorState(const mwmp::BaseActor& a, const mwmp::BaseActor& b)
     {
         return a.refId == b.refId
@@ -1083,6 +1091,10 @@ bool MPServer::teleportPlayer(uint32_t guid, const std::string& cellId, const Po
     client->player.position = position;
     client->player.position.isTeleporting = true;
     client->player.velocity = {};
+    client->pendingScriptedTeleportAck = true;
+    client->scriptedTeleportTarget = client->player.position;
+    client->scriptedTeleportGuardUntilMs = currentServerTimeMs() + 3000;
+    client->lastScriptedTeleportRejectLogMs = 0;
     client->loadedActorCells.clear();
     client->loadedActorCellsSequence = 0;
 
@@ -4265,6 +4277,46 @@ void MPServer::handlePlayerPosition(ConnectedClient& c, const uint8_t* data, siz
     PacketPlayerPosition pkt;
     pkt.setPlayer(&proposed);
     if (!pkt.decode(data, size)) return;
+    bool forceReliableTeleportRelay = false;
+
+    if (c.pendingScriptedTeleportAck)
+    {
+        constexpr float kTeleportAckDistance = 512.f;
+        const uint64_t nowMs = currentServerTimeMs();
+        const float distanceSq = positionDistanceSquared(proposed.position, c.scriptedTeleportTarget);
+        const bool reachedTeleportTarget = distanceSq <= kTeleportAckDistance * kTeleportAckDistance;
+
+        if (reachedTeleportTarget)
+        {
+            c.pendingScriptedTeleportAck = false;
+            c.scriptedTeleportGuardUntilMs = 0;
+            proposed.position.isTeleporting = true;
+            proposed.velocity = {};
+            forceReliableTeleportRelay = true;
+            Log(Debug::Verbose) << "[Server] Accepted post-teleport position ack from " << c.name
+                                << " distance=" << std::sqrt(distanceSq);
+        }
+        else if (nowMs < c.scriptedTeleportGuardUntilMs)
+        {
+            if (c.lastScriptedTeleportRejectLogMs == 0 || nowMs - c.lastScriptedTeleportRejectLogMs >= 500)
+            {
+                c.lastScriptedTeleportRejectLogMs = nowMs;
+                Log(Debug::Info) << "[Server] Ignoring stale pre-teleport position from " << c.name
+                                 << " distance=" << std::sqrt(distanceSq);
+            }
+
+            PacketPlayerPosition correction;
+            correction.setPlayer(&c.player);
+            sendTo(c.conn, correction.encode());
+            return;
+        }
+        else
+        {
+            c.pendingScriptedTeleportAck = false;
+            c.scriptedTeleportGuardUntilMs = 0;
+            Log(Debug::Warning) << "[Server] Teleport ack guard expired for " << c.name;
+        }
+    }
 
     if (!validateMovement(c, proposed))
     {
@@ -4279,7 +4331,15 @@ void MPServer::handlePlayerPosition(ConnectedClient& c, const uint8_t* data, siz
     c.player.velocity = proposed.velocity;
 
     // Relay to all other clients (unreliable is fine — we use raw broadcast)
-    broadcastToAll(std::vector<uint8_t>(data, data + size), c.conn, /*reliable=*/false);
+    if (forceReliableTeleportRelay)
+    {
+        PacketPlayerPosition relay;
+        relay.setPlayer(&c.player);
+        broadcastToAll(relay.encode(pkt.getSequence()), c.conn, /*reliable=*/true);
+        c.player.position.isTeleporting = false;
+    }
+    else
+        broadcastToAll(std::vector<uint8_t>(data, data + size), c.conn, /*reliable=*/false);
 }
 
 // ---------------------------------------------------------------------------
