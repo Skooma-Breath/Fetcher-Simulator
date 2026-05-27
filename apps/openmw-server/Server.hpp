@@ -48,6 +48,7 @@ struct ConnectedClient
     BasePlayer          player;
     bool                handshakeComplete    = false; ///< auth passed, CharacterList sent
     bool                charSelectComplete   = false; ///< player chose a character, in-world
+    bool                dbChargenCompletePending = false; ///< clear DB is_new after first world sync
     int64_t             dbAccountId          = 0;   ///< PlayerDatabase accounts.id
     int64_t             dbCharacterId        = 0;   ///< PlayerDatabase characters.id, 0 if not set
     BasePlayer          restoredStatsSnapshot;
@@ -288,6 +289,7 @@ private:
 
     // ── Validation ────────────────────────────────────────────────────────
     bool validateMovement(const ConnectedClient& c, const BasePlayer& proposed) const;
+    void markChargenCompleteIfPending(ConnectedClient& c, const char* reason);
 
     // ── Packet builders ───────────────────────────────────────────────────
     std::vector<uint8_t> buildWorldTimePacket()    const;

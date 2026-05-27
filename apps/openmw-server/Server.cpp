@@ -31,6 +31,7 @@
 #include <variant>
 
 #include <components/debug/debuglog.hpp>
+#include <components/esm/refid.hpp>
 #include <components/misc/constants.hpp>
 #include <components/openmw-mp/Packets/BasePacket.hpp>
 #include <components/openmw-mp/Packets/System/PacketGameSettings.hpp>
@@ -3858,6 +3859,7 @@ void MPServer::handleCharacterSelect(ConnectedClient& c, const uint8_t* data, si
     applyDefaultSpawn(cdPkt);
     bool sendSavedInventory = false;
     bool sendSavedEquipment = false;
+    c.dbChargenCompletePending = false;
     c.hasRestoredStatsSnapshot = false;
     c.acceptedPlayerStatsThisSession = false;
     c.playerStatsRestoreGuardUntilMs = 0;
@@ -3907,6 +3909,7 @@ void MPServer::handleCharacterSelect(ConnectedClient& c, const uint8_t* data, si
                 const PlayerRecord rec = mPlayerDb->createCharacter(c.dbAccountId, sel.charName);
                 c.dbCharacterId      = rec.characterId;
                 cdPkt.isNewCharacter = true;
+                c.dbChargenCompletePending = true;
                 applyDefaultSpawn(cdPkt);
                 cdPkt.characterName  = sel.charName;
                 for (const auto& mark : mDefaultPlayerMarks)
@@ -3944,85 +3947,88 @@ void MPServer::handleCharacterSelect(ConnectedClient& c, const uint8_t* data, si
                     return;
                 }
                 c.dbCharacterId      = rec->characterId;
-                cdPkt.isNewCharacter = rec->isNew;
-                if (rec->isNew)
+                c.dbChargenCompletePending = rec->isNew;
+                cdPkt.isNewCharacter = false;
+                if (rec->cell.empty())
                 {
                     applyDefaultSpawn(cdPkt);
                 }
                 else
                 {
-                    cdPkt.spawnCell = rec->cell.empty() ? mDefaultSpawnCell : rec->cell;
-                    cdPkt.race      = rec->race;
-                    cdPkt.headMesh  = rec->headMesh;
-                    cdPkt.hairMesh  = rec->hairMesh;
-                    cdPkt.isMale    = rec->isMale;
-                    cdPkt.classId   = rec->classId;
-                    cdPkt.className = rec->className;
-                    cdPkt.birthSign = rec->birthSign;
-                    cdPkt.classData = rec->classData;
+                    cdPkt.spawnCell = rec->cell;
                     cdPkt.spawnX    = rec->posX;
                     cdPkt.spawnY    = rec->posY;
                     cdPkt.spawnZ    = rec->posZ;
                     cdPkt.spawnRotX = rec->rotX;
                     cdPkt.spawnRotY = rec->rotY;
                     cdPkt.spawnRotZ = rec->rotZ;
+                }
 
-                    if (rec->hasSavedInventory)
+                cdPkt.race      = rec->race;
+                cdPkt.headMesh  = rec->headMesh;
+                cdPkt.hairMesh  = rec->hairMesh;
+                cdPkt.isMale    = rec->isMale;
+                cdPkt.classId   = rec->classId;
+                cdPkt.className = rec->className;
+                cdPkt.birthSign = rec->birthSign;
+                cdPkt.classData = rec->classData;
+
+                if (rec->hasSavedInventory)
+                {
+                    c.player.inventoryChanges.action = BasePlayer::InventoryChanges::Action::Set;
+                    c.player.inventoryChanges.items = mPlayerDb->loadCharacterInventory(rec->characterId);
+                    c.restoredInventorySnapshot = c.player.inventoryChanges.items;
+                    c.hasRestoredInventorySnapshot = true;
+                    c.playerInventoryRestoreGuardUntilMs = currentServerTimeMs() + 5000;
+                    sendSavedInventory = true;
+                }
+
+                if (rec->hasSavedEquipment)
+                {
+                    for (auto& slotEntry : c.player.equipment)
+                        slotEntry.item = {};
+
+                    for (const auto& entry : mPlayerDb->loadCharacterEquipment(rec->characterId))
                     {
-                        c.player.inventoryChanges.action = BasePlayer::InventoryChanges::Action::Set;
-                        c.player.inventoryChanges.items = mPlayerDb->loadCharacterInventory(rec->characterId);
-                        c.restoredInventorySnapshot = c.player.inventoryChanges.items;
-                        c.hasRestoredInventorySnapshot = true;
-                        c.playerInventoryRestoreGuardUntilMs = currentServerTimeMs() + 5000;
-                        sendSavedInventory = true;
+                        if (entry.slot < 0 || entry.slot >= BasePlayer::NUM_EQUIPMENT_SLOTS)
+                            continue;
+                        c.player.equipment[entry.slot] = entry;
                     }
+                    c.restoredEquipmentSnapshot = c.player.equipment;
+                    c.hasRestoredEquipmentSnapshot = true;
+                    c.playerEquipmentRestoreGuardUntilMs = currentServerTimeMs() + 5000;
+                    sendSavedEquipment = true;
+                }
 
-                    if (rec->hasSavedEquipment)
+                if (rec->hasSavedStats && mPlayerDb->loadCharacterStats(rec->characterId, c.player))
+                {
+                    cdPkt.hasSavedStats = true;
+                    cdPkt.dynamicStats = c.player.dynamicStats;
+                    cdPkt.attributes = c.player.attributes;
+                    cdPkt.skills = c.player.skills;
+                    cdPkt.level = c.player.level;
+                    cdPkt.levelProgress = c.player.levelProgress;
+                    c.restoredStatsSnapshot = c.player;
+                    c.hasRestoredStatsSnapshot = true;
+                    c.playerStatsRestoreGuardUntilMs = currentServerTimeMs() + 5000;
+                    const Attribute& strength = c.player.attributes[0];
+                    const Skill& blunt = c.player.skills[4];
+                    if (strength.base > 100 || blunt.base > 100.f)
                     {
-                        for (auto& slotEntry : c.player.equipment)
-                            slotEntry.item = {};
-
-                        for (const auto& entry : mPlayerDb->loadCharacterEquipment(rec->characterId))
-                        {
-                            if (entry.slot < 0 || entry.slot >= BasePlayer::NUM_EQUIPMENT_SLOTS)
-                                continue;
-                            c.player.equipment[entry.slot] = entry;
-                        }
-                        c.restoredEquipmentSnapshot = c.player.equipment;
-                        c.hasRestoredEquipmentSnapshot = true;
-                        c.playerEquipmentRestoreGuardUntilMs = currentServerTimeMs() + 5000;
-                        sendSavedEquipment = true;
-                    }
-
-                    if (rec->hasSavedStats && mPlayerDb->loadCharacterStats(rec->characterId, c.player))
-                    {
-                        cdPkt.hasSavedStats = true;
-                        cdPkt.dynamicStats = c.player.dynamicStats;
-                        cdPkt.attributes = c.player.attributes;
-                        cdPkt.skills = c.player.skills;
-                        cdPkt.level = c.player.level;
-                        cdPkt.levelProgress = c.player.levelProgress;
-                        c.restoredStatsSnapshot = c.player;
-                        c.hasRestoredStatsSnapshot = true;
-                        c.playerStatsRestoreGuardUntilMs = currentServerTimeMs() + 5000;
-                        const Attribute& strength = c.player.attributes[0];
-                        const Skill& blunt = c.player.skills[4];
-                        if (strength.base > 100 || blunt.base > 100.f)
-                        {
-                            Log(Debug::Info) << "[PlayerDB] loaded persistent player stats"
-                                             << " charId=" << rec->characterId
-                                             << " name=" << sel.charName
-                                             << " strength=" << strength.base
-                                             << " blunt=" << blunt.base
-                                             << " hp=" << c.player.dynamicStats.health.current
-                                             << "/" << c.player.dynamicStats.health.base;
-                        }
+                        Log(Debug::Info) << "[PlayerDB] loaded persistent player stats"
+                                         << " charId=" << rec->characterId
+                                         << " name=" << sel.charName
+                                         << " strength=" << strength.base
+                                         << " blunt=" << blunt.base
+                                         << " hp=" << c.player.dynamicStats.health.current
+                                         << "/" << c.player.dynamicStats.health.base;
                     }
                 }
                 cdPkt.characterName  = sel.charName;
                 Log(Debug::Info) << "[Server] Character '" << sel.charName
                                  << "' selected for " << c.name
-                                 << " (new=" << rec->isNew << ")";
+                                 << " (dbNew=" << rec->isNew
+                                 << ", responseNew=" << cdPkt.isNewCharacter << ")";
             }
             mPlayerDb->touch(c.dbCharacterId);
             mLua.setPlayerMarks(c.guid, mPlayerDb->loadCharacterMarks(c.dbCharacterId));
@@ -4066,6 +4072,26 @@ void MPServer::handleCharacterSelect(ConnectedClient& c, const uint8_t* data, si
         c.name        = displayName;
         c.player.name = displayName;
     }
+
+    c.player.race = cdPkt.race;
+    c.player.headMesh = cdPkt.headMesh;
+    c.player.hairMesh = cdPkt.hairMesh;
+    c.player.isMale = cdPkt.isMale;
+    if (!cdPkt.classId.empty())
+        c.player.charClass.mId = ESM::RefId::deserializeText(cdPkt.classId);
+    c.player.charClass.mName = cdPkt.className;
+    c.player.birthSign = cdPkt.birthSign;
+
+    if (auto parsedCell = parseCellKey(cdPkt.spawnCell))
+        c.player.cell = *parsedCell;
+    c.player.position.pos[0] = cdPkt.spawnX;
+    c.player.position.pos[1] = cdPkt.spawnY;
+    c.player.position.pos[2] = cdPkt.spawnZ;
+    c.player.position.rot[0] = cdPkt.spawnRotX;
+    c.player.position.rot[1] = cdPkt.spawnRotY;
+    c.player.position.rot[2] = cdPkt.spawnRotZ;
+    c.player.position.isTeleporting = true;
+    c.player.velocity = {};
 
     sendDynamicRecordsToClient(c.conn);
 
@@ -4121,6 +4147,30 @@ void MPServer::handleCharacterSelect(ConnectedClient& c, const uint8_t* data, si
         }
     }
 
+    // Make already-connected clients aware of this player before the client's
+    // first full sync arrives from the world.
+    for (auto& [existingConn, existingClient] : mClients)
+    {
+        if (existingConn == c.conn || !existingClient.charSelectComplete)
+            continue;
+
+        PacketPlayerBaseInfo baseInfo;
+        baseInfo.setPlayer(&c.player);
+        sendTo(existingConn, baseInfo.encode());
+
+        PacketPlayerCellChange cellChange;
+        cellChange.setPlayer(&c.player);
+        sendTo(existingConn, cellChange.encode());
+
+        PacketPlayerEquipment equipment;
+        equipment.setPlayer(&c.player);
+        sendTo(existingConn, equipment.encode());
+
+        PacketPlayerPosition positionPacket;
+        positionPacket.setPlayer(&c.player);
+        sendTo(existingConn, positionPacket.encode());
+    }
+
     if (!cdPkt.spawnCell.empty())
         refreshActorAuthorityForCell(cdPkt.spawnCell, c.guid);
 
@@ -4161,6 +4211,8 @@ void MPServer::handlePlayerCharGen(ConnectedClient& c, const uint8_t* data, size
                 encodeClassData(c.player.charClass.mData));
 
             mPlayerDb->markChargenComplete(c.dbCharacterId);
+            c.dbChargenCompletePending = false;
+            c.player.charGenComplete = true;
             Log(Debug::Info) << "[Server] Chargen complete for " << c.name
                              << " race=" << c.player.race
                              << " class=" << c.player.charClass.mId.toString()
@@ -4170,6 +4222,38 @@ void MPServer::handlePlayerCharGen(ConnectedClient& c, const uint8_t* data, size
         {
             Log(Debug::Warning) << "[PlayerDB] chargen save error: " << e.what();
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+void MPServer::markChargenCompleteIfPending(ConnectedClient& c, const char* reason)
+{
+    if (!c.dbChargenCompletePending || !mPlayerDb || c.dbCharacterId == 0)
+        return;
+
+    try
+    {
+        if (!c.player.race.empty())
+        {
+            mPlayerDb->saveChargenData(c.dbCharacterId,
+                c.player.race,
+                c.player.headMesh,
+                c.player.hairMesh,
+                c.player.isMale,
+                c.player.charClass.mId.serializeText(),
+                c.player.charClass.mName,
+                c.player.birthSign,
+                encodeClassData(c.player.charClass.mData));
+        }
+        mPlayerDb->markChargenComplete(c.dbCharacterId);
+        c.dbChargenCompletePending = false;
+        c.player.charGenComplete = true;
+        Log(Debug::Info) << "[Server] Auto-marked chargen complete for " << c.name
+                         << " after " << reason;
+    }
+    catch (const std::exception& e)
+    {
+        Log(Debug::Warning) << "[PlayerDB] auto chargen complete error: " << e.what();
     }
 }
 
@@ -4186,6 +4270,7 @@ void MPServer::handlePlayerBaseInfo(ConnectedClient& c, const uint8_t* data, siz
     // This also keeps c.player.name in sync so the late-join catch-up loop
     // (which re-encodes from existingClient.player) sends the right name too.
     c.player.name = c.name;
+    markChargenCompleteIfPending(c, "base info");
 
     // Re-encode with the corrected name so all receivers get the nickname.
     broadcastToAll(pkt.encode(), c.conn);
@@ -4237,6 +4322,7 @@ void MPServer::handlePlayerCellChange(ConnectedClient& c, const uint8_t* data, s
 
     syncLuaSnapshot();
     mLua.onPlayerCellChange(c.guid, c.name, newCell, oldCell);
+    markChargenCompleteIfPending(c, "cell change");
 
     if (!oldCell.empty() && oldCell != newCell)
         refreshActorAuthorityForCell(oldCell);

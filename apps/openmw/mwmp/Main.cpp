@@ -489,6 +489,8 @@ bool Main::enterSelectedCharacterWorld(bool allowNewCharacterUi)
         windowManager->updatePlayer();
         if (!worldName.empty())
             MWBase::Environment::get().getMechanicsManager()->setPlayerName(worldName);
+        Log(Debug::Info) << "[MP] New character initial world sync";
+        getPlayerSync().forceFullSync(false);
         windowManager->setCharGenCompleteCallback(
             []() {
                 if (Main::isInitialised())
