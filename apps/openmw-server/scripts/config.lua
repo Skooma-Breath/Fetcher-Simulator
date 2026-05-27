@@ -46,7 +46,56 @@ Config.MAX_CHARS_PER_ACCOUNT = 5
 -- Spawn
 ------------------------------------------------------------------------
 
-Config.SPAWN_CELL = "mournhold"
+Config.SPAWN_CELL = "surf_kitsune_mw"
+Config.DEFAULT_SPAWN = {
+    cell = "surf_kitsune_mw",
+    position = {
+        x = -0.8005232810974121,
+        y = -2016.4405517578125,
+        z = 192.99996948242188,
+        rx = 0.27265647053718567,
+        ry = 0.0,
+        rz = 0.01220219861716032,
+    },
+}
+Config.DEFAULT_PLAYER_MARKS = {
+    {
+        name = "kitsune",
+        cell = "surf_kitsune_mw",
+        position = {
+            x = -0.8005232810974121,
+            y = -2016.4405517578125,
+            z = 192.99996948242188,
+            rx = 0.27265647053718567,
+            ry = 0.0,
+            rz = 0.01220219861716032,
+        },
+    },
+    {
+        name = "utopia",
+        cell = "surf_utopia_mw",
+        position = {
+            x = -27521.025390625,
+            y = -839.512939453125,
+            z = 25001.966796875,
+            rx = 0.4054699242115021,
+            ry = 0.0,
+            rz = 2.0280449390411377,
+        },
+    },
+    {
+        name = "mesa",
+        cell = "surf_mesa_mw",
+        position = {
+            x = 84.77737426757812,
+            y = -8537.3974609375,
+            z = 27873.416015625,
+            rx = 0.22188639640808105,
+            ry = 0.0,
+            rz = 0.11640609055757523,
+        },
+    },
+}
 Config.SPAWNED_ACTOR_DEFAULT_PERSISTENT = true
 
 ------------------------------------------------------------------------

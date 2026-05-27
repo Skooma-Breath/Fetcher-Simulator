@@ -505,6 +505,9 @@ private:
     std::optional<PlayerDatabase> mPlayerDb;
     std::string                   mDbPath            = "playerdata.db";
     std::string                   mDefaultSpawnCell  = "toddtest";
+    Position                      mDefaultSpawnPosition;
+    bool                          mHasDefaultSpawnPosition = false;
+    std::vector<PlayerMark>       mDefaultPlayerMarks;
     std::string                   mGeneratedRecordIdPrefix = "$custom";
     int                           mMaxPlayersConfig   = 32;
     int                           mMaxCharsPerAccount = 5; ///< 0 = unlimited; overridden from config.lua

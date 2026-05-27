@@ -94,7 +94,7 @@ namespace
         return value;
     }
 
-std::optional<sol::table> loadConfigTable(LuaUtil::LuaState& lua, bool alreadyProtected = false)
+    std::optional<sol::table> loadConfigTable(LuaUtil::LuaState& lua, bool alreadyProtected = false)
     {
         std::optional<sol::table> config;
 
@@ -120,6 +120,68 @@ std::optional<sol::table> loadConfigTable(LuaUtil::LuaState& lua, bool alreadyPr
             lua.protectedCall([&](LuaUtil::LuaView&) { load(); });
 
         return config;
+    }
+
+    std::optional<double> getOptionalNumber(const sol::table& table, const char* key)
+    {
+        auto value = table.get<sol::optional<double>>(key);
+        if (value)
+            return *value;
+        return std::nullopt;
+    }
+
+    float getPositionNumber(const sol::table& entry, const sol::table* position, const char* key,
+        const char* alternateKey, float defaultValue = 0.f)
+    {
+        std::optional<double> value;
+        if (position)
+            value = getOptionalNumber(*position, key);
+        if (!value)
+            value = getOptionalNumber(entry, key);
+        if (!value && alternateKey)
+        {
+            if (position)
+                value = getOptionalNumber(*position, alternateKey);
+            if (!value)
+                value = getOptionalNumber(entry, alternateKey);
+        }
+        return value ? static_cast<float>(*value) : defaultValue;
+    }
+
+    std::optional<mwmp::PlayerMark> parseConfigPlayerMark(const sol::table& entry, bool requireName)
+    {
+        mwmp::PlayerMark mark;
+
+        sol::object name = entry["name"];
+        if (name.is<std::string>())
+            mark.name = name.as<std::string>();
+        if (requireName && mark.name.empty())
+            return std::nullopt;
+
+        sol::object cell = entry["cell"];
+        if (cell.is<std::string>())
+            mark.cell = cell.as<std::string>();
+        if (mark.cell.empty())
+            return std::nullopt;
+
+        auto assignPosition = [&](const sol::table* positionTable) {
+            mark.position.pos[0] = getPositionNumber(entry, positionTable, "x", nullptr);
+            mark.position.pos[1] = getPositionNumber(entry, positionTable, "y", nullptr);
+            mark.position.pos[2] = getPositionNumber(entry, positionTable, "z", nullptr);
+            mark.position.rot[0] = getPositionNumber(entry, positionTable, "rx", "rotX");
+            mark.position.rot[1] = getPositionNumber(entry, positionTable, "ry", "rotY");
+            mark.position.rot[2] = getPositionNumber(entry, positionTable, "rz", "rotZ");
+        };
+
+        sol::object positionObject = entry["position"];
+        if (positionObject.is<sol::table>())
+        {
+            sol::table position = positionObject.as<sol::table>();
+            assignPosition(&position);
+        }
+        else
+            assignPosition(nullptr);
+        return mark;
     }
 
     std::filesystem::path resolveInternalLibsDir()
@@ -578,6 +640,53 @@ bool LuaServerContext::getBool(const std::string& tableName, const std::string& 
     if (maybeValue)
         out = *maybeValue;
     return out;
+}
+
+std::optional<PlayerMark> LuaServerContext::getConfigPlayerMark(const std::string& key) const
+{
+    if (!mLoaded)
+        return std::nullopt;
+
+    const std::optional<sol::table> config = loadConfigTable(*mLua);
+    if (!config)
+        return std::nullopt;
+
+    sol::object entry = (*config)[key];
+    if (!entry.is<sol::table>())
+        return std::nullopt;
+
+    return parseConfigPlayerMark(entry.as<sol::table>(), false);
+}
+
+std::vector<PlayerMark> LuaServerContext::getConfigPlayerMarks(const std::string& key) const
+{
+    std::vector<PlayerMark> marks;
+    if (!mLoaded)
+        return marks;
+
+    const std::optional<sol::table> config = loadConfigTable(*mLua);
+    if (!config)
+        return marks;
+
+    sol::object entriesObject = (*config)[key];
+    if (!entriesObject.is<sol::table>())
+        return marks;
+
+    sol::table entries = entriesObject.as<sol::table>();
+    for (const auto& entry : entries)
+    {
+        sol::object value = entry.second;
+        if (!value.is<sol::table>())
+            continue;
+
+        auto mark = parseConfigPlayerMark(value.as<sol::table>(), true);
+        if (mark)
+            marks.push_back(std::move(*mark));
+        else
+            Log(Debug::Warning) << "[LuaServerContext] Ignored invalid Config." << key << " entry";
+    }
+
+    return marks;
 }
 
 std::optional<LuaPlayerSnapshot> LuaServerContext::getPlayer(uint32_t guid) const

@@ -99,6 +99,8 @@ public:
         const std::string& tableName, const std::string& key, const std::string& defaultVal = "") const;
     int getInt(const std::string& tableName, const std::string& key, int defaultVal = 0) const;
     bool getBool(const std::string& tableName, const std::string& key, bool defaultVal = false) const;
+    std::optional<PlayerMark> getConfigPlayerMark(const std::string& key) const;
+    std::vector<PlayerMark> getConfigPlayerMarks(const std::string& key) const;
     std::optional<LuaPlayerSnapshot> getPlayer(uint32_t guid) const;
     std::vector<LuaPlayerSnapshot> getPlayers() const;
     int getPlayerCount() const;

@@ -1319,27 +1319,58 @@ void MPServer::run()
     mLua.syncGeneratedRecordState(
         mGeneratedRecordIdPrefix, buildGeneratedDynamicRecordCounters(mGeneratedRecordIdPrefix));
 
+    auto normalizeConfiguredCell = [](std::string raw) {
+        // Normalise "x, y" coords: strip spaces that follow a comma so
+        // findExteriorPosition / std::from_chars can parse the string.
+        std::string norm;
+        norm.reserve(raw.size());
+        bool afterComma = false;
+        for (char c : raw)
+        {
+            if (c == ',')
+            {
+                norm += c;
+                afterComma = true;
+            }
+            else if (c == ' ' && afterComma)
+            {
+                // drop
+            }
+            else
+            {
+                norm += c;
+                afterComma = false;
+            }
+        }
+        return norm;
+    };
+
     // If config.lua set Config.SPAWN_CELL, let it override the C++ default.
-    // mDefaultSpawnCell may already be set by main.cpp (CLI flag); only
-    // override when it is still the compiled-in default ("toddtest").
+    // Config.DEFAULT_SPAWN can additionally provide a full position/rotation.
     {
         std::string raw = mLua.getString("Config", "SPAWN_CELL", "");
         if (!raw.empty())
         {
-            // Normalise "x, y" coords: strip spaces that follow a comma so
-            // findExteriorPosition / std::from_chars can parse the string.
-            std::string norm;
-            norm.reserve(raw.size());
-            bool afterComma = false;
-            for (char c : raw)
-            {
-                if      (c == ',')               { norm += c; afterComma = true;  }
-                else if (c == ' ' && afterComma) { /* drop */                     }
-                else                             { norm += c; afterComma = false; }
-            }
-            mDefaultSpawnCell = std::move(norm);
+            mDefaultSpawnCell = normalizeConfiguredCell(std::move(raw));
             Log(Debug::Info) << "[Server] Spawn cell set from config.lua: " << mDefaultSpawnCell;
         }
+
+        if (auto defaultSpawn = mLua.getConfigPlayerMark("DEFAULT_SPAWN"))
+        {
+            mDefaultSpawnCell = normalizeConfiguredCell(defaultSpawn->cell);
+            mDefaultSpawnPosition = defaultSpawn->position;
+            mHasDefaultSpawnPosition = true;
+            Log(Debug::Info) << "[Server] Default spawn position set from config.lua: " << mDefaultSpawnCell
+                             << " (" << mDefaultSpawnPosition.pos[0]
+                             << ", " << mDefaultSpawnPosition.pos[1]
+                             << ", " << mDefaultSpawnPosition.pos[2] << ")";
+        }
+
+        mDefaultPlayerMarks = mLua.getConfigPlayerMarks("DEFAULT_PLAYER_MARKS");
+        for (auto& mark : mDefaultPlayerMarks)
+            mark.cell = normalizeConfiguredCell(std::move(mark.cell));
+        if (!mDefaultPlayerMarks.empty())
+            Log(Debug::Info) << "[Server] Default new-character marks loaded: " << mDefaultPlayerMarks.size();
     }
 
     // Read Config.MAX_CHARS_PER_ACCOUNT from config.lua (0 = unlimited).
@@ -3812,7 +3843,19 @@ void MPServer::handleCharacterSelect(ConnectedClient& c, const uint8_t* data, si
     }
 
     PacketCharacterData cdPkt;
-    cdPkt.spawnCell = mDefaultSpawnCell;
+    auto applyDefaultSpawn = [this](PacketCharacterData& pkt) {
+        pkt.spawnCell = mDefaultSpawnCell;
+        if (!mHasDefaultSpawnPosition)
+            return;
+
+        pkt.spawnX = mDefaultSpawnPosition.pos[0];
+        pkt.spawnY = mDefaultSpawnPosition.pos[1];
+        pkt.spawnZ = mDefaultSpawnPosition.pos[2];
+        pkt.spawnRotX = mDefaultSpawnPosition.rot[0];
+        pkt.spawnRotY = mDefaultSpawnPosition.rot[1];
+        pkt.spawnRotZ = mDefaultSpawnPosition.rot[2];
+    };
+    applyDefaultSpawn(cdPkt);
     bool sendSavedInventory = false;
     bool sendSavedEquipment = false;
     c.hasRestoredStatsSnapshot = false;
@@ -3864,10 +3907,15 @@ void MPServer::handleCharacterSelect(ConnectedClient& c, const uint8_t* data, si
                 const PlayerRecord rec = mPlayerDb->createCharacter(c.dbAccountId, sel.charName);
                 c.dbCharacterId      = rec.characterId;
                 cdPkt.isNewCharacter = true;
-                cdPkt.spawnCell      = mDefaultSpawnCell;
+                applyDefaultSpawn(cdPkt);
                 cdPkt.characterName  = sel.charName;
+                for (const auto& mark : mDefaultPlayerMarks)
+                    mPlayerDb->upsertCharacterMark(rec.characterId, mark);
                 Log(Debug::Info) << "[Server] New character slot '" << sel.charName
                                  << "' created for " << c.name;
+                if (!mDefaultPlayerMarks.empty())
+                    Log(Debug::Info) << "[Server] Added " << mDefaultPlayerMarks.size()
+                                     << " default mark(s) to '" << sel.charName << "'";
             }
             else
             {
@@ -3897,9 +3945,13 @@ void MPServer::handleCharacterSelect(ConnectedClient& c, const uint8_t* data, si
                 }
                 c.dbCharacterId      = rec->characterId;
                 cdPkt.isNewCharacter = rec->isNew;
-                cdPkt.spawnCell      = rec->cell.empty() ? mDefaultSpawnCell : rec->cell;
-                if (!rec->isNew)
+                if (rec->isNew)
                 {
+                    applyDefaultSpawn(cdPkt);
+                }
+                else
+                {
+                    cdPkt.spawnCell = rec->cell.empty() ? mDefaultSpawnCell : rec->cell;
                     cdPkt.race      = rec->race;
                     cdPkt.headMesh  = rec->headMesh;
                     cdPkt.hairMesh  = rec->hairMesh;
@@ -3989,7 +4041,11 @@ void MPServer::handleCharacterSelect(ConnectedClient& c, const uint8_t* data, si
         // No DB — run as new character (dev/offline mode).
         cdPkt.isNewCharacter  = true;
         cdPkt.characterName   = sel.charName;
-        mLua.clearPlayerMarks(c.guid);
+        applyDefaultSpawn(cdPkt);
+        if (mDefaultPlayerMarks.empty())
+            mLua.clearPlayerMarks(c.guid);
+        else
+            mLua.setPlayerMarks(c.guid, mDefaultPlayerMarks);
     }
 
     sendTo(c.conn, cdPkt.encode());
