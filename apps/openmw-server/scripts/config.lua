@@ -117,6 +117,7 @@ Config.SPAWNER_SPAWN_CONFIRM_TIMEOUT_SECONDS = 8
 
 Config.COMMAND_PREFIX = "/"
 Config.ANNOUNCE_JOIN_LEAVE = true
+Config.ANNOUNCE_PLAYER_DEATHS = true
 Config.LOG_CHAT = false
 
 ------------------------------------------------------------------------

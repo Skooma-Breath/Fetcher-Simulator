@@ -58,6 +58,9 @@ namespace mwmp
         // Reliable: apply melee/ranged hit to target, trigger attack anim.
         void onAttack            (const BasePlayer& state);
 
+        // Reliable: play a voice file on this remote player.
+        void onSpeech            (const BasePlayer& state);
+
         // Reliable: apply spell effects to target, trigger cast anim.
         void onCast              (const BasePlayer& state);
 

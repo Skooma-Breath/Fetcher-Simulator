@@ -56,6 +56,21 @@ static std::string scriptPlayer_getNickname(const ScriptPlayer& p)
     return p.data.nickname;
 }
 
+static std::string scriptPlayer_getRace(const ScriptPlayer& p)
+{
+    return p.data.race;
+}
+
+static bool scriptPlayer_getIsMale(const ScriptPlayer& p)
+{
+    return p.data.isMale;
+}
+
+static int scriptPlayer_getGender(const ScriptPlayer& p)
+{
+    return p.data.isMale ? 1 : 0;
+}
+
 static void scriptPlayer_setNickname(const ScriptPlayer& p, const std::string& nick)
 {
     if (p.context) p.context->queueSetPlayerNickname(p.data.guid, nick);
@@ -93,6 +108,9 @@ void initPlayerBindings(LuaUtil::LuaView& view, sol::table& mp, LuaServerContext
         "guid",     sol::property(&scriptPlayer_getGuid),
         "cell",     sol::property(&scriptPlayer_getCell),
         "position", sol::property(&scriptPlayer_getPosition),
+        "race",     sol::property(&scriptPlayer_getRace),
+        "isMale",   sol::property(&scriptPlayer_getIsMale),
+        "gender",   sol::property(&scriptPlayer_getGender),
 
         "sendMessage", &scriptPlayer_sendMessage,
         "kick",        &scriptPlayer_kick,

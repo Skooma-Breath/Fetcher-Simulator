@@ -39,6 +39,7 @@ namespace mwmp
         void flushPersistentStats();
         void notifyLocalHit(const MWWorld::Ptr& victim, float damage, bool healthDamage, bool knocked,
             const osg::Vec3f& hitPos, int attackType = 0, float attackStrength = 0.f);
+        void noteRemotePlayerHit(uint32_t attackerGuid);
         void notifyLocalCastRelease(
             const std::string& spellId, const std::string& castAnimation, const MWWorld::Ptr& target);
 
@@ -49,6 +50,7 @@ namespace mwmp
         void queueAuthoritativeInventory(const BasePlayer& authoritative);
         void queueRestoredStats(const BasePlayer& restored);
         void applyRestoredStatsToPlayer();
+        void applyServerDeath(const BasePlayer& state);
 
         // Accessors used by Networking dispatcher
         BasePlayer& localPlayer() { return mLocal; }
@@ -181,6 +183,9 @@ namespace mwmp
         bool mRespawnPending = false;
         float mRespawnTimer = 0.f;
         static constexpr float RESPAWN_DELAY = 5.f;
+        uint32_t mRecentPlayerAttackerGuid = 0;
+        float mRecentPlayerAttackerTimer = 0.f;
+        static constexpr float PLAYER_ATTACKER_CONTEXT_SECONDS = 15.f;
 
         uint32_t mSeqCounter = 0;
 

@@ -100,6 +100,8 @@ struct ConnectedClient
     std::size_t actorV2TierCounts[5] = {};
 };
 
+class PacketPlayerDeath;
+
 // ---------------------------------------------------------------------------
 // MPServer — dedicated multiplayer server.
 //
@@ -129,9 +131,12 @@ public:
 
     // Send a chat message from the "Server" sender to all or one player.
     void broadcastServerMessage(const std::string& text);
+    void broadcastNameColorMessage(const std::string& text);
     void broadcastServerMessageToCell(const std::string& cellId, const std::string& text);
     void sendServerMessage(uint32_t guid, const std::string& text);
     void relayPlayerChat(uint32_t guid, const std::string& text);
+    bool playSpeech(uint32_t guid, const std::string& soundPath);
+    bool killPlayer(uint32_t guid, const std::string& deathMessage = std::string());
     void broadcastLuaEvent(uint32_t pid, const std::string& eventName, const std::string& eventData);
     void broadcastLuaEventToCell(
         const std::string& cellId, uint32_t pid, const std::string& eventName, const std::string& eventData);
@@ -249,6 +254,7 @@ private:
     void handlePlayerStatsDynamic(ConnectedClient& c, const uint8_t* data, size_t size);
     void handlePlayerDeath      (ConnectedClient& c, const uint8_t* data, size_t size);
     void handlePlayerResurrect  (ConnectedClient& c, const uint8_t* data, size_t size);
+    void announcePlayerDeath(const ConnectedClient& victim, const PacketPlayerDeath& pkt);
     void handleChatMessage      (ConnectedClient& c, const uint8_t* data, size_t size);
     void handleLuaEvent         (ConnectedClient& c, const uint8_t* data, size_t size);
     void handleObjectPlace      (ConnectedClient& c, const uint8_t* data, size_t size);

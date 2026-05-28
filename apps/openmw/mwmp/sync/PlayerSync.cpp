@@ -556,6 +556,16 @@ void PlayerSync::update(float dt)
 
     applyPendingAuthoritativeState(player);
 
+    if (mRecentPlayerAttackerTimer > 0.f)
+    {
+        mRecentPlayerAttackerTimer -= dt;
+        if (mRecentPlayerAttackerTimer <= 0.f)
+        {
+            mRecentPlayerAttackerTimer = 0.f;
+            mRecentPlayerAttackerGuid = 0;
+        }
+    }
+
     // Don't send anything until we have a valid server-assigned guid.
     // forceFullSync() is called by Main.cpp from the CharacterData handler
     // once mLocal.guid is properly set.
@@ -1415,6 +1425,15 @@ void PlayerSync::notifyLocalHit(const MWWorld::Ptr& victim, float damage, bool h
     mClient.sendReliable(pkt.encode(mSeqCounter++));
 }
 
+void PlayerSync::noteRemotePlayerHit(uint32_t attackerGuid)
+{
+    if (attackerGuid == 0)
+        return;
+
+    mRecentPlayerAttackerGuid = attackerGuid;
+    mRecentPlayerAttackerTimer = PLAYER_ATTACKER_CONTEXT_SECONDS;
+}
+
 void PlayerSync::notifyLocalCastRelease(
     const std::string& spellId, const std::string& castAnimation, const MWWorld::Ptr& target)
 {
@@ -1424,21 +1443,95 @@ void PlayerSync::notifyLocalCastRelease(
 void PlayerSync::sendDeath()
 {
     mLocal.isDead = true;
+    uint32_t killerGuid = 0;
+    std::string killerRefId;
+    if (mRecentPlayerAttackerTimer > 0.f)
+        killerGuid = mRecentPlayerAttackerGuid;
+
     mLocal.deathAnimationGroup.clear();
     if (MWBase::World* world = MWBase::Environment::get().getWorld())
     {
         MWWorld::Ptr player = world->getPlayerPtr();
         if (!player.isEmpty())
+        {
             if (auto* bn = player.getRefData().getBaseNode())
             {
                 bn->getUserValue("mp_death_anim_group", mLocal.deathAnimationGroup);
                 bn->setUserValue("mp_anim_play_pending", false);
             }
+
+            const ESM::RefNum hitAttemptActor = player.getClass().getCreatureStats(player).getHitAttemptActor();
+            MWWorld::WorldModel* worldModel = MWBase::Environment::get().getWorldModel();
+            if (worldModel && hitAttemptActor.isSet())
+            {
+                MWWorld::Ptr attacker = worldModel->getPtr(hitAttemptActor);
+                if (!attacker.isEmpty() && attacker.isInCell())
+                {
+                    if (killerGuid == 0)
+                    {
+                        if (auto* attackerNode = attacker.getRefData().getBaseNode())
+                        {
+                            int guid = 0;
+                            if (attackerNode->getUserValue("mp_player_guid", guid) && guid > 0)
+                                killerGuid = static_cast<uint32_t>(guid);
+                        }
+                    }
+
+                    if (killerGuid == 0)
+                    {
+                        killerRefId = std::string(attacker.getClass().getName(attacker));
+                        if (killerRefId.empty())
+                            killerRefId = attacker.getCellRef().getRefId().serializeText();
+                    }
+                }
+            }
+        }
     }
 
     PacketPlayerDeath pkt;
     pkt.setPlayer(&mLocal);
+    pkt.killerGuid = killerGuid;
+    pkt.killerRefId = killerRefId;
     mClient.sendReliable(pkt.encode(mSeqCounter++));
+    mRecentPlayerAttackerGuid = 0;
+    mRecentPlayerAttackerTimer = 0.f;
+}
+
+void PlayerSync::applyServerDeath(const BasePlayer& state)
+{
+    mLocal.isDead = true;
+    mLocal.deathAnimationGroup = state.deathAnimationGroup;
+    mLastWasDead = true;
+    mRespawnPending = true;
+    mRespawnTimer = RESPAWN_DELAY;
+
+    MWBase::World* world = MWBase::Environment::get().getWorld();
+    if (!world)
+        return;
+
+    MWWorld::Ptr player = world->getPlayerPtr();
+    if (player.isEmpty())
+        return;
+
+    if (auto* bn = player.getRefData().getBaseNode())
+    {
+        if (!mLocal.deathAnimationGroup.empty())
+            bn->setUserValue("mp_death_anim_group", mLocal.deathAnimationGroup);
+        bn->setUserValue("mp_anim_play_pending", false);
+    }
+
+    MWMechanics::CreatureStats& stats = player.getClass().getCreatureStats(player);
+    MWMechanics::DynamicStat<float> health = stats.getHealth();
+    health.setCurrent(0.f);
+    stats.setHealth(health);
+    stats.setDeathAnimationFinished(false);
+    stats.setAttackingOrSpell(false);
+    stats.setDrawState(MWMechanics::DrawState::Nothing);
+
+    mLocal.dynamicStats.health.base = stats.getHealth().getBase();
+    mLocal.dynamicStats.health.current = stats.getHealth().getCurrent();
+    mLocal.dynamicStats.health.mod = stats.getHealth().getModifier();
+    snapshotDynamicStats();
 }
 
 void PlayerSync::sendResurrect()

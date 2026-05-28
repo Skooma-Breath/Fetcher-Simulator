@@ -46,6 +46,7 @@
 #include <components/openmw-mp/Packets/Player/PacketPlayerAnimPlay.hpp>
 #include <components/openmw-mp/Packets/Player/PacketPlayerAttack.hpp>
 #include <components/openmw-mp/Packets/Player/PacketPlayerCast.hpp>
+#include <components/openmw-mp/Packets/Player/PacketPlayerSpeech.hpp>
 #include <components/openmw-mp/Packets/Player/PacketPlayerInventory.hpp>
 #include <components/openmw-mp/Packets/Player/PacketPlayerStatsDynamic.hpp>
 #include <components/openmw-mp/Packets/Player/PacketPlayerDeath.hpp>
@@ -1026,6 +1027,19 @@ void MPServer::broadcastServerMessage(const std::string& text)
 }
 
 // ---------------------------------------------------------------------------
+void MPServer::broadcastNameColorMessage(const std::string& text)
+{
+    PacketChatMessage pkt;
+    BasePlayer serverPlayer;
+    serverPlayer.guid = 0;
+    serverPlayer.name.clear();
+    pkt.setPlayer(&serverPlayer);
+    pkt.message = text;
+    pkt.channel = "nameColor";
+    broadcastToAll(pkt.encode());
+}
+
+// ---------------------------------------------------------------------------
 void MPServer::broadcastServerMessageToCell(const std::string& cellId, const std::string& text)
 {
     PacketChatMessage pkt;
@@ -1197,6 +1211,55 @@ void MPServer::relayPlayerChat(uint32_t guid, const std::string& text)
     pkt.message = text;
     pkt.channel = "";
     broadcastToAll(pkt.encode());
+}
+
+// ---------------------------------------------------------------------------
+bool MPServer::playSpeech(uint32_t guid, const std::string& soundPath)
+{
+    ConnectedClient* client = findClientByGuid(guid);
+    if (!client || !client->handshakeComplete || !client->charSelectComplete || soundPath.empty())
+        return false;
+
+    client->player.speechSound = soundPath;
+
+    PacketPlayerSpeech pkt;
+    pkt.setPlayer(&client->player);
+    const auto encoded = pkt.encode();
+
+    const std::string cellId = makeCellKey(client->player.cell);
+    if (!cellId.empty())
+        broadcastToCell(cellId, encoded);
+    else
+        sendTo(client->conn, encoded);
+
+    client->player.speechSound.clear();
+    return true;
+}
+
+// ---------------------------------------------------------------------------
+bool MPServer::killPlayer(uint32_t guid, const std::string& deathMessage)
+{
+    ConnectedClient* client = findClientByGuid(guid);
+    if (!client || !client->handshakeComplete || !client->charSelectComplete || client->player.isDead)
+        return false;
+
+    client->player.isDead = true;
+    client->player.deathAnimationGroup = "death1";
+    client->player.dynamicStats.health.current = 0.f;
+
+    PacketPlayerDeath pkt;
+    pkt.setPlayer(&client->player);
+    const auto encoded = pkt.encode();
+    sendTo(client->conn, encoded);
+    broadcastToAll(encoded, client->conn);
+
+    Log(Debug::Info) << "[Server] Killed player by script: " << client->name;
+    if (!deathMessage.empty() && mLua.getBool("Config", "ANNOUNCE_PLAYER_DEATHS", true))
+        broadcastNameColorMessage(client->name + " " + deathMessage);
+    else
+        announcePlayerDeath(*client, pkt);
+    syncLuaSnapshot();
+    return true;
 }
 
 // ---------------------------------------------------------------------------
@@ -4759,6 +4822,30 @@ void MPServer::handlePlayerDeath(ConnectedClient& c, const uint8_t* data, size_t
                      << " anim='" << c.player.deathAnimationGroup << "'"
                      << " killerGuid=" << pkt.killerGuid
                      << " killerRefId='" << pkt.killerRefId << "'";
+    announcePlayerDeath(c, pkt);
+    syncLuaSnapshot();
+}
+
+// ---------------------------------------------------------------------------
+void MPServer::announcePlayerDeath(const ConnectedClient& victim, const PacketPlayerDeath& pkt)
+{
+    if (!mLua.getBool("Config", "ANNOUNCE_PLAYER_DEATHS", true))
+        return;
+
+    std::string message;
+    if (pkt.killerGuid != 0 && pkt.killerGuid != victim.guid)
+    {
+        if (ConnectedClient* killer = findClientByGuid(pkt.killerGuid))
+            message = victim.name + " was killed by " + killer->name + ".";
+    }
+
+    if (message.empty() && !pkt.killerRefId.empty())
+        message = victim.name + " was killed by " + pkt.killerRefId + ".";
+
+    if (message.empty())
+        message = victim.name + " died.";
+
+    broadcastNameColorMessage(message);
 }
 
 // ---------------------------------------------------------------------------
@@ -4773,6 +4860,7 @@ void MPServer::handlePlayerResurrect(ConnectedClient& c, const uint8_t* data, si
     broadcastToAll(std::vector<uint8_t>(data, data + size), c.conn);
 
     Log(Debug::Info) << "[Server] Relayed PlayerResurrect for " << c.name;
+    syncLuaSnapshot();
 }
 
 // ---------------------------------------------------------------------------
@@ -8133,6 +8221,8 @@ void MPServer::syncLuaSnapshot()
         snapshot.name = client.name;
         snapshot.cell = makeCellKey(client.player.cell);
         snapshot.nickname = client.nickname;
+        snapshot.race = client.player.race;
+        snapshot.isMale = client.player.isMale;
         snapshot.x = client.player.position.pos[0];
         snapshot.y = client.player.position.pos[1];
         snapshot.z = client.player.position.pos[2];

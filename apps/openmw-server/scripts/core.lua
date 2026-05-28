@@ -8,6 +8,7 @@ local markRecallCommands = require("mark_recall")
 local recordDynamicTest = require("recorddynamic_test")
 local recordStore = require("recordstore")
 local destructibleSpawners = require("destructible_spawners")
+local speechCommands = require("speech_commands")
 local surfCommands = require("surf_commands")
 local surfTimer = require("surf_timer")
 
@@ -28,6 +29,8 @@ local RESETCELL_PREFIX = COMMAND_PREFIX .. "resetcell "
 local MPWHERE_PREFIX = COMMAND_PREFIX .. "mpwhere "
 local TOMP_PREFIX = COMMAND_PREFIX .. "tomp "
 local BRINGMP_PREFIX = COMMAND_PREFIX .. "bringmp "
+local TPTO_PREFIX = COMMAND_PREFIX .. "tpto "
+local TP_PREFIX = COMMAND_PREFIX .. "tp "
 local PLACEAT_PREFIX = COMMAND_PREFIX .. "placeat "
 local SPAWNAT_PREFIX = COMMAND_PREFIX .. "spawnat "
 local SETTIME_PREFIX = COMMAND_PREFIX .. "settime "
@@ -38,6 +41,7 @@ local LUAPING_PREFIX = COMMAND_PREFIX .. "luaping "
 local LUABURST_PREFIX = COMMAND_PREFIX .. "luaburst "
 local LUASTORAGE_PREFIX = COMMAND_PREFIX .. "luastorage "
 local LUATYPES_PREFIX = COMMAND_PREFIX .. "luatypes"
+local SUICIDE_PREFIX = COMMAND_PREFIX .. "suicide "
 
 ------------------------------------------------------------------------
 -- State
@@ -212,6 +216,62 @@ local function playerList()
     return table.concat(names, ", ")
 end
 
+local function playerListWithPids()
+    local entries = {}
+    for _, p in ipairs(mp.getPlayers()) do
+        table.insert(entries, string.format("[%d] %s", tonumber(p.guid) or 0, p.name))
+    end
+    return table.concat(entries, ", ")
+end
+
+local function findPlayerByPidOrName(value)
+    value = trim(value)
+    if not value or value == "" then
+        return nil
+    end
+
+    local pid = tonumber(value)
+    if pid then
+        pid = math.floor(pid)
+        for _, p in ipairs(mp.getPlayers()) do
+            if tonumber(p.guid) == pid then
+                return p
+            end
+        end
+    end
+
+    local wanted = lower(value)
+    for _, p in ipairs(mp.getPlayers()) do
+        if lower(p.name) == wanted then
+            return p
+        end
+    end
+
+    return nil
+end
+
+local function resolvePlayerCommandTarget(player, args, usage)
+    if not args or #args == 0 then
+        player:sendMessage("Usage: " .. usage)
+        return nil
+    end
+
+    local value = table.concat(args, " ")
+    local target = findPlayerByPidOrName(value)
+    if not target then
+        player:sendMessage("Player not found: " .. value)
+    end
+    return target
+end
+
+local function broadcastNameColor(text)
+    if mp.broadcastNameColor then
+        mp.broadcastNameColor(text)
+    else
+        mp.broadcast(text)
+    end
+end
+
 local function distance3(a, b)
     if not a or not b then
         return nil
@@ -272,6 +332,21 @@ local function plainPosition(position)
         ry = tonumber(position.ry) or 0,
         rz = tonumber(position.rz) or 0,
     }
+end
+
+local function teleportPlayerToPlayer(actor, target)
+    local cellId = normalizeCellId(target.cell)
+    if not cellId or cellId == "" then
+        return false, "Target has no valid cell."
+    end
+
+    local position = plainPosition(target.position)
+    position.isTeleporting = true
+    if not mp.teleportPlayer(actor.guid, cellId, position) then
+        return false, "Failed to queue teleport."
+    end
+
+    return true, cellId
 end
 
 local function placeAtPosition(player, distance, direction)
@@ -647,6 +722,16 @@ local function handleChat(player, data)
         return false
     end
 
+    if msg == COMMAND_PREFIX .. "list" then
+        player:sendMessage("Online (" .. mp.getPlayerCount() .. "): " .. playerListWithPids())
+        return false
+    end
+
+    if msg == COMMAND_PREFIX .. "f" then
+        broadcastNameColor(player.name .. " pays respects.")
+        return false
+    end
+
     if msg == COMMAND_PREFIX .. "time" then
         local h = mp.getWorldTime()
         local hour = math.floor(h)
@@ -660,6 +745,14 @@ local function handleChat(player, data)
         local mins = math.floor(secs / 60)
         local hours = math.floor(mins / 60)
         player:sendMessage(string.format("Uptime: %dh %02dm %02ds", hours, mins % 60, secs % 60))
+        return false
+    end
+
+    if msg == COMMAND_PREFIX .. "suicide" or msg:sub(1, #SUICIDE_PREFIX) == SUICIDE_PREFIX then
+        local deathMessage = msg == COMMAND_PREFIX .. "suicide" and "" or (trim(msg:sub(#SUICIDE_PREFIX + 1)) or "")
+        if not mp.killPlayer(player.guid, deathMessage) then
+            player:sendMessage("Failed to kill player.")
+        end
         return false
     end
 
@@ -691,6 +784,77 @@ local function handleChat(player, data)
         else
             player:sendMessage("Player not found: " .. targetName)
         end
+        return false
+    end
+
+    if msg == COMMAND_PREFIX .. "tpto" or msg:sub(1, #TPTO_PREFIX) == TPTO_PREFIX then
+        if not requireAdmin(player) then
+            return false
+        end
+
+        local rest = msg == COMMAND_PREFIX .. "tpto" and "" or msg:sub(#TPTO_PREFIX + 1)
+        local args, parseError = parseCommandArgs(rest)
+        if not args then
+            player:sendMessage(parseError or "Invalid arguments.")
+            player:sendMessage("Usage: /tpto <pid|name>")
+            return false
+        end
+
+        local target = resolvePlayerCommandTarget(player, args, "/tpto <pid|name>")
+        if not target then
+            return false
+        end
+
+        local ok, result = teleportPlayerToPlayer(player, target)
+        if not ok then
+            player:sendMessage(result)
+            return false
+        end
+
+        player:sendMessage(string.format("Teleporting to [%d] %s in %s.", target.guid, target.name, result))
+        mp.log(string.format("[core] /tpto by %s target=%s guid=%s cell=%s",
+            player.name,
+            target.name,
+            tostring(target.guid),
+            tostring(result)
+        ))
+        return false
+    end
+
+    if msg == COMMAND_PREFIX .. "tp" or msg:sub(1, #TP_PREFIX) == TP_PREFIX then
+        if not requireAdmin(player) then
+            return false
+        end
+
+        local rest = msg == COMMAND_PREFIX .. "tp" and "" or msg:sub(#TP_PREFIX + 1)
+        local args, parseError = parseCommandArgs(rest)
+        if not args then
+            player:sendMessage(parseError or "Invalid arguments.")
+            player:sendMessage("Usage: /tp <pid|name>")
+            return false
+        end
+
+        local target = resolvePlayerCommandTarget(player, args, "/tp <pid|name>")
+        if not target then
+            return false
+        end
+
+        local ok, result = teleportPlayerToPlayer(target, player)
+        if not ok then
+            player:sendMessage(result)
+            return false
+        end
+
+        player:sendMessage(string.format("Teleporting [%d] %s to you.", target.guid, target.name))
+        if target.guid ~= player.guid then
+            target:sendMessage("Teleporting to " .. player.name .. ".")
+        end
+        mp.log(string.format("[core] /tp by %s target=%s guid=%s cell=%s",
+            player.name,
+            target.name,
+            tostring(target.guid),
+            tostring(result)
+        ))
         return false
     end
 
@@ -1324,6 +1488,14 @@ local function handleChat(player, data)
     end
 
     if msg:sub(1, #COMMAND_PREFIX) == COMMAND_PREFIX then
+        local speechHandled = speechCommands.handleChat(player, data, {
+            commandPrefix = COMMAND_PREFIX,
+            parseCommandArgs = parseCommandArgs,
+        })
+        if speechHandled ~= nil then
+            return speechHandled
+        end
+
         local surfHandled = surfCommands.handleChat(player, data, {
             commandPrefix = COMMAND_PREFIX,
             findPlayerByName = findPlayerByName,

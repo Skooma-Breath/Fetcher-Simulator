@@ -40,6 +40,8 @@ struct LuaPlayerSnapshot
     std::string name;
     std::string cell;
     std::string nickname;
+    std::string race;
+    bool isMale = true;
     float x = 0.f;
     float y = 0.f;
     float z = 0.f;
@@ -124,9 +126,12 @@ public:
     void clearPlayerSurfPhysicsSettings(uint32_t guid);
 
     void queueBroadcastServerMessage(const std::string& text);
+    void queueBroadcastNameColorMessage(const std::string& text);
     void queueBroadcastServerMessageToCell(const std::string& cellId, const std::string& text);
     void queueSendServerMessage(uint32_t guid, const std::string& text);
     void queueRelayPlayerChat(uint32_t guid, const std::string& text);
+    void queuePlaySpeech(uint32_t guid, const std::string& soundPath);
+    void queueKillPlayer(uint32_t guid, const std::string& deathMessage = std::string());
     void queuePlaceObject(const std::string& refId, int count, const std::string& cellId, const Position& position);
     void queueSpawnActor(
         const std::string& refId, uint32_t refNum, uint32_t mpNum, const std::string& cellId, const Position& position,

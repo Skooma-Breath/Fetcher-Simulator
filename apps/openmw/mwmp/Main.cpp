@@ -2,9 +2,11 @@
 #include "Identity.hpp"
 #include "MpNetworkBridge.hpp"
 #include <algorithm>
+#include <cctype>
 #include <cstring>
 
 #include <stdexcept>
+#include <string_view>
 
 #include <components/debug/debuglog.hpp>
 #include <components/openmw-mp/Packets/Player/PacketPlayerPosition.hpp>
@@ -28,6 +30,7 @@
 #include <components/openmw-mp/Packets/Player/PacketPlayerAnimPlay.hpp>
 #include <components/openmw-mp/Packets/Player/PacketPlayerAttack.hpp>
 #include <components/openmw-mp/Packets/Player/PacketPlayerCast.hpp>
+#include <components/openmw-mp/Packets/Player/PacketPlayerSpeech.hpp>
 #include <components/openmw-mp/Packets/Player/PacketPlayerInventory.hpp>
 #include <components/openmw-mp/Packets/Lua/PacketLuaEvent.hpp>
 #include <components/openmw-mp/Packets/Lua/PacketLuaStorage.hpp>
@@ -67,7 +70,9 @@
 #include "../mwbase/windowmanager.hpp"
 #include "../mwphysics/surfphysics.hpp"
 #include "../mwbase/world.hpp"
+#include "../mwbase/soundmanager.hpp"
 #include "../mwgui/inventorywindow.hpp"
+#include <components/vfs/pathutil.hpp>
 #include "../mwgui/mode.hpp"
 #include "../mwworld/player.hpp"
 #include "../mwworld/esmstore.hpp"
@@ -79,6 +84,33 @@
 
 namespace mwmp
 {
+namespace
+{
+    bool startsWithNoCase(std::string_view value, std::string_view prefix)
+    {
+        if (value.size() < prefix.size())
+            return false;
+
+        for (std::size_t i = 0; i < prefix.size(); ++i)
+        {
+            const auto left = static_cast<unsigned char>(value[i]);
+            const auto right = static_cast<unsigned char>(prefix[i]);
+            if (std::tolower(left) != std::tolower(right))
+                return false;
+        }
+
+        return true;
+    }
+
+    std::string normalizeSpeechSoundPath(std::string soundPath)
+    {
+        std::replace(soundPath.begin(), soundPath.end(), '/', '\\');
+        if (startsWithNoCase(soundPath, "sound\\") || !startsWithNoCase(soundPath, "vo\\"))
+            return soundPath;
+
+        return "Sound\\" + soundPath;
+    }
+}
 
 Main* Main::sInstance = nullptr;
 
@@ -996,7 +1028,7 @@ void Main::registerProtocolHandlers()
             pkt.setPlayer(&tmp);
             if (!pkt.decode(data, size)) return;
             // Show message from any player including own echo from server
-            mChatWindow->addMessage(tmp.name, pkt.message);
+            mChatWindow->addMessage(tmp.name, pkt.message, pkt.channel);
         });
 
         // --- World time ---
@@ -1129,6 +1161,29 @@ void Main::registerProtocolHandlers()
             if (rp) rp->onAttack(tmp);
         });
 
+    // --- Player speech event ---
+    proto.registerHandler(PacketType::PlayerSpeech,
+        [this](const uint8_t* data, size_t size)
+        {
+            BasePlayer tmp;
+            PacketPlayerSpeech pkt;
+            pkt.setPlayer(&tmp);
+            if (!pkt.decode(data, size) || tmp.speechSound.empty()) return;
+            tmp.speechSound = normalizeSpeechSoundPath(tmp.speechSound);
+
+            if (tmp.guid == mPlayerSync->localPlayer().guid)
+            {
+                MWBase::World* world = MWBase::Environment::get().getWorld();
+                MWBase::SoundManager* sound = MWBase::Environment::get().getSoundManager();
+                if (world && sound)
+                    sound->say(world->getPlayerPtr(), VFS::Path::Normalized(tmp.speechSound));
+                return;
+            }
+
+            auto* rp = mPlayerList->getPlayer(tmp.guid);
+            if (rp) rp->onSpeech(tmp);
+        });
+
     // --- Remote player cast event ---
     proto.registerHandler(PacketType::PlayerCast,
         [this](const uint8_t* data, size_t size)
@@ -1168,7 +1223,11 @@ void Main::registerProtocolHandlers()
             PacketPlayerDeath pkt;
             pkt.setPlayer(&tmp);
             if (!pkt.decode(data, size)) return;
-            if (tmp.guid == mPlayerSync->localPlayer().guid) return;
+            if (tmp.guid == mPlayerSync->localPlayer().guid)
+            {
+                mPlayerSync->applyServerDeath(tmp);
+                return;
+            }
 
             auto* rp = mPlayerList->getPlayer(tmp.guid);
             if (rp) rp->onDeath(tmp);

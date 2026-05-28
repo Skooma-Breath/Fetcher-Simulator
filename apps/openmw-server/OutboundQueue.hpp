@@ -19,6 +19,7 @@ namespace mwmp
 enum class OutboundLuaActionType
 {
     BroadcastServerMessage,
+    BroadcastNameColorMessage,
     BroadcastServerMessageToCell,
     SendServerMessage,
     RelayPlayerChat,
@@ -46,6 +47,8 @@ enum class OutboundLuaActionType
     RefreshCellGameSettings,
     RefreshPlayerGameSettings,
     RefreshAllGameSettings,
+    PlaySpeech,
+    KillPlayer,
 };
 
 struct OutboundLuaAction

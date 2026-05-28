@@ -71,6 +71,7 @@ namespace mwmp
         AnimPlay    animPlay;     // most recent one-shot anim (reliable)
         Attack      attack;
         CastSpell   castSpell;
+        std::string speechSound;   // VFS voice path for one-shot speech playback
 
         // ------------------------------------------------------------------
         // Equipment (19 slots matching OpenMW InventoryStore slots)

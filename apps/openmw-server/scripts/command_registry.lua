@@ -2,6 +2,7 @@ local M = {}
 
 local CATEGORY_ORDER = {
     "General",
+    "Voice",
     "Travel",
     "Surf",
     "Records",
@@ -23,6 +24,24 @@ local COMMANDS = {
         summary = "List online players.",
     },
     {
+        id = "list",
+        category = "General",
+        usage = "/list",
+        summary = "List online players and their pids.",
+    },
+    {
+        id = "f",
+        category = "General",
+        usage = "/f",
+        summary = "Pay respects in chat.",
+    },
+    {
+        id = "suicide",
+        category = "General",
+        usage = "/suicide [message]",
+        summary = "Kill your current character with an optional custom death message.",
+    },
+    {
         id = "time",
         category = "General",
         usage = "/time",
@@ -39,6 +58,24 @@ local COMMANDS = {
         category = "General",
         usage = "/nick <name>|off",
         summary = "Set or clear your nickname.",
+    },
+    {
+        id = "speech",
+        category = "Voice",
+        usage = "/speech <type> <index>",
+        summary = "Play a race/gender voice line on your character.",
+    },
+    {
+        id = "s",
+        category = "Voice",
+        usage = "/s <type> <index>",
+        summary = "Short alias for /speech.",
+    },
+    {
+        id = "speechhelp",
+        category = "Voice",
+        usage = "/speechhelp",
+        summary = "List valid speech types and indexes.",
     },
     {
         id = "login",
@@ -185,6 +222,20 @@ local COMMANDS = {
         category = "Admin",
         usage = "/tomp <mpNum>",
         summary = "Teleport to a server-tracked actor or object mpNum.",
+        adminOnly = true,
+    },
+    {
+        id = "tpto",
+        category = "Admin",
+        usage = "/tpto <pid|name>",
+        summary = "Teleport yourself to an online player.",
+        adminOnly = true,
+    },
+    {
+        id = "tp",
+        category = "Admin",
+        usage = "/tp <pid|name>",
+        summary = "Teleport an online player to you.",
         adminOnly = true,
     },
     {

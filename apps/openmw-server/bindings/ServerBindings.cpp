@@ -191,6 +191,11 @@ sol::table initMpPackage(LuaUtil::LuaView& view, LuaServerContext* context, LuaU
             if (context) context->queueBroadcastLuaEvent(eventName, LuaUtil::serialize(data));
         }));
 
+    mp.set_function("broadcastNameColor", [context](const std::string& text)
+    {
+        if (context) context->queueBroadcastNameColorMessage(text);
+    });
+
     mp.set_function("broadcastToCell", sol::overload(
         [context](const std::string& cellId, const std::string& text)
         {
@@ -718,6 +723,40 @@ sol::table initMpPackage(LuaUtil::LuaView& view, LuaServerContext* context, LuaU
     mp.set_function("relayChat", [context](uint32_t guid, const std::string& text)
     {
         if (context) context->queueRelayPlayerChat(guid, text);
+    });
+
+    mp.set_function("playSpeech", [context](uint32_t guid, const std::string& soundPath) -> bool
+    {
+        if (!context || guid == 0 || soundPath.empty())
+            return false;
+
+        context->queuePlaySpeech(guid, soundPath);
+        return true;
+    });
+    mp.set_function("PlaySpeech", [context](uint32_t guid, const std::string& soundPath) -> bool
+    {
+        if (!context || guid == 0 || soundPath.empty())
+            return false;
+
+        context->queuePlaySpeech(guid, soundPath);
+        return true;
+    });
+
+    mp.set_function("killPlayer", [context](uint32_t guid, const sol::optional<std::string>& deathMessage) -> bool
+    {
+        if (!context || guid == 0)
+            return false;
+
+        context->queueKillPlayer(guid, deathMessage.value_or(""));
+        return true;
+    });
+    mp.set_function("KillPlayer", [context](uint32_t guid, const sol::optional<std::string>& deathMessage) -> bool
+    {
+        if (!context || guid == 0)
+            return false;
+
+        context->queueKillPlayer(guid, deathMessage.value_or(""));
+        return true;
     });
 
     mp.set_function("teleportPlayer", [context](uint32_t guid, const std::string& cellId, const sol::table& positionTable) -> bool

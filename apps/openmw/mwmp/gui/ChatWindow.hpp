@@ -32,7 +32,8 @@ namespace mwmp
         void update(float dt);
 
         // Append a received or sent message.
-        void addMessage(const std::string& sender, const std::string& message);
+        void addMessage(const std::string& sender, const std::string& message,
+            const std::string& channel = std::string());
 
         // Cycle display mode 1→2→3→1 (bound to F6 / A_ChatMode).
         void cycleDisplayMode();

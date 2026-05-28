@@ -292,6 +292,9 @@ void LuaServerContext::drainOutbound()
             case OutboundLuaActionType::BroadcastServerMessage:
                 mServer->broadcastServerMessage(action.text);
                 break;
+            case OutboundLuaActionType::BroadcastNameColorMessage:
+                mServer->broadcastNameColorMessage(action.text);
+                break;
             case OutboundLuaActionType::BroadcastServerMessageToCell:
                 mServer->broadcastServerMessageToCell(action.cellId, action.text);
                 break;
@@ -300,6 +303,12 @@ void LuaServerContext::drainOutbound()
                 break;
             case OutboundLuaActionType::RelayPlayerChat:
                 mServer->relayPlayerChat(action.guid, action.text);
+                break;
+            case OutboundLuaActionType::PlaySpeech:
+                mServer->playSpeech(action.guid, action.text);
+                break;
+            case OutboundLuaActionType::KillPlayer:
+                mServer->killPlayer(action.guid, action.text);
                 break;
             case OutboundLuaActionType::PlaceObject:
                 mServer->placeObject(action.text, action.itemCount, action.cellId, action.position);
@@ -963,6 +972,14 @@ void LuaServerContext::queueBroadcastServerMessage(const std::string& text)
     mOutboundQueue.push(std::move(action));
 }
 
+void LuaServerContext::queueBroadcastNameColorMessage(const std::string& text)
+{
+    OutboundLuaAction action;
+    action.type = OutboundLuaActionType::BroadcastNameColorMessage;
+    action.text = text;
+    mOutboundQueue.push(std::move(action));
+}
+
 void LuaServerContext::queueBroadcastServerMessageToCell(const std::string& cellId, const std::string& text)
 {
     OutboundLuaAction action;
@@ -1041,6 +1058,30 @@ void LuaServerContext::queueTeleportPlayer(uint32_t guid, const std::string& cel
     action.guid = guid;
     action.cellId = cellId;
     action.position = position;
+    mOutboundQueue.push(std::move(action));
+}
+
+void LuaServerContext::queuePlaySpeech(uint32_t guid, const std::string& soundPath)
+{
+    if (guid == 0 || soundPath.empty())
+        return;
+
+    OutboundLuaAction action;
+    action.type = OutboundLuaActionType::PlaySpeech;
+    action.guid = guid;
+    action.text = soundPath;
+    mOutboundQueue.push(std::move(action));
+}
+
+void LuaServerContext::queueKillPlayer(uint32_t guid, const std::string& deathMessage)
+{
+    if (guid == 0)
+        return;
+
+    OutboundLuaAction action;
+    action.type = OutboundLuaActionType::KillPlayer;
+    action.guid = guid;
+    action.text = deathMessage;
     mOutboundQueue.push(std::move(action));
 }
 

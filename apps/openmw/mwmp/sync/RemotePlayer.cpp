@@ -1700,6 +1700,11 @@ namespace mwmp
                     = (atk.type == 2 || atk.type == 3) ? MWMechanics::DamageSourceType::Ranged
                                                        : MWMechanics::DamageSourceType::Melee;
                 MWWorld::Ptr weapon = getEquippedWeapon(mNpcPtr);
+                if (atk.healthDamage && targetPtr == world->getPlayerPtr())
+                {
+                    Main::get().getPlayerSync().noteRemotePlayerHit(mGuid);
+                    targetPtr.getClass().getCreatureStats(targetPtr).setHitAttemptActor(mNpcPtr.getCellRef().getRefNum());
+                }
                 MWBase::Environment::get().getLuaManager()->onHit(
                     mNpcPtr, targetPtr, weapon, MWWorld::Ptr(), atk.type, atk.strength, atk.damage, atk.healthDamage,
                     hitPos, true, sourceType);
@@ -1736,6 +1741,20 @@ namespace mwmp
             if (auto* bn = mNpcPtr.getRefData().getBaseNode())
                 bn->setUserValue("mp_attack_knocked", false);
         }
+    }
+
+    // ---------------------------------------------------------------------------
+    void RemotePlayer::onSpeech(const BasePlayer& state)
+    {
+        if (!mIsSpawned || mNpcPtr.isEmpty() || state.speechSound.empty())
+            return;
+
+        MWBase::SoundManager* sound = MWBase::Environment::get().getSoundManager();
+        if (!sound)
+            return;
+
+        sound->say(mNpcPtr, VFS::Path::Normalized(state.speechSound));
+        Log(Debug::Verbose) << "[MP] RemotePlayer " << mName << ": speech '" << state.speechSound << "'";
     }
 
     // ---------------------------------------------------------------------------

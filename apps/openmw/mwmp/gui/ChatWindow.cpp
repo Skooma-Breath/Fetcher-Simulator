@@ -100,14 +100,17 @@ static std::string escapeMyGUI(const std::string& s)
 }
 
 void ChatWindow::addMessage(const std::string& sender,
-                            const std::string& message)
+                            const std::string& message,
+                            const std::string& channel)
 {
     // Escape user-supplied strings — our own colour tags are intentional.
     const std::string safeSender  = escapeMyGUI(sender);
     const std::string safeMessage = escapeMyGUI(message);
 
     std::string line;
-    if (!sender.empty())
+    if (channel == "nameColor")
+        line = "#FFCC44" + safeMessage;
+    else if (!sender.empty())
         line = "#FFCC44" + safeSender + ": #FFFFFF" + safeMessage;
     else
         line = "#AAAAAA" + safeMessage;
