@@ -119,6 +119,9 @@ Config.COMMAND_PREFIX = "/"
 Config.ANNOUNCE_JOIN_LEAVE = true
 Config.ANNOUNCE_PLAYER_DEATHS = true
 Config.LOG_CHAT = false
+-- 0 disables speech rate limiting. Set above 0 to rate-limit repeated /s commands.
+Config.SPEECH_COOLDOWN_SECONDS = 0
+Config.SPEECH_COOLDOWN_NOTICE_SECONDS = 1.5
 
 ------------------------------------------------------------------------
 -- Moderation

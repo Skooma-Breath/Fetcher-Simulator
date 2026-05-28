@@ -1,4 +1,5 @@
 local mp = require("mp")
+local config = require("config")
 local speechData = require("speech_data")
 
 local M = {}
@@ -25,6 +26,9 @@ local COLLECTION_ORDER = {
     "ord",
     "vampire",
 }
+
+local lastSpeechAtByGuid = {}
+local lastCooldownNoticeAtByGuid = {}
 
 local TYPE_ALIASES = {
     atk = "attack",
@@ -177,6 +181,20 @@ local function clientVoicePath(path)
     return normalized
 end
 
+local function parsePositiveInteger(value)
+    local raw = trim(value)
+    if raw == "" or not raw:match("^%d+$") then
+        return nil
+    end
+
+    local number = tonumber(raw)
+    if not number or number < 1 then
+        return nil
+    end
+
+    return math.floor(number)
+end
+
 local function entryPathById(entries, requestedId)
     if not entries then
         return nil
@@ -187,7 +205,7 @@ local function entryPathById(entries, requestedId)
         return nil
     end
 
-    local requestedNumber = tonumber(raw)
+    local requestedNumber = parsePositiveInteger(raw)
     for _, entry in ipairs(entries) do
         local id = entry[1]
         if id == raw then
@@ -203,14 +221,78 @@ local function entryPathById(entries, requestedId)
 end
 
 local function globalEntryPath(entries, requestedIndex)
-    local index = tonumber(trim(requestedIndex))
+    local index = parsePositiveInteger(requestedIndex)
     if not index then
         return nil
     end
 
-    index = math.floor(index)
     local entry = entries and entries[index]
     return entry and entry[2] or nil
+end
+
+local function speechCooldownKey(player)
+    return tostring(player and player.guid or player and player.name or "")
+end
+
+local function speechCooldownSeconds()
+    local value = tonumber(config.SPEECH_COOLDOWN_SECONDS or 0) or 0
+    if value <= 0 then
+        return 0
+    end
+    return value
+end
+
+local function speechCooldownNoticeSeconds()
+    local value = tonumber(config.SPEECH_COOLDOWN_NOTICE_SECONDS or 1.5) or 1.5
+    if value < 0 then
+        return 0
+    end
+    return value
+end
+
+local function canPlaySpeechNow(player)
+    local cooldown = speechCooldownSeconds()
+    if cooldown <= 0 then
+        return true
+    end
+
+    if type(mp.getUptime) ~= "function" then
+        return true
+    end
+
+    local now = mp.getUptime()
+    if type(now) ~= "number" then
+        return true
+    end
+
+    local key = speechCooldownKey(player)
+    local last = lastSpeechAtByGuid[key]
+    if last and now - last < cooldown then
+        local lastNotice = lastCooldownNoticeAtByGuid[key] or 0
+        if now - lastNotice >= speechCooldownNoticeSeconds() then
+            local remaining = math.max(cooldown - (now - last), 0)
+            player:sendMessage(string.format("Speech is on cooldown for %.1fs.", remaining))
+            lastCooldownNoticeAtByGuid[key] = now
+        end
+        return false
+    end
+
+    return true
+end
+
+local function markSpeechPlayed(player)
+    if speechCooldownSeconds() <= 0 then
+        return
+    end
+
+    if type(mp.getUptime) ~= "function" then
+        return
+    end
+
+    local now = mp.getUptime()
+    if type(now) == "number" then
+        lastSpeechAtByGuid[speechCooldownKey(player)] = now
+    end
 end
 
 local function resolveSpeechPath(player, speechInput, speechIndex)
@@ -390,12 +472,17 @@ function M.handleChat(player, data, env)
         return false
     end
 
+    if not canPlaySpeechNow(player) then
+        return false
+    end
+
     local soundPath = clientVoicePath(path)
     if not mp.playSpeech(player.guid, soundPath) then
         player:sendMessage("Could not play speech for your character right now.")
         return false
     end
 
+    markSpeechPlayed(player)
     mp.log(string.format("[speech] %s played %s", player.name, soundPath))
     return false
 end

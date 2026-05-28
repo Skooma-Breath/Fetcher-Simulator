@@ -202,6 +202,7 @@ set(BUILTIN_DATA_FILES
     mygui/openmw_mp_server_browser.layout
     mygui/openmw_mp_account.layout
     mygui/openmw_mp_char_select.layout
+    mygui/openmw_mp_key_link.layout
     mygui/openmw_console.skin.xml
     mygui/openmw_container_window.layout
     mygui/openmw_controllerbuttons.layout
