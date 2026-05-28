@@ -1,8 +1,8 @@
 name: Build and test
 
 on:
-- push
-- pull_request
+  pull_request:
+  workflow_dispatch:
 
 env:
   BUILD_TYPE: RelWithDebInfo
