@@ -21,8 +21,12 @@ local function formatTime(seconds)
     return string.format("%.3f", remainder)
 end
 
+local DEBUG_TIMER = false
+
 local function logTimer(message)
-    print("[SurfTimer] " .. tostring(message))
+    if DEBUG_TIMER then
+        print("[SurfTimer] " .. tostring(message))
+    end
 end
 
 local function getPlayerFromPayload(data)

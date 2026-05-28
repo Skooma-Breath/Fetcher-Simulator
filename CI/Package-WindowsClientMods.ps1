@@ -222,6 +222,9 @@ $settingsLines = @(
     "[Fog]",
     "use distant fog = false",
     "",
+    "[Lua]",
+    "lua profiler = false",
+    "",
     "[Video]",
     "antialiasing = 16"
 )
