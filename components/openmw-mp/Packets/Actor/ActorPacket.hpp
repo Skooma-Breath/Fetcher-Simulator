@@ -157,6 +157,7 @@ namespace mwmp
             ws.write(flags.blockedMoveSpeed);
             ws.write(flags.jumpVz);
             ws.writeString(flags.currentAnimGroup);
+            ws.write(flags.currentAnimCompletion);
         }
 
         void unpackAnimFlags(ReadStream& rs, AnimFlags& flags)
@@ -168,6 +169,7 @@ namespace mwmp
             rs.read(flags.blockedMoveSpeed);
             rs.read(flags.jumpVz);
             flags.currentAnimGroup = rs.readString();
+            rs.read(flags.currentAnimCompletion);
         }
 
         void packAnimPlay(WriteStream& ws, const AnimPlay& animPlay) const

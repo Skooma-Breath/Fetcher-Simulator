@@ -83,14 +83,23 @@ namespace
             baseNode->setUserValue("mp_current_idle_group", group);
     }
 
-    bool getMpSyncedRemoteIdleGroup(const MWWorld::Ptr& ptr, std::string& group)
+    bool getMpSyncedRemoteIdleGroup(const MWWorld::Ptr& ptr, std::string& group, float& startPoint)
     {
+        startPoint = 0.f;
         const auto* baseNode = ptr.getRefData().getBaseNode();
+        if (!baseNode)
+            return false;
         bool isRemote = false;
-        if (!baseNode || !baseNode->getUserValue("mp_remote_actor", isRemote) || !isRemote)
+        baseNode->getUserValue("mp_remote_actor", isRemote);
+        bool holdAfterAuthorityTransfer = false;
+        baseNode->getUserValue("mp_hold_synced_idle_after_authority_transfer", holdAfterAuthorityTransfer);
+        if (!isRemote && !holdAfterAuthorityTransfer)
             return false;
         if (!baseNode->getUserValue("mp_synced_idle_group", group) || !isMpSpecialIdleGroup(group))
             return false;
+        float syncedStartPoint = -1.f;
+        if (baseNode->getUserValue("mp_synced_idle_start_point", syncedStartPoint) && syncedStartPoint >= 0.f)
+            startPoint = std::clamp(syncedStartPoint, 0.f, 1.f);
         return true;
     }
 #endif
@@ -929,8 +938,17 @@ namespace MWMechanics
 
 #ifdef BUILD_MULTIPLAYER
         std::string syncedIdleGroup;
+        float syncedIdleStartPoint = 0.f;
         const bool hasSyncedIdleGroup = (idle == CharState_Idle || idle == CharState_SpecialIdle)
-            && getMpSyncedRemoteIdleGroup(mPtr, syncedIdleGroup);
+            && getMpSyncedRemoteIdleGroup(mPtr, syncedIdleGroup, syncedIdleStartPoint);
+        bool isMpRemoteActor = false;
+        if (const auto* baseNode = mPtr.getRefData().getBaseNode())
+            baseNode->getUserValue("mp_remote_actor", isMpRemoteActor);
+        // Non-authority actors must not choose their own special idle variants.
+        // They either follow the authority-provided synced group or remain in base
+        // idle.  Otherwise every client can pick a different idle and phase.
+        if (isMpRemoteActor && idle == CharState_SpecialIdle && !hasSyncedIdleGroup)
+            idle = CharState_Idle;
 #endif
 
         if (!force && idle == mIdleState && (mAnimation->isPlaying(mCurrentIdle) || !mAnimQueue.empty())
@@ -938,7 +956,20 @@ namespace MWMechanics
             && (!hasSyncedIdleGroup || mCurrentIdle == syncedIdleGroup)
 #endif
         )
-            return;
+        {
+#ifdef BUILD_MULTIPLAYER
+            if (hasSyncedIdleGroup)
+            {
+                // Same synced idle is already playing.  Let it advance locally;
+                // periodic authority snapshots update the node value, but replaying
+                // the same group every frame pins the animation to one pose and makes
+                // puppets slide around as if paralyzed.
+                return;
+            }
+            else
+#endif
+                return;
+        }
 
         mIdleState = idle;
 
@@ -986,6 +1017,16 @@ namespace MWMechanics
             priority = getIdlePriority(CharState_SpecialIdle);
             numLoops = std::numeric_limits<uint32_t>::max();
             mIdleState = CharState_SpecialIdle;
+
+            if (!force && mCurrentIdle == idleGroup)
+            {
+                // Same synced idle is already selected.  The regular early-return
+                // path can be bypassed when vanilla state briefly reports base idle
+                // or when isPlaying() is false just after a clear/replay.  Do not
+                // replay the same MP-synced group every frame; that pins the actor
+                // to a single pose while network interpolation moves the node.
+                return;
+            }
         }
 #endif
 
@@ -996,13 +1037,40 @@ namespace MWMechanics
         }
 
         float startPoint = 0.f;
+#ifdef BUILD_MULTIPLAYER
+        if (hasSyncedIdleGroup)
+            startPoint = syncedIdleStartPoint;
+#endif
         // There is no need to restart anim if the new and old anims are the same.
-        // Just update the number of loops.
+        // Just update the number of loops.  For MP synced idles, do not preserve
+        // the local completion here: the authority-provided start point is the
+        // whole point of the replay.
         if (mCurrentIdle == idleGroup)
-            mAnimation->getInfo(mCurrentIdle, &startPoint);
+        {
+#ifdef BUILD_MULTIPLAYER
+            if (!hasSyncedIdleGroup)
+#endif
+                mAnimation->getInfo(mCurrentIdle, &startPoint);
+        }
 
         clearStateAnimation(mCurrentIdle);
         mCurrentIdle = std::move(idleGroup);
+#ifdef BUILD_MULTIPLAYER
+        if (hasSyncedIdleGroup)
+        {
+            float localCompletion = -1.f;
+            if (!mCurrentIdle.empty())
+                mAnimation->getInfo(mCurrentIdle, &localCompletion);
+            Log(Debug::Info) << "[MP] CharacterController: synced idle play"
+                             << " ptr='" << mPtr.getCellRef().getRefId() << "'"
+                             << " group='" << mCurrentIdle << "'"
+                             << " startPoint=" << startPoint
+                             << " localBefore=" << localCompletion
+                             << " force=" << force
+                             << " idleState=" << static_cast<int>(idle)
+                             << " currentIdleWas='" << mCurrentIdle << "'";
+        }
+#endif
         playBlendedAnimation(mCurrentIdle, priority, MWRender::BlendMask_All, false, 1.0f, "start", "stop", startPoint,
             static_cast<uint32_t>(numLoops), true);
 #ifdef BUILD_MULTIPLAYER

@@ -490,6 +490,26 @@ namespace
         });
     }
 
+    bool ensureInventoryContainsEquippedItems(mwmp::BasePlayer& player)
+    {
+        bool changed = false;
+        player.inventoryChanges.action = mwmp::BasePlayer::InventoryChanges::Action::Set;
+
+        for (const auto& entry : player.equipment)
+        {
+            const mwmp::Item& item = entry.item;
+            if (item.refId.empty() || item.count <= 0)
+                continue;
+            if (inventoryContainsItemIdentity(player.inventoryChanges.items, item))
+                continue;
+
+            player.inventoryChanges.items.push_back(item);
+            changed = true;
+        }
+
+        return changed;
+    }
+
     bool sameItemStack(const mwmp::Item& left, const mwmp::Item& right)
     {
         return sameItemIdentity(left, right) && left.count == right.count;
@@ -989,8 +1009,12 @@ namespace
         presentationActor.isMoving = hasLocomotionInput;
         snapshot.presentationFlags = mwmp::makeActorPresentationFlags(presentationActor);
         snapshot.currentAnimGroup = actor.animFlags.currentAnimGroup;
+        snapshot.currentAnimCompletion = actor.animFlags.currentAnimCompletion;
         if ((actor.isDead || !hasLocomotionInput) && isLocomotionAnimGroup(snapshot.currentAnimGroup))
+        {
             snapshot.currentAnimGroup.clear();
+            snapshot.currentAnimCompletion = -1.f;
+        }
         return snapshot;
     }
 
@@ -4075,6 +4099,32 @@ void MPServer::handleCharacterSelect(ConnectedClient& c, const uint8_t* data, si
                     sendSavedEquipment = true;
                 }
 
+                if (sendSavedEquipment && equippedItemCount(c.player.equipment) > 0)
+                {
+                    if (!sendSavedInventory)
+                    {
+                        c.player.inventoryChanges.action = BasePlayer::InventoryChanges::Action::Set;
+                        c.player.inventoryChanges.items.clear();
+                    }
+
+                    if (ensureInventoryContainsEquippedItems(c.player))
+                    {
+                        c.restoredInventorySnapshot = c.player.inventoryChanges.items;
+                        c.hasRestoredInventorySnapshot = true;
+                        c.playerInventoryRestoreGuardUntilMs = currentServerTimeMs() + 5000;
+                        sendSavedInventory = true;
+
+                        if (mPlayerDb && c.dbCharacterId != 0)
+                            mPlayerDb->saveCharacterInventory(c.dbCharacterId, c.player.inventoryChanges.items, false);
+
+                        Log(Debug::Info) << "[PlayerDB] repaired restored inventory missing equipped item"
+                                         << " charId=" << c.dbCharacterId
+                                         << " name=" << sel.charName
+                                         << " stacks=" << c.player.inventoryChanges.items.size()
+                                         << " equipped=" << equippedItemCount(c.player.equipment);
+                    }
+                }
+
                 if (rec->hasSavedStats && mPlayerDb->loadCharacterStats(rec->characterId, c.player))
                 {
                     cdPkt.hasSavedStats = true;
@@ -4175,11 +4225,11 @@ void MPServer::handleCharacterSelect(ConnectedClient& c, const uint8_t* data, si
         PacketPlayerInventory inventory;
         inventory.setPlayer(&c.player);
         sendTo(c.conn, inventory.encode());
-        Log(Debug::Info) << "[PlayerDB] sent player inventory restore"
-                         << " guid=" << c.guid
-                         << " charId=" << c.dbCharacterId
-                         << " name=" << c.slotName
-                         << " stacks=" << c.player.inventoryChanges.items.size();
+        Log(Debug::Verbose) << "[PlayerDB] sent player inventory restore"
+                            << " guid=" << c.guid
+                            << " charId=" << c.dbCharacterId
+                            << " name=" << c.slotName
+                            << " stacks=" << c.player.inventoryChanges.items.size();
     }
 
     if (sendSavedEquipment)
@@ -4187,11 +4237,11 @@ void MPServer::handleCharacterSelect(ConnectedClient& c, const uint8_t* data, si
         PacketPlayerEquipment equipment;
         equipment.setPlayer(&c.player);
         sendTo(c.conn, equipment.encode());
-        Log(Debug::Info) << "[PlayerDB] sent player equipment restore"
-                         << " guid=" << c.guid
-                         << " charId=" << c.dbCharacterId
-                         << " name=" << c.slotName
-                         << " equipped=" << equippedItemCount(c.player.equipment);
+        Log(Debug::Verbose) << "[PlayerDB] sent player equipment restore"
+                            << " guid=" << c.guid
+                            << " charId=" << c.dbCharacterId
+                            << " name=" << c.slotName
+                            << " equipped=" << equippedItemCount(c.player.equipment);
     }
 
     // Late-join catch-up: send state of all in-world players to the new joiner.
@@ -5903,7 +5953,15 @@ void MPServer::handleActorPresentationV2(ConnectedClient& c, const uint8_t* data
             (actor.animFlags.movementFlags & ~kReliablePresentationMovementFlags)
             | (snapshot.movementFlags & kReliablePresentationMovementFlags);
         if (isReliablePresentationAnimGroup(snapshot.currentAnimGroup))
+        {
             actor.animFlags.currentAnimGroup = snapshot.currentAnimGroup;
+            actor.animFlags.currentAnimCompletion = snapshot.currentAnimCompletion;
+        }
+        else if (isReliablePresentationAnimGroup(actor.animFlags.currentAnimGroup))
+        {
+            actor.animFlags.currentAnimGroup.clear();
+            actor.animFlags.currentAnimCompletion = -1.f;
+        }
         if (snapshotIsDead)
         {
             actor.isMoving = false;
@@ -5982,6 +6040,14 @@ void MPServer::handleActorPresentationV2(ConnectedClient& c, const uint8_t* data
 // ---------------------------------------------------------------------------
 void MPServer::handleActorAnimFlags(ConnectedClient& c, const uint8_t* data, size_t size)
 {
+    if (c.actorSyncProtocolVersion >= ActorSyncProtocolVersionV2)
+    {
+        Log(Debug::Verbose) << "[Server] Ignoring retired legacy ActorAnimFlags from v2 client"
+                            << " from=" << c.name
+                            << " protocol=" << c.actorSyncProtocolVersion;
+        return;
+    }
+
     ActorList incoming;
     PacketActorAnimFlags pkt;
     pkt.setActorList(&incoming);
@@ -6030,6 +6096,14 @@ void MPServer::handleActorAnimFlags(ConnectedClient& c, const uint8_t* data, siz
 // ---------------------------------------------------------------------------
 void MPServer::handleActorAnimPlay(ConnectedClient& c, const uint8_t* data, size_t size)
 {
+    if (c.actorSyncProtocolVersion >= ActorSyncProtocolVersionV2)
+    {
+        Log(Debug::Verbose) << "[Server] Ignoring retired legacy ActorAnimPlay from v2 client"
+                            << " from=" << c.name
+                            << " protocol=" << c.actorSyncProtocolVersion;
+        return;
+    }
+
     ActorList incoming;
     PacketActorAnimPlay pkt;
     pkt.setActorList(&incoming);

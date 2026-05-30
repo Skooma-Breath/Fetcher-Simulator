@@ -467,11 +467,11 @@ void PlayerSync::queueAuthoritativeEquipment(const BasePlayer& authoritative)
         mAuthoritativeEquipment[slot].slot = slot;
     mPendingEquipmentRestore = true;
 
-    Log(Debug::Info) << "[MP] PlayerSync: queued authoritative equipment"
-                     << " guid=" << authoritative.guid
-                     << " localGuid=" << mLocal.guid
-                     << " equipped=" << equippedItemCount(mAuthoritativeEquipment)
-                     << " state=" << static_cast<int>(MWBase::Environment::get().getStateManager()->getState());
+    Log(Debug::Verbose) << "[MP] PlayerSync: queued authoritative equipment"
+                        << " guid=" << authoritative.guid
+                        << " localGuid=" << mLocal.guid
+                        << " equipped=" << equippedItemCount(mAuthoritativeEquipment)
+                        << " state=" << static_cast<int>(MWBase::Environment::get().getStateManager()->getState());
 
     // During MP auto-enter the server can send saved equipment immediately after
     // CharacterData while OpenMW is still in State_NoGame. Do not apply to the
@@ -494,11 +494,11 @@ void PlayerSync::queueAuthoritativeInventory(const BasePlayer& authoritative)
     mAuthoritativeInventory.action = BasePlayer::InventoryChanges::Action::Set;
     mPendingInventoryRestore = true;
 
-    Log(Debug::Info) << "[MP] PlayerSync: queued authoritative inventory"
-                     << " guid=" << authoritative.guid
-                     << " localGuid=" << mLocal.guid
-                     << " stacks=" << inventoryStackCount(mAuthoritativeInventory.items)
-                     << " state=" << static_cast<int>(MWBase::Environment::get().getStateManager()->getState());
+    Log(Debug::Verbose) << "[MP] PlayerSync: queued authoritative inventory"
+                        << " guid=" << authoritative.guid
+                        << " localGuid=" << mLocal.guid
+                        << " stacks=" << inventoryStackCount(mAuthoritativeInventory.items)
+                        << " state=" << static_cast<int>(MWBase::Environment::get().getStateManager()->getState());
 
     // During MP auto-enter the server can send saved inventory immediately after
     // CharacterData while OpenMW is still in State_NoGame. Do not apply to the
@@ -1971,10 +1971,11 @@ void PlayerSync::applyPendingAuthoritativeState(const MWWorld::Ptr& player)
         applied = true;
         inventoryRestoreApplied = true;
 
-        Log(Debug::Info) << "[MP] PlayerSync: applied authoritative inventory"
-                         << " requestedStacks=" << inventoryStackCount(mAuthoritativeInventory.items)
-                         << " skippedMissing=" << skippedMissingInventory
-                         << " firstMissing=" << firstMissingInventoryRefId;
+        Log(skippedMissingInventory == 0 ? Debug::Verbose : Debug::Info)
+            << "[MP] PlayerSync: applied authoritative inventory"
+            << " requestedStacks=" << inventoryStackCount(mAuthoritativeInventory.items)
+            << " skippedMissing=" << skippedMissingInventory
+            << " firstMissing=" << firstMissingInventoryRefId;
     }
 
     if (inventoryRestoreApplied
@@ -1982,8 +1983,8 @@ void PlayerSync::applyPendingAuthoritativeState(const MWWorld::Ptr& player)
         && equippedItemCount(mAuthoritativeEquipment) > 0)
     {
         mPendingEquipmentRestore = true;
-        Log(Debug::Info) << "[MP] PlayerSync: reapplying authoritative equipment after inventory restore"
-                         << " equipped=" << equippedItemCount(mAuthoritativeEquipment);
+        Log(Debug::Verbose) << "[MP] PlayerSync: reapplying authoritative equipment after inventory restore"
+                            << " equipped=" << equippedItemCount(mAuthoritativeEquipment);
     }
 
     if (mPendingEquipmentRestore)
@@ -2082,9 +2083,9 @@ void PlayerSync::applyPendingAuthoritativeState(const MWWorld::Ptr& player)
         mPendingEquipmentRestore = false;
         applied = true;
 
-        Log(Debug::Info) << "[MP] PlayerSync: applied authoritative equipment"
-                         << " equipped=" << equippedItemCount(mAuthoritativeEquipment)
-                         << " recoveredMissingItems=" << recoveredMissingEquippedItems;
+        Log(Debug::Verbose) << "[MP] PlayerSync: applied authoritative equipment"
+                            << " equipped=" << equippedItemCount(mAuthoritativeEquipment)
+                            << " recoveredMissingItems=" << recoveredMissingEquippedItems;
     }
 
     if (applied)
@@ -2097,9 +2098,9 @@ void PlayerSync::applyPendingAuthoritativeState(const MWWorld::Ptr& player)
         snapshotInventory();
         snapshotEquipment();
 
-        Log(Debug::Info) << "[MP] PlayerSync: local authoritative restore snapshot"
-                         << " liveInventoryStacks=" << inventoryStackCount(mLocal.inventoryChanges.items)
-                         << " liveEquipped=" << equippedItemCount(mLocal.equipment);
+        Log(Debug::Verbose) << "[MP] PlayerSync: local authoritative restore snapshot"
+                            << " liveInventoryStacks=" << inventoryStackCount(mLocal.inventoryChanges.items)
+                            << " liveEquipped=" << equippedItemCount(mLocal.equipment);
     }
 }
 

@@ -79,6 +79,7 @@ namespace mwmp
             float animFwd = 0.f;
             float animSide = 0.f;
             std::string currentAnimGroup;
+            float currentAnimCompletion = -1.f;
         };
 
         struct ActorRuntime
@@ -123,6 +124,11 @@ namespace mwmp
             // While this is true, keep the actor alive visually and wait for the
             // death animation source instead of applying a final corpse pose.
             bool pendingRealtimeDeathReplay = false;
+            // Non-authority side: short grace for synced special idles. This filters
+            // one-frame empty/base-idle gaps from the authority, but lets sustained
+            // authority stop/clear states end the remote dance instead of holding it
+            // forever.
+            float syncedSpecialIdleClearTimer = 0.f;
             // Pending magic bolt launch — delayed so bolt appears at end of cast
             // animation rather than immediately when the cast packet arrives.
             float pendingBoltTimer = -1.f;

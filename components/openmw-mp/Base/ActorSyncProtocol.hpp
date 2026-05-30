@@ -14,7 +14,7 @@ namespace mwmp
     static constexpr uint32_t ActorSyncProtocolVersionV1 = 1;
     // Still named v2 in code because this is the active ActorSync v2 lane, but
     // the wire number is bumped for the deterministic ActorInstanceId key break.
-    static constexpr uint32_t ActorSyncProtocolVersionV2 = 3;
+    static constexpr uint32_t ActorSyncProtocolVersionV2 = 4;
 
     using ActorInstanceId = uint64_t;
 
@@ -216,6 +216,9 @@ namespace mwmp
         // Temporary v2 bridge. Replace with a small animation group id/string table
         // before this becomes part of a long-lived high-churn protocol surface.
         std::string currentAnimGroup;
+        // Normalized completion for synced presentation idles. 0 starts at the
+        // group's start key and 1 at its stop key. Negative means unavailable.
+        float currentAnimCompletion = -1.f;
     };
 
     struct ActorPresentationV2List

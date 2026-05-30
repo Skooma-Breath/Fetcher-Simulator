@@ -64,6 +64,7 @@ namespace mwmp
             ws.write(snapshot.animSide);
             ws.write(snapshot.presentationFlags);
             ws.writeString(snapshot.currentAnimGroup);
+            ws.write(snapshot.currentAnimCompletion);
         }
 
         void unpackSnapshot(ReadStream& rs, ActorPresentationSnapshot& snapshot)
@@ -79,6 +80,7 @@ namespace mwmp
             rs.read(snapshot.animSide);
             rs.read(snapshot.presentationFlags);
             snapshot.currentAnimGroup = rs.readString();
+            rs.read(snapshot.currentAnimCompletion);
         }
 
         ActorPresentationV2List* mPresentationList = nullptr;

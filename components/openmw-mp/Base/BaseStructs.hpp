@@ -130,6 +130,9 @@ namespace mwmp
         // this group directly via Animation::play() / Animation::disable() so NPCs animate
         // identically across all clients, including idle variants and locomotion.
         std::string currentAnimGroup;
+        // Normalized completion of currentAnimGroup for synced special idles.
+        // Negative means unavailable.
+        float currentAnimCompletion = -1.f;
 
         // movementFlags bit constants — must match the encode side in PlayerSync
         static constexpr uint32_t MF_RUN   = (1u << 0);
