@@ -20,6 +20,7 @@
 #include "character.hpp"
 
 #include <array>
+#include <cstdint>
 #include <unordered_set>
 
 #include <components/esm/records.hpp>
@@ -83,9 +84,11 @@ namespace
             baseNode->setUserValue("mp_current_idle_group", group);
     }
 
-    bool getMpSyncedRemoteIdleGroup(const MWWorld::Ptr& ptr, std::string& group, float& startPoint)
+    bool getMpSyncedRemoteIdleGroup(
+        const MWWorld::Ptr& ptr, std::string& group, float& startPoint, uint32_t& revision)
     {
         startPoint = 0.f;
+        revision = 0;
         const auto* baseNode = ptr.getRefData().getBaseNode();
         if (!baseNode)
             return false;
@@ -105,6 +108,9 @@ namespace
         float syncedStartPoint = -1.f;
         if (baseNode->getUserValue("mp_synced_idle_start_point", syncedStartPoint) && syncedStartPoint >= 0.f)
             startPoint = std::clamp(syncedStartPoint, 0.f, 1.f);
+        double syncedRevision = 0.0;
+        if (baseNode->getUserValue("mp_synced_idle_revision", syncedRevision) && syncedRevision > 0.0)
+            revision = static_cast<uint32_t>(std::min<double>(syncedRevision, UINT32_MAX));
         return true;
     }
 #endif
@@ -944,8 +950,9 @@ namespace MWMechanics
 #ifdef BUILD_MULTIPLAYER
         std::string syncedIdleGroup;
         float syncedIdleStartPoint = 0.f;
+        uint32_t syncedIdleRevision = 0;
         const bool hasSyncedIdleGroup = (idle == CharState_Idle || idle == CharState_SpecialIdle)
-            && getMpSyncedRemoteIdleGroup(mPtr, syncedIdleGroup, syncedIdleStartPoint);
+            && getMpSyncedRemoteIdleGroup(mPtr, syncedIdleGroup, syncedIdleStartPoint, syncedIdleRevision);
         bool isMpRemoteActor = false;
         if (const auto* baseNode = mPtr.getRefData().getBaseNode())
             baseNode->getUserValue("mp_remote_actor", isMpRemoteActor);
@@ -1023,21 +1030,20 @@ namespace MWMechanics
             numLoops = std::numeric_limits<uint32_t>::max();
             mIdleState = CharState_SpecialIdle;
 
-            if (!force && mCurrentIdle == idleGroup)
+            if (!force && mCurrentIdle == idleGroup && (mAnimation->isPlaying(mCurrentIdle) || !mAnimQueue.empty()))
             {
-                float lastAppliedStartPoint = -1.f;
-                bool hasLastAppliedStartPoint = false;
-                if (auto* baseNode = mPtr.getRefData().getBaseNode())
-                    hasLastAppliedStartPoint = baseNode->getUserValue(
-                        "mp_synced_idle_applied_start_point", lastAppliedStartPoint);
-
-                const bool startPointChanged = !hasLastAppliedStartPoint
-                    || std::abs(lastAppliedStartPoint - syncedIdleStartPoint) > 0.01f;
-                if (!startPointChanged)
+                double appliedRevision = 0.0;
+                const bool hasAppliedRevision = mPtr.getRefData().getBaseNode()
+                    && mPtr.getRefData().getBaseNode()->getUserValue(
+                        "mp_synced_idle_applied_revision", appliedRevision);
+                const bool newSyncedEvent = syncedIdleRevision != 0
+                    && (!hasAppliedRevision
+                        || static_cast<uint32_t>(std::min<double>(appliedRevision, UINT32_MAX)) != syncedIdleRevision);
+                if (!newSyncedEvent)
                 {
-                    // Same synced idle and same synced start point are already
-                    // selected.  Do not replay every frame; that pins the actor
-                    // to a single pose while network interpolation moves the node.
+                    // A synced idle start point is an event parameter, not a continuously
+                    // applied clock correction. Same-group authority samples must not
+                    // restart the local loop, or dancers and other long idles stutter.
                     return;
                 }
             }
@@ -1076,15 +1082,19 @@ namespace MWMechanics
             if (!mCurrentIdle.empty())
                 mAnimation->getInfo(mCurrentIdle, &localCompletion);
             if (auto* baseNode = mPtr.getRefData().getBaseNode())
+            {
                 baseNode->setUserValue("mp_synced_idle_applied_start_point", startPoint);
-            Log(Debug::Info) << "[MP] CharacterController: synced idle play"
-                             << " ptr='" << mPtr.getCellRef().getRefId() << "'"
-                             << " group='" << mCurrentIdle << "'"
-                             << " startPoint=" << startPoint
-                             << " localBefore=" << localCompletion
-                             << " force=" << force
-                             << " idleState=" << static_cast<int>(idle)
-                             << " currentIdleWas='" << mCurrentIdle << "'";
+                baseNode->setUserValue("mp_synced_idle_applied_revision",
+                    static_cast<double>(syncedIdleRevision));
+            }
+            Log(Debug::Verbose) << "[MP] CharacterController: synced idle play"
+                                << " ptr='" << mPtr.getCellRef().getRefId() << "'"
+                                << " group='" << mCurrentIdle << "'"
+                                << " startPoint=" << startPoint
+                                << " revision=" << syncedIdleRevision
+                                << " localBefore=" << localCompletion
+                                << " force=" << force
+                                << " idleState=" << static_cast<int>(idle);
         }
 #endif
         playBlendedAnimation(mCurrentIdle, priority, MWRender::BlendMask_All, false, 1.0f, "start", "stop", startPoint,

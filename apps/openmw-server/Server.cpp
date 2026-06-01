@@ -5474,6 +5474,8 @@ void MPServer::handleActorIdentityAck(ConnectedClient& c, const uint8_t* data, s
     std::size_t newlyAcked = 0;
     std::size_t invalidActorNetId = 0;
     ActorInstanceId firstInvalidActorNetId = 0;
+    std::vector<ActorInstanceId> newlyAckedActorNetIds;
+    newlyAckedActorNetIds.reserve(ack.actorNetIds.size());
     for (ActorInstanceId actorNetId : ack.actorNetIds)
     {
         if (!isValidActorInstanceId(actorNetId))
@@ -5489,6 +5491,7 @@ void MPServer::handleActorIdentityAck(ConnectedClient& c, const uint8_t* data, s
         {
             ++newlyAcked;
             ++c.actorV2IdentityAckedWindow;
+            newlyAckedActorNetIds.push_back(actorNetId);
         }
     }
 
@@ -5502,19 +5505,19 @@ void MPServer::handleActorIdentityAck(ConnectedClient& c, const uint8_t* data, s
                             << " seq=" << ack.sequence;
     }
 
-    if (!ack.actorNetIds.empty() && c.actorSyncProtocolVersion >= ActorSyncProtocolVersionV2)
+    if (!newlyAckedActorNetIds.empty() && c.actorSyncProtocolVersion >= ActorSyncProtocolVersionV2)
     {
         ActorPresentationV2List bootstrap;
         bootstrap.protocolVersion = ActorSyncProtocolVersionV2;
         bootstrap.serverTimestamp = currentServerTimeMs();
         bootstrap.sequence = ack.sequence;
-        bootstrap.snapshots.reserve(ack.actorNetIds.size());
+        bootstrap.snapshots.reserve(newlyAckedActorNetIds.size());
 
         std::size_t missingBootstrapIdentity = 0;
         std::size_t missingBootstrapActor = 0;
         std::size_t suppressedBootstrapCell = 0;
         std::unordered_map<uint32_t, ActorPresentationV2List> freshPhaseRequestsByAuthority;
-        for (ActorInstanceId actorNetId : ack.actorNetIds)
+        for (ActorInstanceId actorNetId : newlyAckedActorNetIds)
         {
             if (!isValidActorInstanceId(actorNetId)
                 || c.actorV2IdentitySent.count(actorNetId) == 0
@@ -5568,9 +5571,12 @@ void MPServer::handleActorIdentityAck(ConnectedClient& c, const uint8_t* data, s
                 && snapshot.movementFlags == 0)
                 continue;
 
-            bootstrap.snapshots.push_back(snapshot);
-
-            if (cellIt->second.authorityGuid != 0)
+            const bool specialIdlePhase = isIdleAnimGroup(snapshot.currentAnimGroup)
+                && isReliablePresentationAnimGroup(snapshot.currentAnimGroup)
+                && !isBaseIdleAnimGroup(snapshot.currentAnimGroup)
+                && snapshot.currentAnimCompletion >= 0.f;
+            bool requestedFreshPhase = false;
+            if (specialIdlePhase && cellIt->second.authorityGuid != 0 && cellIt->second.authorityGuid != c.guid)
             {
                 ActorPresentationV2List& request = freshPhaseRequestsByAuthority[cellIt->second.authorityGuid];
                 if (request.protocolVersion == 0)
@@ -5581,7 +5587,11 @@ void MPServer::handleActorIdentityAck(ConnectedClient& c, const uint8_t* data, s
                 request.sequence = ack.sequence;
                 request.serverTimestamp = bootstrap.serverTimestamp;
                 request.requestActorNetIds.push_back(actorNetId);
+                requestedFreshPhase = true;
             }
+
+            if (!requestedFreshPhase)
+                bootstrap.snapshots.push_back(snapshot);
         }
 
         if (!bootstrap.snapshots.empty())

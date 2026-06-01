@@ -4,9 +4,11 @@
 #include <string>
 #include <cstddef>
 #include <deque>
+#include <memory>
 #include <unordered_map>
 #include <unordered_set>
 #include <osg/Vec3f>
+#include <components/esm3/aisequence.hpp>
 #include <components/openmw-mp/Base/ActorSyncProtocol.hpp>
 #include <components/openmw-mp/Base/BaseActor.hpp>
 
@@ -129,6 +131,11 @@ namespace mwmp
             // authority stop/clear states end the remote dance instead of holding it
             // forever.
             float syncedSpecialIdleClearTimer = 0.f;
+            // Non-authority side: increments when a reliable synced special-idle
+            // start/group event is accepted. CharacterController uses this to
+            // replay the same group exactly once when authoritative phase arrives
+            // after identity/bootstrap state already selected it.
+            uint32_t syncedIdleRevision = 0;
             // Pending magic bolt launch — delayed so bolt appears at end of cast
             // animation rather than immediately when the cast packet arrives.
             float pendingBoltTimer = -1.f;
@@ -161,6 +168,26 @@ namespace mwmp
             // stream does not alternate walk/stop while the actor is still
             // visibly chasing.
             float authorityLocomotionStopTimer = 0.f;
+            // Authority side: special idle groups can briefly disappear from
+            // animation sampling at loop/key transitions. Hold the last reliable
+            // group briefly so receivers see a stable event stream instead of
+            // clear/restart jitter.
+            float authorityReliableAnimGroupLostTimer = 0.f;
+            // Authority side: debounce special-idle group changes. Dancer and
+            // idle loops can expose brief one-frame alternate groups at loop
+            // boundaries; only stable group changes become network events.
+            std::string authorityPendingReliableAnimGroup;
+            float authorityPendingReliableAnimGroupTimer = 0.f;
+            // Authority side: short grace after this runtime is promoted from a
+            // remote puppet. Keeps the already-synced idle phase alive while
+            // local AI packages resume, avoiding a visible phase jump on the
+            // client that just lost authority.
+            float authoritySyncedIdleHandoffTimer = 0.f;
+            // Non-authority side: live AI package stack captured before this
+            // runtime becomes a pure network puppet. If authority later moves to
+            // this client, restore the real package stack instead of promoting an
+            // actor with all AI permanently cleared.
+            std::shared_ptr<ESM::AiSequence::AiSequence> savedPuppetAiSequence;
             // Non-authority attack replay holds. Attack packets are reliable events,
             // while presentation/position are delayed streams; these short holds keep
             // the visible weapon and stop pose stable through the replayed swing.
