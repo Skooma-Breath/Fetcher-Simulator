@@ -256,6 +256,7 @@ namespace mwmp
         std::unordered_map<uint32_t, MWWorld::Ptr>   mServerSpawnedActorsByMpNum;
         std::unordered_map<uint32_t, uint64_t>       mServerSpawnedActorLastTimestamps;
         std::unordered_map<ActorInstanceId, ActorRuntime>   mActorsByNetId;
+        std::unordered_set<ActorInstanceId> mPendingPresentationSampleRequests;
         std::unordered_map<std::string, std::unordered_set<ActorInstanceId>> mCellActorIds;
         std::unordered_map<std::string, ActorInstanceId>    mActorNetIdsByKey;
         std::string mLastLocalCellId;

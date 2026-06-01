@@ -412,6 +412,7 @@ namespace
         return actor.refId == "heddvild" || actor.mpNum == 2601
             || actor.refId == "breton dancer girl"
             || actor.refId == "nord dancer girl"
+            || actor.refId == "redguard dancer girl"
             || actor.refId == "snorri"
             || actor.refId == "khinjarsi"
             || actorNetId == mwmp::packActorInstanceKey({ mwmp::ActorKeyKind::SpawnedMpNum, 2601 })
@@ -470,6 +471,15 @@ namespace
         snapshot.presentationFlags = mwmp::makeActorPresentationFlags(presentationActor);
         snapshot.currentAnimGroup = actor.animFlags.currentAnimGroup;
         snapshot.currentAnimCompletion = actor.animFlags.currentAnimCompletion;
+        const bool isDancerActor = actor.refId == "breton dancer girl"
+            || actor.refId == "nord dancer girl"
+            || actor.refId == "redguard dancer girl";
+        if (isDancerActor && isIdleAnimGroup(snapshot.currentAnimGroup)
+            && snapshot.currentAnimGroup != "idle9")
+        {
+            snapshot.currentAnimGroup.clear();
+            snapshot.currentAnimCompletion = -1.f;
+        }
         if ((actor.isDead || !hasLocomotionInput) && isLocomotionAnimGroup(snapshot.currentAnimGroup))
         {
             snapshot.currentAnimGroup.clear();
@@ -2010,6 +2020,28 @@ namespace mwmp
             return;
         }
 
+        if (!list.requestActorNetIds.empty())
+        {
+            std::size_t queuedRequests = 0;
+            for (ActorInstanceId actorNetId : list.requestActorNetIds)
+            {
+                if (!isValidActorInstanceId(actorNetId))
+                    continue;
+                if (mActorsByNetId.find(actorNetId) == mActorsByNetId.end())
+                    continue;
+                if (mPendingPresentationSampleRequests.insert(actorNetId).second)
+                    ++queuedRequests;
+            }
+            if (queuedRequests != 0)
+            {
+                Log(Debug::Verbose) << "[MP] ActorSync v2: queued presentation sample requests"
+                                    << " requested=" << list.requestActorNetIds.size()
+                                    << " queued=" << queuedRequests
+                                    << " authorityGuid=" << list.authorityGuid
+                                    << " seq=" << list.sequence;
+            }
+        }
+
         std::size_t applied = 0;
         std::size_t invalidActorNetId = 0;
         std::size_t missingIdentity = 0;
@@ -2058,32 +2090,57 @@ namespace mwmp
             }
 
             const std::string previousGroup = runtime.state.animFlags.currentAnimGroup;
-            if (auto* baseNode = runtime.boundActor.getRefData().getBaseNode())
+            const bool isDancerActor = runtime.state.refId == "breton dancer girl"
+                || runtime.state.refId == "nord dancer girl"
+                || runtime.state.refId == "redguard dancer girl";
+            const bool incomingSpecialIdle = isIdleAnimGroup(snapshot.currentAnimGroup)
+                && isReliablePresentationAnimGroup(snapshot.currentAnimGroup)
+                && !isBaseIdleAnimGroup(snapshot.currentAnimGroup)
+                && snapshot.currentAnimCompletion >= 0.f;
+            const bool incomingIdleClear = snapshot.currentAnimGroup.empty() || isBaseIdleAnimGroup(snapshot.currentAnimGroup);
+
+            if (incomingSpecialIdle)
             {
-                if (isIdleAnimGroup(snapshot.currentAnimGroup)
-                    && isReliablePresentationAnimGroup(snapshot.currentAnimGroup)
-                    && !isBaseIdleAnimGroup(snapshot.currentAnimGroup)
-                    && snapshot.currentAnimCompletion >= 0.f)
+                // Latch the latest reliable special-idle event immediately in
+                // runtime state, even if this presentation arrives before the
+                // local scene node/bound Ptr exists during cell load. The node
+                // user values will be refreshed once binding resolves. Do not
+                // clear locomotion axes here; ActorPositionV2 owns movement.
+                runtime.state.animFlags.currentAnimGroup = snapshot.currentAnimGroup;
+                runtime.state.animFlags.currentAnimCompletion = snapshot.currentAnimCompletion;
+            }
+
+            if (!runtime.boundActor.isEmpty())
+            {
+                if (auto* baseNode = runtime.boundActor.getRefData().getBaseNode())
                 {
-                    // Latch the latest reliable special-idle event immediately on
-                    // packet receipt.  Do not wait for the smoothing tick: with
-                    // sparse/event-style presentation sync, an older latched idle
-                    // such as idle2/idle4 could otherwise survive until authority
-                    // transfer even after a newer idle9 start was received.
-                    baseNode->setUserValue("mp_synced_idle_group", snapshot.currentAnimGroup);
-                    baseNode->setUserValue("mp_synced_idle_start_point",
-                        std::clamp(snapshot.currentAnimCompletion, 0.f, 1.f));
-                    runtime.state.animFlags.currentAnimGroup = snapshot.currentAnimGroup;
-                    runtime.state.animFlags.currentAnimCompletion = snapshot.currentAnimCompletion;
-                    runtime.state.isMoving = false;
-                    runtime.state.velocity = Velocity {};
-                    runtime.state.animFlags.animFwd = 0.f;
-                    runtime.state.animFlags.animSide = 0.f;
-                }
-                else if (snapshot.currentAnimGroup.empty() || isBaseIdleAnimGroup(snapshot.currentAnimGroup))
-                {
-                    baseNode->setUserValue("mp_synced_idle_group", std::string());
-                    baseNode->setUserValue("mp_synced_idle_start_point", -1.f);
+                    if (incomingSpecialIdle)
+                    {
+                        baseNode->setUserValue("mp_synced_idle_group", snapshot.currentAnimGroup);
+                        baseNode->setUserValue("mp_synced_idle_start_point",
+                            std::clamp(snapshot.currentAnimCompletion, 0.f, 1.f));
+                        baseNode->setUserValue("mp_synced_idle_actor_net_id",
+                            static_cast<double>(snapshot.actorNetId));
+                        baseNode->setUserValue("mp_synced_idle_ref_id", runtime.state.refId);
+                    }
+                    else if (incomingIdleClear)
+                    {
+                        std::string oldSyncedIdleGroup;
+                        const bool hadSyncedIdle = baseNode->getUserValue("mp_synced_idle_group", oldSyncedIdleGroup)
+                            && isIdleAnimGroup(oldSyncedIdleGroup)
+                            && !isBaseIdleAnimGroup(oldSyncedIdleGroup);
+                        baseNode->setUserValue("mp_synced_idle_group", std::string());
+                        baseNode->setUserValue("mp_synced_idle_start_point", -1.f);
+                        baseNode->setUserValue("mp_synced_idle_actor_net_id", 0.0);
+                        baseNode->setUserValue("mp_synced_idle_ref_id", std::string());
+                        baseNode->setUserValue("mp_synced_idle_applied_start_point", -1.f);
+                        baseNode->setUserValue("mp_current_idle_group", std::string());
+                        if (hadSyncedIdle)
+                        {
+                            if (MWRender::Animation* animObj = MWBase::Environment::get().getWorld()->getAnimation(runtime.boundActor))
+                                animObj->disable(oldSyncedIdleGroup);
+                        }
+                    }
                 }
             }
             const bool wasMoving = runtime.state.isMoving
@@ -2142,7 +2199,7 @@ namespace mwmp
                     runtime.state.animFlags.currentAnimCompletion = snapshot.currentAnimCompletion;
                 }
             }
-            else if (!previousIsSpecialIdle)
+            else if (!previousIsSpecialIdle || isDancerActor)
             {
                 runtime.state.animFlags.currentAnimGroup.clear();
                 runtime.state.animFlags.currentAnimCompletion = -1.f;
@@ -4255,20 +4312,6 @@ namespace mwmp
                         if (animObj->getInfo(actor.animFlags.currentAnimGroup, &completion))
                             actor.animFlags.currentAnimCompletion = std::clamp(completion, 0.f, 1.f);
                     }
-                    const ActorInstanceId watchedActorNetId = actorNetIdForActorState(actor);
-                    if (watchedActorNetId != 0 && isWatchedPresentationActor(actor, watchedActorNetId))
-                    {
-                        Log(Debug::Info) << "[MP] ActorSync v2: authority anim capture"
-                                         << " actorNetId=" << watchedActorNetId
-                                         << " refId=" << actor.refId
-                                         << " mpNum=" << actor.mpNum
-                                         << " group='" << actor.animFlags.currentAnimGroup << "'"
-                                         << " completion=" << actor.animFlags.currentAnimCompletion
-                                         << " moving=" << actor.isMoving
-                                         << " fwd=" << actor.animFlags.animFwd
-                                         << " side=" << actor.animFlags.animSide
-                                         << " velocity=(" << actor.velocity.linear[0] << "," << actor.velocity.linear[1] << ")";
-                    }
                 }
             }
 
@@ -4950,6 +4993,27 @@ namespace mwmp
                 const std::string previousSentAnimGroup = prevIt != cell.actors.end()
                     ? prevIt->second.lastSentAnimGroup
                     : std::string();
+                const bool sampleRequested = mPendingPresentationSampleRequests.count(actorNetId) != 0;
+
+                const bool holdingStableSpecialIdle = prevIt != cell.actors.end()
+                    && !previousSentAnimGroup.empty()
+                    && isIdleAnimGroup(previousSentAnimGroup)
+                    && isReliablePresentationAnimGroup(previousSentAnimGroup)
+                    && !reliableSnapshot.isAttackingOrCasting
+                    && !reliableSnapshot.hasWeaponDrawn
+                    && !reliableSnapshot.hasSpellReadied
+                    && !reliableSnapshot.isDead
+                    && reliableSnapshot.movementFlags == 0;
+                if (holdingStableSpecialIdle && reliableSnapshot.currentAnimGroup.empty()
+                    && isBaseIdleAnimGroup(snapshot.currentAnimGroup))
+                {
+                    // Special idle loops can briefly report base idle at the loop
+                    // seam.  Treat that as local animation churn, not as an
+                    // exported stop/start edge; otherwise remotes restart one
+                    // dancer at phase 0 while the others continue their loop.
+                    reliableSnapshot.currentAnimGroup = previousSentAnimGroup;
+                    reliableSnapshot.currentAnimCompletion = prevIt->second.state.animFlags.currentAnimCompletion;
+                }
 
                 // Special idle variants can churn on the authority at loop boundaries
                 // (idle2 -> idle4 -> idle2), which
@@ -4957,13 +5021,13 @@ namespace mwmp
                 // Do not let later churn overwrite an already exported special idle.
                 // Transient empty/base-idle samples are allowed through so clients can
                 // still observe clear/start edges instead of getting stuck silent.
-                const bool canHoldSpecialIdleGroup = prevIt != cell.actors.end()
+                const bool canHoldSpecialIdleGroup = !sampleRequested
+                    && prevIt != cell.actors.end()
                     && !previousSentAnimGroup.empty()
                     && isIdleAnimGroup(previousSentAnimGroup)
                     && isReliablePresentationAnimGroup(previousSentAnimGroup)
                     && isIdleAnimGroup(reliableSnapshot.currentAnimGroup)
                     && isReliablePresentationAnimGroup(reliableSnapshot.currentAnimGroup)
-                    && !snapshot.isMoving
                     && !reliableSnapshot.isAttackingOrCasting
                     && !reliableSnapshot.hasWeaponDrawn
                     && !reliableSnapshot.hasSpellReadied
@@ -5021,8 +5085,7 @@ namespace mwmp
                     // the same loop.  Receivers advance the loop locally after the
                     // initial phase-aligned start.
                     && !stableIdlePresentation;
-
-                if (((presentationChanged && (hasReliablePresentationState || hadReliablePresentationState)) || refreshDue))
+                if (((presentationChanged && (hasReliablePresentationState || hadReliablePresentationState)) || refreshDue || sampleRequested))
                 {
                     presentationUpdate.snapshots.push_back(reliableSnapshot);
                     ActorRuntime& runtime = cell.actors[key];
@@ -5038,6 +5101,7 @@ namespace mwmp
                     runtime.lastSentPresentationFlags = reliableSnapshot.presentationFlags;
                     runtime.lastSentAnimGroup = reliableSnapshot.currentAnimGroup;
                     runtime.presentationSendTimer = 0.f;
+                    mPendingPresentationSampleRequests.erase(actorNetId);
 
                     if (presentationChanged && !firstPresentation && previousSentAnimGroup != reliableSnapshot.currentAnimGroup)
                         ++mActorV2PresentationGroupChangedWindow;
@@ -5061,9 +5125,10 @@ namespace mwmp
                                          << " first=" << firstPresentation
                                          << " changed=" << presentationChanged
                                          << " refreshDue=" << refreshDue
+                                         << " sampleRequested=" << sampleRequested
                                          << " flags=" << static_cast<unsigned>(reliableSnapshot.presentationFlags)
                                          << " reason="
-                                         << (presentationChanged ? "change" : "refresh");
+                                         << (sampleRequested ? "sample-request" : (presentationChanged ? "change" : "refresh"));
                     }
                 }
             }
@@ -5714,12 +5779,14 @@ namespace mwmp
 
         const Position& pos = actor.state.position;
         float visualPlanarSpeed = 0.f;
+        float visualDeltaX = 0.f;
+        float visualDeltaY = 0.f;
         if (frameDuration > 0.0001f)
         {
             const ESM::Position& currentPos = actor.boundActor.getRefData().getPosition();
-            const float dx = pos.pos[0] - currentPos.pos[0];
-            const float dy = pos.pos[1] - currentPos.pos[1];
-            visualPlanarSpeed = std::min(std::sqrt((dx * dx) + (dy * dy)) / frameDuration, 4000.f);
+            visualDeltaX = pos.pos[0] - currentPos.pos[0];
+            visualDeltaY = pos.pos[1] - currentPos.pos[1];
+            visualPlanarSpeed = std::min(std::sqrt((visualDeltaX * visualDeltaX) + (visualDeltaY * visualDeltaY)) / frameDuration, 4000.f);
         }
         // Pre-compute knock state from incoming flags so we can gate position
         // updates. A prone NPC must not be teleported by the authority's current
@@ -5747,18 +5814,46 @@ namespace mwmp
         const float fwdMag  = std::abs(actor.state.animFlags.animFwd);
         const float sideMag = std::abs(actor.state.animFlags.animSide);
         const bool suppressAttackLocomotion = actor.attackLocomotionHoldTimer > 0.f || actor.pendingAttack;
+        const bool hasAuthoredLocomotionAxes = fwdMag > 0.1f || sideMag > 0.1f;
+        const bool currentGroupIsSpecialIdle = isIdleAnimGroup(actor.state.animFlags.currentAnimGroup)
+            && !isBaseIdleAnimGroup(actor.state.animFlags.currentAnimGroup);
+        bool nodeHasSyncedSpecialIdle = false;
+        if (auto* baseNode = actor.boundActor.getRefData().getBaseNode())
+        {
+            std::string syncedIdleGroup;
+            nodeHasSyncedSpecialIdle = baseNode->getUserValue("mp_synced_idle_group", syncedIdleGroup)
+                && isIdleAnimGroup(syncedIdleGroup)
+                && !isBaseIdleAnimGroup(syncedIdleGroup);
+        }
+        const bool isDancerActor = actor.state.refId == "breton dancer girl"
+            || actor.state.refId == "nord dancer girl"
+            || actor.state.refId == "redguard dancer girl";
+        const bool suppressVisualLocomotionFallback = isDancerActor
+            && (currentGroupIsSpecialIdle || nodeHasSyncedSpecialIdle);
+        const bool hasVisualLocomotion = !suppressVisualLocomotionFallback && visualPlanarSpeed > 8.f;
+        float drivenSide = actor.state.animFlags.animSide;
+        float drivenFwd = actor.state.animFlags.animFwd;
+        if (!hasAuthoredLocomotionAxes && hasVisualLocomotion)
+        {
+            const float yaw = actor.boundActor.getRefData().getPosition().rot[2];
+            const float invLen = 1.f / std::max(std::sqrt((visualDeltaX * visualDeltaX) + (visualDeltaY * visualDeltaY)), 0.001f);
+            const float dirX = visualDeltaX * invLen;
+            const float dirY = visualDeltaY * invLen;
+            drivenFwd = std::clamp(dirX * std::sin(-yaw) + dirY * std::cos(-yaw), -1.f, 1.f);
+            drivenSide = std::clamp(dirX * std::cos(-yaw) - dirY * std::sin(-yaw), -1.f, 1.f);
+        }
         const bool shouldDriveLocomotion = !actor.state.isDead
             && !suppressAttackLocomotion
-            && actor.state.isMoving
-            && (fwdMag > 0.1f || sideMag > 0.1f);
-        movement.mPosition[0] = shouldDriveLocomotion ? actor.state.animFlags.animSide : 0.f;
-        movement.mPosition[1] = shouldDriveLocomotion ? actor.state.animFlags.animFwd  : 0.f;
+            && (actor.state.isMoving || hasVisualLocomotion)
+            && (std::abs(drivenFwd) > 0.1f || std::abs(drivenSide) > 0.1f);
+        movement.mPosition[0] = shouldDriveLocomotion ? drivenSide : 0.f;
+        movement.mPosition[1] = shouldDriveLocomotion ? drivenFwd  : 0.f;
         movement.mPosition[2] = 0.f;
         movement.mRotation[0] = 0.f;
         movement.mRotation[1] = 0.f;
         movement.mRotation[2] = 0.f;
         movement.mIsStrafing = shouldDriveLocomotion
-            && std::abs(actor.state.animFlags.animSide) > std::abs(actor.state.animFlags.animFwd) * 2.f;
+            && std::abs(drivenSide) > std::abs(drivenFwd) * 2.f;
 
         // Character.cpp has a multiplayer hook that adjusts movement animation
         // speed from this user value. Use the rendered puppet displacement so
@@ -6180,18 +6275,33 @@ namespace mwmp
         if (!actor.state.isDead && !suppressLowerBodyGroupSync)
         {
             const std::string& newGrp = actor.state.animFlags.currentAnimGroup;
+            const bool stoppedPresentation = !actor.state.isMoving && fwdMag <= 0.1f && sideMag <= 0.1f;
+            const bool activeLocomotionPresentation = isLocomotionAnimGroup(newGrp) && !stoppedPresentation;
             if (auto* baseNode = actor.boundActor.getRefData().getBaseNode())
             {
-                // Treat synced special idles as latched presentation events.  Do
-                // not clear the latched idle just because a noisy locomotion sample
-                // appears while the actor is being position-interpolated; that makes
-                // dancers flicker between walk/idle and leaves no idle to preserve
-                // when authority transfers.  Clear only on an explicit presentation
-                // clear/base-idle sample.
-                if (newGrp.empty() || isBaseIdleAnimGroup(newGrp))
+                // Treat synced special idles as latched presentation events, but
+                // never let that latch override a real locomotion presentation.
+                // Noisy stopped locomotion samples are ignored below; active
+                // movement must clear the latch so remotes animate instead of sliding.
+                if (newGrp.empty() || isBaseIdleAnimGroup(newGrp) || activeLocomotionPresentation)
+                {
+                    std::string oldSyncedIdleGroup;
+                    const bool hadSyncedIdle = baseNode->getUserValue("mp_synced_idle_group", oldSyncedIdleGroup)
+                        && isIdleAnimGroup(oldSyncedIdleGroup)
+                        && !isBaseIdleAnimGroup(oldSyncedIdleGroup);
                     baseNode->setUserValue("mp_synced_idle_group", std::string());
+                    baseNode->setUserValue("mp_synced_idle_start_point", -1.f);
+                    baseNode->setUserValue("mp_synced_idle_actor_net_id", 0.0);
+                    baseNode->setUserValue("mp_synced_idle_ref_id", std::string());
+                    baseNode->setUserValue("mp_synced_idle_applied_start_point", -1.f);
+                    baseNode->setUserValue("mp_current_idle_group", std::string());
+                    if (hadSyncedIdle)
+                    {
+                        if (MWRender::Animation* animObj = MWBase::Environment::get().getWorld()->getAnimation(actor.boundActor))
+                            animObj->disable(oldSyncedIdleGroup);
+                    }
+                }
             }
-            const bool stoppedPresentation = !actor.state.isMoving && fwdMag <= 0.1f && sideMag <= 0.1f;
             if (stoppedPresentation && !actor.lastAppliedAnimGroup.empty()
                 && isLocomotionAnimGroup(actor.lastAppliedAnimGroup))
             {
@@ -6212,24 +6322,13 @@ namespace mwmp
                 if (auto* baseNode = actor.boundActor.getRefData().getBaseNode())
                 {
                     baseNode->setUserValue("mp_synced_idle_group", newGrp);
+                    baseNode->setUserValue("mp_synced_idle_actor_net_id",
+                        static_cast<double>(actor.actorNetId));
+                    baseNode->setUserValue("mp_synced_idle_ref_id", actor.state.refId);
                     float syncedStartPoint = 0.f;
                     if (actor.state.animFlags.currentAnimCompletion >= 0.f)
                         syncedStartPoint = std::clamp(actor.state.animFlags.currentAnimCompletion, 0.f, 1.f);
                     baseNode->setUserValue("mp_synced_idle_start_point", syncedStartPoint);
-                    if (isWatchedPresentationActor(actor.state, actor.actorNetId))
-                    {
-                        Log(Debug::Info) << "[MP] ActorSync v2: synced idle node refresh"
-                                         << " actorNetId=" << actor.actorNetId
-                                         << " refId=" << actor.state.refId
-                                         << " mpNum=" << actor.state.mpNum
-                                         << " group='" << newGrp << "'"
-                                         << " completion=" << actor.state.animFlags.currentAnimCompletion
-                                         << " nodeStart=" << syncedStartPoint
-                                         << " moving=" << actor.state.isMoving
-                                         << " fwd=" << actor.state.animFlags.animFwd
-                                         << " side=" << actor.state.animFlags.animSide
-                                         << " lastApplied='" << actor.lastAppliedAnimGroup << "'";
-                    }
                 }
             }
 

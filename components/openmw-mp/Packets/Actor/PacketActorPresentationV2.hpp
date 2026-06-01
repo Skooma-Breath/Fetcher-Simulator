@@ -29,6 +29,11 @@ namespace mwmp
             ws.write(mPresentationList->sequence);
             ws.write(mPresentationList->serverTimestamp);
 
+            const auto requestCount = static_cast<uint16_t>(mPresentationList->requestActorNetIds.size());
+            ws.write(requestCount);
+            for (ActorInstanceId actorNetId : mPresentationList->requestActorNetIds)
+                ws.write(actorNetId);
+
             const auto count = static_cast<uint16_t>(mPresentationList->snapshots.size());
             ws.write(count);
             for (const auto& snapshot : mPresentationList->snapshots)
@@ -42,6 +47,12 @@ namespace mwmp
             rs.read(mPresentationList->authorityGeneration);
             rs.read(mPresentationList->sequence);
             rs.read(mPresentationList->serverTimestamp);
+
+            uint16_t requestCount = 0;
+            rs.read(requestCount);
+            mPresentationList->requestActorNetIds.resize(requestCount);
+            for (ActorInstanceId& actorNetId : mPresentationList->requestActorNetIds)
+                rs.read(actorNetId);
 
             uint16_t count = 0;
             rs.read(count);

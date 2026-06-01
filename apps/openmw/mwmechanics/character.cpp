@@ -97,6 +97,11 @@ namespace
             return false;
         if (!baseNode->getUserValue("mp_synced_idle_group", group) || !isMpSpecialIdleGroup(group))
             return false;
+        std::string syncedRefId;
+        if (baseNode->getUserValue("mp_synced_idle_ref_id", syncedRefId)
+            && !syncedRefId.empty()
+            && syncedRefId != ptr.getCellRef().getRefId().serializeText())
+            return false;
         float syncedStartPoint = -1.f;
         if (baseNode->getUserValue("mp_synced_idle_start_point", syncedStartPoint) && syncedStartPoint >= 0.f)
             startPoint = std::clamp(syncedStartPoint, 0.f, 1.f);
@@ -1020,12 +1025,21 @@ namespace MWMechanics
 
             if (!force && mCurrentIdle == idleGroup)
             {
-                // Same synced idle is already selected.  The regular early-return
-                // path can be bypassed when vanilla state briefly reports base idle
-                // or when isPlaying() is false just after a clear/replay.  Do not
-                // replay the same MP-synced group every frame; that pins the actor
-                // to a single pose while network interpolation moves the node.
-                return;
+                float lastAppliedStartPoint = -1.f;
+                bool hasLastAppliedStartPoint = false;
+                if (auto* baseNode = mPtr.getRefData().getBaseNode())
+                    hasLastAppliedStartPoint = baseNode->getUserValue(
+                        "mp_synced_idle_applied_start_point", lastAppliedStartPoint);
+
+                const bool startPointChanged = !hasLastAppliedStartPoint
+                    || std::abs(lastAppliedStartPoint - syncedIdleStartPoint) > 0.01f;
+                if (!startPointChanged)
+                {
+                    // Same synced idle and same synced start point are already
+                    // selected.  Do not replay every frame; that pins the actor
+                    // to a single pose while network interpolation moves the node.
+                    return;
+                }
             }
         }
 #endif
@@ -1061,6 +1075,8 @@ namespace MWMechanics
             float localCompletion = -1.f;
             if (!mCurrentIdle.empty())
                 mAnimation->getInfo(mCurrentIdle, &localCompletion);
+            if (auto* baseNode = mPtr.getRefData().getBaseNode())
+                baseNode->setUserValue("mp_synced_idle_applied_start_point", startPoint);
             Log(Debug::Info) << "[MP] CharacterController: synced idle play"
                              << " ptr='" << mPtr.getCellRef().getRefId() << "'"
                              << " group='" << mCurrentIdle << "'"

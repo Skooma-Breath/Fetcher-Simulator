@@ -5502,6 +5502,147 @@ void MPServer::handleActorIdentityAck(ConnectedClient& c, const uint8_t* data, s
                             << " seq=" << ack.sequence;
     }
 
+    if (!ack.actorNetIds.empty() && c.actorSyncProtocolVersion >= ActorSyncProtocolVersionV2)
+    {
+        ActorPresentationV2List bootstrap;
+        bootstrap.protocolVersion = ActorSyncProtocolVersionV2;
+        bootstrap.serverTimestamp = currentServerTimeMs();
+        bootstrap.sequence = ack.sequence;
+        bootstrap.snapshots.reserve(ack.actorNetIds.size());
+
+        std::size_t missingBootstrapIdentity = 0;
+        std::size_t missingBootstrapActor = 0;
+        std::size_t suppressedBootstrapCell = 0;
+        std::unordered_map<uint32_t, ActorPresentationV2List> freshPhaseRequestsByAuthority;
+        for (ActorInstanceId actorNetId : ack.actorNetIds)
+        {
+            if (!isValidActorInstanceId(actorNetId)
+                || c.actorV2IdentitySent.count(actorNetId) == 0
+                || c.actorV2IdentityAcked.count(actorNetId) == 0)
+                continue;
+
+            auto keyIt = mWorld.actorKeysByNetId.find(actorNetId);
+            if (keyIt == mWorld.actorKeysByNetId.end())
+            {
+                ++missingBootstrapIdentity;
+                continue;
+            }
+
+            const std::string& actorKey = keyIt->second;
+            auto locationIt = mWorld.actorLocations.find(actorKey);
+            if (locationIt == mWorld.actorLocations.end())
+            {
+                ++missingBootstrapActor;
+                continue;
+            }
+
+            if (!clientHasActorCellLoaded(c, locationIt->second))
+            {
+                ++suppressedBootstrapCell;
+                continue;
+            }
+
+            auto cellIt = mWorld.actorCells.find(locationIt->second);
+            if (cellIt == mWorld.actorCells.end())
+            {
+                ++missingBootstrapActor;
+                continue;
+            }
+
+            bootstrap.authorityGuid = cellIt->second.authorityGuid;
+            bootstrap.authorityGeneration = cellIt->second.authorityGeneration;
+
+            auto actorIt = cellIt->second.actors.find(actorKey);
+            if (actorIt == cellIt->second.actors.end())
+            {
+                ++missingBootstrapActor;
+                continue;
+            }
+
+            ActorPresentationSnapshot snapshot = makePresentationSnapshot(actorIt->second.actor, actorNetId);
+            if (snapshot.currentAnimGroup.empty()
+                && !snapshot.isAttackingOrCasting
+                && !snapshot.hasWeaponDrawn
+                && !snapshot.hasSpellReadied
+                && !snapshot.isDead
+                && snapshot.movementFlags == 0)
+                continue;
+
+            bootstrap.snapshots.push_back(snapshot);
+
+            if (cellIt->second.authorityGuid != 0)
+            {
+                ActorPresentationV2List& request = freshPhaseRequestsByAuthority[cellIt->second.authorityGuid];
+                if (request.protocolVersion == 0)
+                    request.protocolVersion = ActorSyncProtocolVersionV2;
+                request.protocolVersion = ActorSyncProtocolVersionV2;
+                request.authorityGuid = cellIt->second.authorityGuid;
+                request.authorityGeneration = cellIt->second.authorityGeneration;
+                request.sequence = ack.sequence;
+                request.serverTimestamp = bootstrap.serverTimestamp;
+                request.requestActorNetIds.push_back(actorNetId);
+            }
+        }
+
+        if (!bootstrap.snapshots.empty())
+        {
+            PacketActorPresentationV2 presentationPkt;
+            presentationPkt.setPresentationList(&bootstrap);
+            const std::vector<uint8_t> encoded = presentationPkt.encode();
+            sendTo(c.conn, encoded, /*reliable=*/true);
+            c.actorV2PresentationSentWindow += bootstrap.snapshots.size();
+            c.actorV2PresentationBytesSentWindow += encoded.size();
+            Log(Debug::Verbose) << "[Server] ActorSync v2 presentation bootstrap"
+                                << " receiver=" << c.guid
+                                << " cell=" << ack.cellId
+                                << " snapshots=" << bootstrap.snapshots.size()
+                                << " acked=" << newlyAcked
+                                << " seq=" << ack.sequence;
+        }
+        else if (missingBootstrapIdentity != 0 || missingBootstrapActor != 0 || suppressedBootstrapCell != 0)
+        {
+            Log(Debug::Verbose) << "[Server] ActorSync v2 presentation bootstrap skipped"
+                                << " receiver=" << c.guid
+                                << " cell=" << ack.cellId
+                                << " missingIdentity=" << missingBootstrapIdentity
+                                << " missingActor=" << missingBootstrapActor
+                                << " suppressedCell=" << suppressedBootstrapCell
+                                << " acked=" << newlyAcked
+                                << " seq=" << ack.sequence;
+        }
+
+        std::size_t freshPhaseRequestPackets = 0;
+        std::size_t freshPhaseRequestActors = 0;
+        for (auto& [authorityGuid, request] : freshPhaseRequestsByAuthority)
+        {
+            if (request.requestActorNetIds.empty())
+                continue;
+
+            auto authorityIt = std::find_if(mClients.begin(), mClients.end(),
+                [authorityGuid](const auto& entry) { return entry.second.guid == authorityGuid; });
+            if (authorityIt == mClients.end()
+                || authorityIt->second.actorSyncProtocolVersion < ActorSyncProtocolVersionV2)
+                continue;
+
+            PacketActorPresentationV2 requestPkt;
+            requestPkt.setPresentationList(&request);
+            const std::vector<uint8_t> encoded = requestPkt.encode();
+            sendTo(authorityIt->first, encoded, /*reliable=*/true);
+            ++freshPhaseRequestPackets;
+            freshPhaseRequestActors += request.requestActorNetIds.size();
+        }
+
+        if (freshPhaseRequestActors != 0)
+        {
+            Log(Debug::Verbose) << "[Server] ActorSync v2 requested fresh presentation phase"
+                                << " receiver=" << c.guid
+                                << " cell=" << ack.cellId
+                                << " packets=" << freshPhaseRequestPackets
+                                << " actors=" << freshPhaseRequestActors
+                                << " seq=" << ack.sequence;
+        }
+    }
+
     if (invalidActorNetId != 0)
     {
         Log(Debug::Info) << "[Server] ActorSync v2 identity ack ignored invalid ids"

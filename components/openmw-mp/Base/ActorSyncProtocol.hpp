@@ -14,7 +14,7 @@ namespace mwmp
     static constexpr uint32_t ActorSyncProtocolVersionV1 = 1;
     // Still named v2 in code because this is the active ActorSync v2 lane, but
     // the wire number is bumped for the deterministic ActorInstanceId key break.
-    static constexpr uint32_t ActorSyncProtocolVersionV2 = 4;
+    static constexpr uint32_t ActorSyncProtocolVersionV2 = 5;
 
     using ActorInstanceId = uint64_t;
 
@@ -228,6 +228,10 @@ namespace mwmp
         uint32_t authorityGeneration = 0;
         uint32_t sequence = 0;
         uint64_t serverTimestamp = 0;
+        // Optional server->authority request: sample and send fresh presentation
+        // snapshots for these actors once.  Used to phase-align late-loading
+        // clients without periodic idle refresh traffic.
+        std::vector<ActorInstanceId> requestActorNetIds;
         std::vector<ActorPresentationSnapshot> snapshots;
     };
 
