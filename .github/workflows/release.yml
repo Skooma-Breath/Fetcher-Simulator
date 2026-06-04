@@ -2,6 +2,8 @@ name: Release
 
 on:
   push:
+    branches:
+      - main
     tags:
       - openmw-**
   workflow_dispatch:
@@ -26,7 +28,11 @@ jobs:
     with:
       image: "2022"
       vcpkg-deps-tag: ${{ needs.Output-Envs.outputs.VCPKG_DEPS_TAG }}
-      build-type: Release
+      build-type: ${{ github.ref == 'refs/heads/main' && 'RelWithDebInfo' || 'Release' }}
       package: true
       release: true
+      release-tag: ${{ github.ref == 'refs/heads/main' && 'Fetcher-Simulator' || '' }}
+      release-name: ${{ github.ref == 'refs/heads/main' && 'Fetcher-Simulator' || '' }}
+      release-zip-name: ${{ github.ref == 'refs/heads/main' && 'fetcher-simulator.zip' || '' }}
+      release-include-installer: ${{ github.ref != 'refs/heads/main' }}
     secrets: inherit

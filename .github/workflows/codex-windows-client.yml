@@ -41,6 +41,16 @@ on:
         required: false
         default: ""
         type: string
+      release-zip-name:
+        description: Optional release zip asset name
+        required: false
+        default: ""
+        type: string
+      release-include-installer:
+        description: Upload the installer exe as a release asset
+        required: true
+        default: true
+        type: boolean
       mod-bundle-url:
         description: Optional direct URL to a zip containing Data Files and openmw-client-package.json
         required: false
@@ -97,6 +107,8 @@ jobs:
       release: ${{ inputs.release }}
       release-tag: ${{ inputs.release-tag }}
       release-name: ${{ inputs.release-name }}
+      release-zip-name: ${{ inputs.release-zip-name }}
+      release-include-installer: ${{ inputs.release-include-installer }}
       mod-bundle-url: ${{ inputs.mod-bundle-url }}
       mod-bundle-release-tag: ${{ inputs.mod-bundle-release-tag }}
       mod-bundle-asset: ${{ inputs.mod-bundle-asset }}

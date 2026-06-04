@@ -30,6 +30,12 @@ on:
       release-name:
         default: ""
         type: string
+      release-zip-name:
+        default: ""
+        type: string
+      release-include-installer:
+        default: true
+        type: boolean
       mod-bundle-url:
         default: ""
         type: string
@@ -412,6 +418,21 @@ jobs:
         if-no-files-found: ignore
         retention-days: 14
 
+    - name: Retarget explicit release tag
+      if: ${{ inputs.release && inputs.release-tag != '' }}
+      shell: bash
+      run: |
+        git tag -f "${{ inputs.release-tag }}" "${{ github.sha }}"
+        git push origin "refs/tags/${{ inputs.release-tag }}" --force
+
+    - name: Remove existing explicit prerelease
+      if: ${{ inputs.release && inputs.release-tag != '' }}
+      shell: bash
+      env:
+        GH_TOKEN: ${{ github.token }}
+      run: |
+        gh release delete "${{ inputs.release-tag }}" --repo "${{ github.repository }}" --yes || true
+
     - name: Stage OpenMW release assets
       if: ${{ inputs.release }}
       shell: pwsh
@@ -420,10 +441,16 @@ jobs:
         New-Item -ItemType Directory -Force $assets | Out-Null
         $portableRoot = "${{ github.workspace }}\install"
         if ("${{ inputs.package }}" -eq "true") {
-          Copy-Item -Path "${{ github.workspace }}\install\*.exe" -Destination $assets
+          if ("${{ inputs.release-include-installer }}" -eq "true") {
+            Copy-Item -Path "${{ github.workspace }}\install\*.exe" -Destination $assets
+          }
           $portableRoot = "${{ github.workspace }}\portable-install"
         }
-        $zip = Join-Path $assets "openmw-windows-${{ inputs.msvc }}-${{ github.sha }}.zip"
+        $zipName = "${{ inputs.release-zip-name }}"
+        if ([string]::IsNullOrWhiteSpace($zipName)) {
+          $zipName = "openmw-windows-${{ inputs.msvc }}-${{ github.sha }}.zip"
+        }
+        $zip = Join-Path $assets $zipName
         Compress-Archive -Path "$portableRoot\*" -DestinationPath $zip -CompressionLevel Optimal -Force
 
     - name: Create OpenMW client prerelease
