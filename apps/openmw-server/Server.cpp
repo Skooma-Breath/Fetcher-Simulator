@@ -3377,6 +3377,34 @@ std::optional<DatabaseBrowsePage> MPServer::browseDatabaseTable(
     return mPlayerDb->browseTable(tableName, offset, limit);
 }
 
+std::optional<std::string> MPServer::loadCharacterLuaStorageValue(
+    int64_t characterId, std::string_view storageNamespace, std::string_view key)
+{
+    if (!mPlayerDb || characterId <= 0 || storageNamespace.empty() || key.empty())
+        return std::nullopt;
+
+    return mPlayerDb->loadCharacterLuaStorageValue(characterId, storageNamespace, key);
+}
+
+bool MPServer::saveCharacterLuaStorageValue(
+    int64_t characterId, std::string_view storageNamespace, std::string_view key, std::string_view value)
+{
+    if (!mPlayerDb || characterId <= 0 || storageNamespace.empty() || key.empty())
+        return false;
+
+    mPlayerDb->saveCharacterLuaStorageValue(characterId, storageNamespace, key, value);
+    return true;
+}
+
+bool MPServer::deleteCharacterLuaStorageValue(
+    int64_t characterId, std::string_view storageNamespace, std::string_view key)
+{
+    if (!mPlayerDb || characterId <= 0 || storageNamespace.empty() || key.empty())
+        return false;
+
+    return mPlayerDb->deleteCharacterLuaStorageValue(characterId, storageNamespace, key);
+}
+
 std::vector<DynamicRecordCatalogEntry> MPServer::collectGeneratedDynamicRecordGcCandidates(
     const std::optional<std::string>& recordType, const std::optional<bool>& persistent)
 {
@@ -7679,7 +7707,7 @@ void MPServer::handleLuaEvent(ConnectedClient& c, const uint8_t* data, size_t si
                             << "; falling back to queued Lua event";
     }
 
-    mLua.onLuaEvent(c.guid, pkt.eventName, pkt.eventData);
+    mLua.onLuaEvent(c.guid, c.dbCharacterId, pkt.eventName, pkt.eventData);
 }
 
 // ---------------------------------------------------------------------------
@@ -8443,6 +8471,7 @@ void MPServer::syncLuaSnapshot()
 
         LuaPlayerSnapshot snapshot;
         snapshot.guid = client.guid;
+        snapshot.dbCharacterId = client.dbCharacterId;
         snapshot.name = client.name;
         snapshot.cell = makeCellKey(client.player.cell);
         snapshot.nickname = client.nickname;

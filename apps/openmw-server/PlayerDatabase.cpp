@@ -300,6 +300,18 @@ CREATE TABLE IF NOT EXISTS character_marks (
 
 CREATE INDEX IF NOT EXISTS idx_character_marks_character
     ON character_marks(character_id);
+
+CREATE TABLE IF NOT EXISTS character_lua_storage (
+    character_id        INTEGER NOT NULL REFERENCES characters(id) ON DELETE CASCADE,
+    storage_namespace  TEXT    NOT NULL,
+    storage_key        TEXT    NOT NULL,
+    value              BLOB    NOT NULL,
+    updated_at         INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY(character_id, storage_namespace, storage_key)
+);
+
+CREATE INDEX IF NOT EXISTS idx_character_lua_storage_namespace
+    ON character_lua_storage(storage_namespace, storage_key);
 )SQL";
 
     // Migration: add chargen columns to databases created before they existed.
@@ -387,6 +399,15 @@ CREATE INDEX IF NOT EXISTS idx_character_marks_character
         "  rot_z REAL NOT NULL DEFAULT 0,"
         "  PRIMARY KEY(character_id, mark_name))",
         "CREATE INDEX IF NOT EXISTS idx_character_marks_character ON character_marks(character_id)",
+        "CREATE TABLE IF NOT EXISTS character_lua_storage ("
+        "  character_id INTEGER NOT NULL REFERENCES characters(id) ON DELETE CASCADE,"
+        "  storage_namespace TEXT NOT NULL,"
+        "  storage_key TEXT NOT NULL,"
+        "  value BLOB NOT NULL,"
+        "  updated_at INTEGER NOT NULL DEFAULT 0,"
+        "  PRIMARY KEY(character_id, storage_namespace, storage_key))",
+        "CREATE INDEX IF NOT EXISTS idx_character_lua_storage_namespace"
+        " ON character_lua_storage(storage_namespace, storage_key)",
         "CREATE TABLE IF NOT EXISTS world_dynamic_records ("
         "  record_type TEXT NOT NULL,"
         "  record_id TEXT NOT NULL,"
@@ -508,6 +529,7 @@ CREATE INDEX IF NOT EXISTS idx_character_marks_character
             { "character_attributes", "character_id, attribute_index" },
             { "character_skills", "character_id, skill_index" },
             { "character_marks", "character_id, mark_name" },
+            { "character_lua_storage", "character_id, storage_namespace, storage_key" },
         };
 
         void checkSqlite(int rc, sqlite3* db, const char* op)
@@ -2418,6 +2440,73 @@ CREATE INDEX IF NOT EXISTS idx_character_marks_character
 
         sqlite3_finalize(s);
         return ids;
+    }
+
+    std::optional<std::string> PlayerDatabase::loadCharacterLuaStorageValue(
+        int64_t characterId, std::string_view storageNamespace, std::string_view key)
+    {
+        if (characterId <= 0 || storageNamespace.empty() || key.empty())
+            return std::nullopt;
+
+        sqlite3_stmt* s = prepare(
+            "SELECT value FROM character_lua_storage"
+            " WHERE character_id=?1 AND storage_namespace=?2 AND storage_key=?3");
+        sqlite3_bind_int64(s, 1, characterId);
+        sqlite3_bind_text(s, 2, storageNamespace.data(), static_cast<int>(storageNamespace.size()), SQLITE_TRANSIENT);
+        sqlite3_bind_text(s, 3, key.data(), static_cast<int>(key.size()), SQLITE_TRANSIENT);
+
+        std::optional<std::string> result;
+        const int rc = sqlite3_step(s);
+        if (rc == SQLITE_ROW)
+        {
+            const void* blob = sqlite3_column_blob(s, 0);
+            const int bytes = sqlite3_column_bytes(s, 0);
+            result = blob && bytes > 0 ? std::string(static_cast<const char*>(blob), static_cast<std::size_t>(bytes))
+                                       : std::string();
+        }
+        else
+            checkSqlite(rc, mDb, "loadCharacterLuaStorageValue");
+
+        sqlite3_finalize(s);
+        return result;
+    }
+
+    void PlayerDatabase::saveCharacterLuaStorageValue(
+        int64_t characterId, std::string_view storageNamespace, std::string_view key, std::string_view value)
+    {
+        if (characterId <= 0 || storageNamespace.empty() || key.empty())
+            return;
+
+        sqlite3_stmt* s = prepare(
+            "INSERT INTO character_lua_storage(character_id, storage_namespace, storage_key, value, updated_at)"
+            " VALUES(?1, ?2, ?3, ?4, ?5)"
+            " ON CONFLICT(character_id, storage_namespace, storage_key) DO UPDATE SET"
+            " value=excluded.value, updated_at=excluded.updated_at");
+        sqlite3_bind_int64(s, 1, characterId);
+        sqlite3_bind_text(s, 2, storageNamespace.data(), static_cast<int>(storageNamespace.size()), SQLITE_TRANSIENT);
+        sqlite3_bind_text(s, 3, key.data(), static_cast<int>(key.size()), SQLITE_TRANSIENT);
+        sqlite3_bind_blob(s, 4, value.data(), static_cast<int>(value.size()), SQLITE_TRANSIENT);
+        sqlite3_bind_int64(s, 5, static_cast<int64_t>(std::time(nullptr)));
+        checkSqlite(sqlite3_step(s), mDb, "saveCharacterLuaStorageValue");
+        sqlite3_finalize(s);
+    }
+
+    bool PlayerDatabase::deleteCharacterLuaStorageValue(
+        int64_t characterId, std::string_view storageNamespace, std::string_view key)
+    {
+        if (characterId <= 0 || storageNamespace.empty() || key.empty())
+            return false;
+
+        sqlite3_stmt* s = prepare(
+            "DELETE FROM character_lua_storage"
+            " WHERE character_id=?1 AND storage_namespace=?2 AND storage_key=?3");
+        sqlite3_bind_int64(s, 1, characterId);
+        sqlite3_bind_text(s, 2, storageNamespace.data(), static_cast<int>(storageNamespace.size()), SQLITE_TRANSIENT);
+        sqlite3_bind_text(s, 3, key.data(), static_cast<int>(key.size()), SQLITE_TRANSIENT);
+        checkSqlite(sqlite3_step(s), mDb, "deleteCharacterLuaStorageValue");
+        const bool removed = sqlite3_changes(mDb) > 0;
+        sqlite3_finalize(s);
+        return removed;
     }
 
     std::vector<DatabaseTableInfo> PlayerDatabase::listBrowsableTables()

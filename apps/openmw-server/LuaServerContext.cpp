@@ -43,9 +43,10 @@ namespace
         return LuaUtil::serialize(payload);
     }
 
-    LuaUtil::BinaryData injectPidIntoPayload(const LuaUtil::LuaState& lua, uint32_t pid, const LuaUtil::BinaryData& data)
+    LuaUtil::BinaryData injectSenderIntoPayload(
+        const LuaUtil::LuaState& lua, uint32_t pid, int64_t characterId, const LuaUtil::BinaryData& data)
     {
-        if (pid == 0)
+        if (pid == 0 && characterId <= 0)
             return data;
 
         LuaUtil::BinaryData out = data;
@@ -56,7 +57,10 @@ namespace
                 if (object.is<sol::table>())
                 {
                     sol::table payload = object.as<sol::table>();
-                    payload["pid"] = pid;
+                    if (pid != 0)
+                        payload["pid"] = pid;
+                    if (characterId > 0)
+                        payload["characterId"] = characterId;
                     out = LuaUtil::serialize(payload);
                 }
             });
@@ -506,12 +510,13 @@ void LuaServerContext::onActorDeath(const BaseActor& actor, bool persistent)
     }));
 }
 
-void LuaServerContext::onLuaEvent(uint32_t pid, const std::string& eventName, const LuaUtil::BinaryData& data)
+void LuaServerContext::onLuaEvent(
+    uint32_t pid, int64_t characterId, const std::string& eventName, const LuaUtil::BinaryData& data)
 {
     if (!mLoaded)
         return;
 
-    enqueueEvent(pid, eventName, data);
+    enqueueEvent(pid, eventName, data, characterId);
 }
 
 std::optional<LuaUtil::BinaryData> LuaServerContext::evaluateImmediateIntent(
@@ -1340,6 +1345,72 @@ std::optional<DatabaseBrowsePage> LuaServerContext::browseDatabaseTable(
     return mServer ? mServer->browseDatabaseTable(tableName, offset, limit) : std::nullopt;
 }
 
+std::optional<LuaUtil::BinaryData> LuaServerContext::getCharacterStorageValue(
+    uint32_t guid, const std::string& storageNamespace, const std::string& key) const
+{
+    if (!mServer || guid == 0 || storageNamespace.empty() || key.empty())
+        return std::nullopt;
+
+    const auto player = getPlayer(guid);
+    if (!player || player->dbCharacterId <= 0)
+        return std::nullopt;
+
+    return mServer->loadCharacterLuaStorageValue(player->dbCharacterId, storageNamespace, key);
+}
+
+std::optional<LuaUtil::BinaryData> LuaServerContext::getCharacterStorageValueForCharacter(
+    int64_t characterId, const std::string& storageNamespace, const std::string& key) const
+{
+    if (!mServer || characterId <= 0 || storageNamespace.empty() || key.empty())
+        return std::nullopt;
+
+    return mServer->loadCharacterLuaStorageValue(characterId, storageNamespace, key);
+}
+
+bool LuaServerContext::setCharacterStorageValue(
+    uint32_t guid, const std::string& storageNamespace, const std::string& key, const LuaUtil::BinaryData& value)
+{
+    if (!mServer || guid == 0 || storageNamespace.empty() || key.empty())
+        return false;
+
+    const auto player = getPlayer(guid);
+    if (!player || player->dbCharacterId <= 0)
+        return false;
+
+    return mServer->saveCharacterLuaStorageValue(player->dbCharacterId, storageNamespace, key, value);
+}
+
+bool LuaServerContext::setCharacterStorageValueForCharacter(
+    int64_t characterId, const std::string& storageNamespace, const std::string& key, const LuaUtil::BinaryData& value)
+{
+    if (!mServer || characterId <= 0 || storageNamespace.empty() || key.empty())
+        return false;
+
+    return mServer->saveCharacterLuaStorageValue(characterId, storageNamespace, key, value);
+}
+
+bool LuaServerContext::deleteCharacterStorageValue(
+    uint32_t guid, const std::string& storageNamespace, const std::string& key)
+{
+    if (!mServer || guid == 0 || storageNamespace.empty() || key.empty())
+        return false;
+
+    const auto player = getPlayer(guid);
+    if (!player || player->dbCharacterId <= 0)
+        return false;
+
+    return mServer->deleteCharacterLuaStorageValue(player->dbCharacterId, storageNamespace, key);
+}
+
+bool LuaServerContext::deleteCharacterStorageValueForCharacter(
+    int64_t characterId, const std::string& storageNamespace, const std::string& key)
+{
+    if (!mServer || characterId <= 0 || storageNamespace.empty() || key.empty())
+        return false;
+
+    return mServer->deleteCharacterLuaStorageValue(characterId, storageNamespace, key);
+}
+
 void LuaServerContext::queueRefreshAllGameSettings()
 {
     OutboundLuaAction action;
@@ -1579,7 +1650,8 @@ std::size_t LuaServerContext::dispatchQueuedEvents()
 
     std::vector<InboundLuaEvent> events = mInboundQueue.takeAll();
     for (auto& event : events)
-        mGlobalScripts->receiveEvent(event.name, injectPidIntoPayload(*mLua, event.pid, event.data));
+        mGlobalScripts->receiveEvent(
+            event.name, injectSenderIntoPayload(*mLua, event.pid, event.characterId, event.data));
     return events.size();
 }
 
@@ -1753,7 +1825,7 @@ std::optional<LuaUtil::BinaryData> LuaServerContext::evaluateImmediateIntentOnLu
 
     std::optional<LuaUtil::BinaryData> out;
     mLua->protectedCall([&](LuaUtil::LuaView& view) {
-        LuaUtil::BinaryData payload = injectPidIntoPayload(*mLua, pid, data);
+        LuaUtil::BinaryData payload = injectSenderIntoPayload(*mLua, pid, 0, data);
         sol::object payloadObject = LuaUtil::deserialize(view.sol().lua_state(), payload);
         auto resultObject = mGlobalScripts->callPublicInterface<sol::object>("IntentPolicy", "evaluateIntent", eventName, payloadObject);
         if (!resultObject || !resultObject->is<sol::table>())
@@ -1864,9 +1936,9 @@ LuaUtil::BinaryData LuaServerContext::makeWeatherPayload(
     });
 }
 
-void LuaServerContext::enqueueEvent(uint32_t pid, std::string name, LuaUtil::BinaryData data)
+void LuaServerContext::enqueueEvent(uint32_t pid, std::string name, LuaUtil::BinaryData data, int64_t characterId)
 {
-    mInboundQueue.push({ pid, std::move(name), std::move(data) });
+    mInboundQueue.push({ pid, characterId, std::move(name), std::move(data) });
     mWakeCondition.notify_all();
 }
 

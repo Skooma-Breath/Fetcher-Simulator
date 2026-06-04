@@ -314,6 +314,18 @@ namespace mwmp
         /// Return character ids that have saved inventory and/or equipment snapshots.
         std::vector<int64_t> listCharactersWithSavedItems();
 
+        /// Load one namespaced persistent Lua value for a character.
+        std::optional<std::string> loadCharacterLuaStorageValue(
+            int64_t characterId, std::string_view storageNamespace, std::string_view key);
+
+        /// Insert or update one namespaced persistent Lua value for a character.
+        void saveCharacterLuaStorageValue(
+            int64_t characterId, std::string_view storageNamespace, std::string_view key, std::string_view value);
+
+        /// Delete one namespaced persistent Lua value for a character.
+        bool deleteCharacterLuaStorageValue(
+            int64_t characterId, std::string_view storageNamespace, std::string_view key);
+
         /// Return the read-only table catalog exposed to admin/browser tools.
         std::vector<DatabaseTableInfo> listBrowsableTables();
 

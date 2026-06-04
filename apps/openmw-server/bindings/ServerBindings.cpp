@@ -7,8 +7,15 @@
 #include <components/openmw-mp/Base/DynamicRecord.hpp>
 #include <sol/sol.hpp>
 
+#include <algorithm>
+#include <cctype>
+#include <cstdint>
+#include <filesystem>
+#include <fstream>
 #include <optional>
+#include <string>
 #include <tuple>
+#include <vector>
 
 #include "PlayerBindings.hpp"
 #include "../LuaServerContext.hpp"
@@ -17,6 +24,62 @@ namespace mwmp
 {
 namespace
 {
+    constexpr std::uintmax_t MaxBardcraftHostedMidiSize = 512 * 1024;
+
+    std::filesystem::path bardcraftHostedMidiDir()
+    {
+        return std::filesystem::current_path() / "bardcraft" / "custom-midi";
+    }
+
+    std::string lowerAscii(std::string value)
+    {
+        std::transform(value.begin(), value.end(), value.begin(), [](unsigned char c) {
+            return static_cast<char>(std::tolower(c));
+        });
+        return value;
+    }
+
+    bool isSafeBardcraftMidiName(const std::string& fileName)
+    {
+        if (fileName.empty() || fileName.find("..") != std::string::npos)
+            return false;
+        if (fileName.find('/') != std::string::npos || fileName.find('\\') != std::string::npos
+            || fileName.find(':') != std::string::npos)
+        {
+            return false;
+        }
+
+        const std::string lower = lowerAscii(fileName);
+        return (lower.size() >= 4 && lower.compare(lower.size() - 4, 4, ".mid") == 0)
+            || (lower.size() >= 5 && lower.compare(lower.size() - 5, 5, ".midi") == 0);
+    }
+
+    std::optional<std::string> readHostedMidiFile(const std::string& fileName)
+    {
+        if (!isSafeBardcraftMidiName(fileName))
+            return std::nullopt;
+
+        const std::filesystem::path path = bardcraftHostedMidiDir() / fileName;
+        std::error_code ec;
+        if (!std::filesystem::is_regular_file(path, ec))
+            return std::nullopt;
+
+        const std::uintmax_t size = std::filesystem::file_size(path, ec);
+        if (ec || size == 0 || size > MaxBardcraftHostedMidiSize)
+            return std::nullopt;
+
+        std::ifstream file(path, std::ios::binary);
+        if (!file)
+            return std::nullopt;
+
+        std::string bytes(static_cast<std::size_t>(size), '\0');
+        file.read(bytes.data(), static_cast<std::streamsize>(bytes.size()));
+        if (!file)
+            return std::nullopt;
+
+        return bytes;
+    }
+
     sol::table makePositionTable(sol::state_view lua, const Position& position)
     {
         sol::table table(lua, sol::create);
@@ -209,6 +272,72 @@ sol::table initMpPackage(LuaUtil::LuaView& view, LuaServerContext* context, LuaU
     mp.set_function("send", [context](uint32_t guid, const std::string& eventName, const sol::table& data)
     {
         if (context) context->queueSendLuaEvent(guid, eventName, LuaUtil::serialize(data));
+    });
+
+    mp.set_function("listBardcraftHostedMidiFiles", [](sol::this_state ts) -> sol::object
+    {
+        sol::state_view lua(ts);
+        sol::table list(lua, sol::create);
+
+        const std::filesystem::path dir = bardcraftHostedMidiDir();
+        std::error_code ec;
+        std::filesystem::create_directories(dir, ec);
+        if (ec)
+        {
+            Log(Debug::Warning) << "[ServerBindings] Failed to create Bardcraft hosted MIDI directory"
+                                << " path=" << dir.string()
+                                << ": " << ec.message();
+            return sol::make_object(ts, LuaUtil::makeReadOnly(list));
+        }
+
+        std::vector<std::pair<std::string, std::uintmax_t>> entries;
+        for (std::filesystem::directory_iterator it(dir, ec), end; !ec && it != end; it.increment(ec))
+        {
+            std::error_code entryEc;
+            const std::filesystem::directory_entry& entry = *it;
+            if (!entry.is_regular_file(entryEc) || entryEc)
+                continue;
+
+            const std::string fileName = entry.path().filename().string();
+            if (!isSafeBardcraftMidiName(fileName))
+                continue;
+
+            const std::uintmax_t size = entry.file_size(entryEc);
+            if (entryEc || size == 0 || size > MaxBardcraftHostedMidiSize)
+                continue;
+
+            entries.emplace_back(fileName, size);
+        }
+        if (ec)
+        {
+            Log(Debug::Warning) << "[ServerBindings] Failed to list Bardcraft hosted MIDI directory"
+                                << " path=" << dir.string()
+                                << ": " << ec.message();
+        }
+
+        std::sort(entries.begin(), entries.end(), [](const auto& left, const auto& right) {
+            return lowerAscii(left.first) < lowerAscii(right.first);
+        });
+
+        int index = 1;
+        for (const auto& [fileName, size] : entries)
+        {
+            sol::table item(lua, sol::create);
+            item["name"] = fileName;
+            item["size"] = static_cast<double>(size);
+            list[index++] = LuaUtil::makeReadOnly(item);
+        }
+
+        return sol::make_object(ts, LuaUtil::makeReadOnly(list));
+    });
+
+    mp.set_function("readBardcraftHostedMidiFile", [](const std::string& fileName, sol::this_state ts) -> sol::object
+    {
+        const auto bytes = readHostedMidiFile(fileName);
+        if (!bytes)
+            return sol::make_object(ts, sol::nil);
+
+        return sol::make_object(ts, *bytes);
     });
 
     mp.set_function("kick", [context](uint32_t guid, const std::string& reason)
@@ -600,6 +729,115 @@ sol::table initMpPackage(LuaUtil::LuaView& view, LuaServerContext* context, LuaU
             return sol::make_object(ts, sol::nil);
 
         return makeDatabaseBrowsePageValue(ts, *page);
+    });
+    mp.set_function("getCharacterStorage",
+        [context](uint32_t guid, const std::string& storageNamespace, const std::string& key,
+            sol::this_state ts) -> sol::object
+    {
+        if (!context || guid == 0 || storageNamespace.empty() || key.empty())
+            return sol::make_object(ts, sol::nil);
+
+        auto serialized = context->getCharacterStorageValue(guid, storageNamespace, key);
+        if (!serialized)
+            return sol::make_object(ts, sol::nil);
+
+        try
+        {
+            sol::state_view lua(ts);
+            return LuaUtil::deserialize(lua.lua_state(), *serialized);
+        }
+        catch (const std::exception& e)
+        {
+            Log(Debug::Warning) << "[ServerBindings] Failed to deserialize character storage"
+                                << " namespace=" << storageNamespace
+                                << " key=" << key
+                                << ": " << e.what();
+            return sol::make_object(ts, sol::nil);
+        }
+    });
+    mp.set_function("getCharacterStorageForCharacter",
+        [context](int64_t characterId, const std::string& storageNamespace, const std::string& key,
+            sol::this_state ts) -> sol::object
+    {
+        if (!context || characterId <= 0 || storageNamespace.empty() || key.empty())
+            return sol::make_object(ts, sol::nil);
+
+        auto serialized = context->getCharacterStorageValueForCharacter(characterId, storageNamespace, key);
+        if (!serialized)
+            return sol::make_object(ts, sol::nil);
+
+        try
+        {
+            sol::state_view lua(ts);
+            return LuaUtil::deserialize(lua.lua_state(), *serialized);
+        }
+        catch (const std::exception& e)
+        {
+            Log(Debug::Warning) << "[ServerBindings] Failed to deserialize character storage"
+                                << " characterId=" << characterId
+                                << " namespace=" << storageNamespace
+                                << " key=" << key
+                                << ": " << e.what();
+            return sol::make_object(ts, sol::nil);
+        }
+    });
+    mp.set_function("setCharacterStorage",
+        [context](uint32_t guid, const std::string& storageNamespace, const std::string& key,
+            const sol::object& value) -> bool
+    {
+        if (!context || guid == 0 || storageNamespace.empty() || key.empty())
+            return false;
+
+        if (value.get_type() == sol::type::lua_nil)
+            return context->deleteCharacterStorageValue(guid, storageNamespace, key);
+
+        try
+        {
+            return context->setCharacterStorageValue(guid, storageNamespace, key, LuaUtil::serialize(value));
+        }
+        catch (const std::exception& e)
+        {
+            Log(Debug::Warning) << "[ServerBindings] Failed to serialize character storage"
+                                << " namespace=" << storageNamespace
+                                << " key=" << key
+                                << ": " << e.what();
+            return false;
+        }
+    });
+    mp.set_function("setCharacterStorageForCharacter",
+        [context](int64_t characterId, const std::string& storageNamespace, const std::string& key,
+            const sol::object& value) -> bool
+    {
+        if (!context || characterId <= 0 || storageNamespace.empty() || key.empty())
+            return false;
+
+        if (value.get_type() == sol::type::lua_nil)
+            return context->deleteCharacterStorageValueForCharacter(characterId, storageNamespace, key);
+
+        try
+        {
+            return context->setCharacterStorageValueForCharacter(
+                characterId, storageNamespace, key, LuaUtil::serialize(value));
+        }
+        catch (const std::exception& e)
+        {
+            Log(Debug::Warning) << "[ServerBindings] Failed to serialize character storage"
+                                << " characterId=" << characterId
+                                << " namespace=" << storageNamespace
+                                << " key=" << key
+                                << ": " << e.what();
+            return false;
+        }
+    });
+    mp.set_function("deleteCharacterStorage",
+        [context](uint32_t guid, const std::string& storageNamespace, const std::string& key) -> bool
+    {
+        return context && context->deleteCharacterStorageValue(guid, storageNamespace, key);
+    });
+    mp.set_function("deleteCharacterStorageForCharacter",
+        [context](int64_t characterId, const std::string& storageNamespace, const std::string& key) -> bool
+    {
+        return context && context->deleteCharacterStorageValueForCharacter(characterId, storageNamespace, key);
     });
     mp.set_function("gcDynamicRecords",
         [context](const sol::optional<std::string>& recordType, const sol::object& persistentValue,

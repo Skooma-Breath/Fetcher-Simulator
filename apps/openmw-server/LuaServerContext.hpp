@@ -37,6 +37,7 @@ class MPServer;
 struct LuaPlayerSnapshot
 {
     uint32_t guid = 0;
+    int64_t dbCharacterId = 0;
     std::string name;
     std::string cell;
     std::string nickname;
@@ -86,7 +87,7 @@ public:
     void onWorldWeather(const std::string& region, int current, int next, float transitionFactor);
     void onActorSpawned(const BaseActor& actor, bool persistent);
     void onActorDeath(const BaseActor& actor, bool persistent);
-    void onLuaEvent(uint32_t pid, const std::string& eventName, const LuaUtil::BinaryData& data);
+    void onLuaEvent(uint32_t pid, int64_t characterId, const std::string& eventName, const LuaUtil::BinaryData& data);
     void requestGlobalStorageSnapshot(uint32_t guid);
     std::optional<LuaUtil::BinaryData> evaluateImmediateIntent(
         uint32_t pid, const std::string& eventName, const LuaUtil::BinaryData& data, std::string* error = nullptr);
@@ -177,6 +178,18 @@ public:
     std::vector<DatabaseTableInfo> listDatabaseTables() const;
     std::optional<DatabaseBrowsePage> browseDatabaseTable(
         const std::string& tableName, int64_t offset = 0, int64_t limit = 100) const;
+    std::optional<LuaUtil::BinaryData> getCharacterStorageValue(
+        uint32_t guid, const std::string& storageNamespace, const std::string& key) const;
+    std::optional<LuaUtil::BinaryData> getCharacterStorageValueForCharacter(
+        int64_t characterId, const std::string& storageNamespace, const std::string& key) const;
+    bool setCharacterStorageValue(
+        uint32_t guid, const std::string& storageNamespace, const std::string& key, const LuaUtil::BinaryData& value);
+    bool setCharacterStorageValueForCharacter(
+        int64_t characterId, const std::string& storageNamespace, const std::string& key,
+        const LuaUtil::BinaryData& value);
+    bool deleteCharacterStorageValue(uint32_t guid, const std::string& storageNamespace, const std::string& key);
+    bool deleteCharacterStorageValueForCharacter(
+        int64_t characterId, const std::string& storageNamespace, const std::string& key);
 
     void setPlayerData(uint32_t guid, const std::string& key, const std::string& value);
     std::optional<std::string> getPlayerData(uint32_t guid, const std::string& key) const;
@@ -248,7 +261,7 @@ private:
     LuaUtil::BinaryData makeWeatherPayload(
         const std::string& region, int current, int next, float transitionFactor) const;
 
-    void enqueueEvent(uint32_t pid, std::string name, LuaUtil::BinaryData data);
+    void enqueueEvent(uint32_t pid, std::string name, LuaUtil::BinaryData data, int64_t characterId = 0);
 
     class StorageSyncListener final : public LuaUtil::LuaStorage::Listener
     {

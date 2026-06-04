@@ -1,1 +1,2 @@
 GLOBAL: core.lua
+GLOBAL: bardcraft_persistence.lua

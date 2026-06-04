@@ -192,6 +192,11 @@ public:
     std::vector<DatabaseTableInfo> listBrowsableTables();
     std::optional<DatabaseBrowsePage> browseDatabaseTable(
         std::string_view tableName, int64_t offset = 0, int64_t limit = 100);
+    std::optional<std::string> loadCharacterLuaStorageValue(
+        int64_t characterId, std::string_view storageNamespace, std::string_view key);
+    bool saveCharacterLuaStorageValue(
+        int64_t characterId, std::string_view storageNamespace, std::string_view key, std::string_view value);
+    bool deleteCharacterLuaStorageValue(int64_t characterId, std::string_view storageNamespace, std::string_view key);
 
     // Iterate all fully-connected (post-handshake) players.
     // Used by script bindings to build the mp.getPlayers() table.

@@ -14,6 +14,7 @@ namespace mwmp
 struct InboundLuaEvent
 {
     uint32_t            pid = 0;
+    int64_t             characterId = 0;
     std::string         name;
     LuaUtil::BinaryData data;
 };
