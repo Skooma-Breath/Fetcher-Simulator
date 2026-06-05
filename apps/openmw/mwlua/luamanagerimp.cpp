@@ -257,7 +257,12 @@ namespace MWLua
         mLuaEvents.finalizeEventBatch();
 
         MWWorld::DateTimeManager& timeManager = *MWBase::Environment::get().getWorld()->getTimeManager();
-        if (!timeManager.isPaused())
+        bool luaPaused = timeManager.isPaused();
+#ifdef BUILD_MULTIPLAYER
+        if (luaPaused && mwmp::Main::isConnected())
+            luaPaused = false;
+#endif
+        if (!luaPaused)
         {
             mMenuScripts.processTimers(timeManager.getSimulationTime(), timeManager.getGameTime());
             mGlobalScripts.processTimers(timeManager.getSimulationTime(), timeManager.getGameTime());
@@ -276,7 +281,7 @@ namespace MWLua
 
             // Run engine handlers
             mEngineEvents.callEngineHandlers();
-            bool isPaused = timeManager.isPaused();
+            bool isPaused = luaPaused;
 
             float frameDuration = MWBase::Environment::get().getFrameDuration();
             for (LocalScripts* scripts : mActiveLocalScripts)
@@ -345,7 +350,12 @@ namespace MWLua
             }
             mInputEvents.clear();
             mLuaEvents.callMenuEventHandlers();
-            float frameDuration = MWBase::Environment::get().getWorld()->getTimeManager()->isPaused()
+            bool luaPaused = MWBase::Environment::get().getWorld()->getTimeManager()->isPaused();
+#ifdef BUILD_MULTIPLAYER
+            if (luaPaused && mwmp::Main::isConnected())
+                luaPaused = false;
+#endif
+            float frameDuration = luaPaused
                 ? 0.f
                 : MWBase::Environment::get().getFrameDuration();
             mInputActions.update(frameDuration);
