@@ -373,6 +373,67 @@ local function makePerformanceSessionStopPayload(session, reason)
     }
 end
 
+local function stopPerformanceSessionByKey(sessionKey, reason, notifySource)
+    local session = sessionKey and activePerformanceSessions[tostring(sessionKey)] or nil
+    if type(session) ~= "table" then
+        return 0, 0, 0
+    end
+
+    local sourceGuid = tonumber(session.sourceGuid)
+    local sourceNotified = 0
+    if notifySource and sourceGuid and mp.getPlayer(sourceGuid) then
+        mp.send(sourceGuid, "BC_BardcraftStopLocalPerformance", {
+            reason = reason,
+            sessionKey = session.key,
+            parentSessionKey = session.parentSessionKey,
+        })
+        sourceNotified = 1
+    end
+
+    local sent = sendPerformanceSessionPayloadToCell(
+        makePerformanceSessionStopPayload(session, reason),
+        session.cell,
+        sourceGuid)
+    activePerformanceSessions[tostring(sessionKey)] = nil
+    return 1, sent, sourceNotified
+end
+
+local function stopChildPerformanceSessions(parentSessionKey, reason)
+    if not parentSessionKey then
+        return 0
+    end
+
+    local childKeys = {}
+    for key, session in pairs(activePerformanceSessions) do
+        if tostring(session.parentSessionKey) == tostring(parentSessionKey) then
+            table.insert(childKeys, key)
+        end
+    end
+
+    local removed = 0
+    local sent = 0
+    local sourceNotified = 0
+    for _, childKey in ipairs(childKeys) do
+        local childRemoved, childSent, childSourceNotified = stopPerformanceSessionByKey(childKey, reason, true)
+        removed = removed + childRemoved
+        sent = sent + childSent
+        sourceNotified = sourceNotified + childSourceNotified
+    end
+
+    if removed > 0 then
+        writeActivePerformanceSessionSnapshot()
+        mp.log(string.format(
+            "[bardcraft] child performance sessions stopped parent=%s reason=%s sessions=%d sent=%d sourceNotified=%d",
+            tostring(parentSessionKey),
+            tostring(reason),
+            removed,
+            sent,
+            sourceNotified))
+    end
+
+    return removed
+end
+
 local function stopActivePerformanceSessionsForGuid(guid, reason)
     guid = tonumber(guid)
     if not guid then
@@ -381,8 +442,12 @@ local function stopActivePerformanceSessionsForGuid(guid, reason)
 
     local removed = 0
     local sent = 0
+    local rootKeys = {}
     for key, session in pairs(activePerformanceSessions) do
         if tonumber(session.sourceGuid) == guid then
+            if not session.parentSessionKey then
+                table.insert(rootKeys, key)
+            end
             sent = sent + sendPerformanceSessionPayloadToCell(
                 makePerformanceSessionStopPayload(session, reason),
                 session.cell,
@@ -400,6 +465,10 @@ local function stopActivePerformanceSessionsForGuid(guid, reason)
             tostring(reason),
             removed,
             sent))
+    end
+
+    for _, rootKey in ipairs(rootKeys) do
+        stopChildPerformanceSessions(rootKey, "root-" .. tostring(reason))
     end
 
     return removed
@@ -751,6 +820,9 @@ local function relayBardcraftPerformanceEvent(guid, data)
     end
 
     if eventType == "PerformStop" then
+        if session and not session.parentSessionKey then
+            stopChildPerformanceSessions(sessionKey, "root-stop")
+        end
         activePerformanceSessions[sessionKey] = nil
         writeActivePerformanceSessionSnapshot()
     end
