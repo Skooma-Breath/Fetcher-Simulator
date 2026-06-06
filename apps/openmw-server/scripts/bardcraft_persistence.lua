@@ -18,6 +18,14 @@ local MAX_CUSTOM_SONGS_PER_CHARACTER = 256
 local MAX_CUSTOM_SONG_ENCODED_CHARS = 1024 * 1024
 local MAX_CUSTOM_SONG_SEGMENT_CHARS = 1024 * 1024
 local bootstrapSequence = 0
+local performanceSessionSequence = 0
+local activePerformanceSessions = {}
+local highChurnPerformanceEvents = {
+    NoteEvent = true,
+    NoteEndEvent = true,
+    TempoEvent = true,
+    NewBar = true,
+}
 
 local function senderGuid(data)
     local guid = data and tonumber(data.pid) or 0
@@ -34,6 +42,17 @@ local function playerCellKey(player)
         return nil
     end
     return tostring(player.cell)
+end
+
+local function serverUptime()
+    if type(mp.getUptime) == "function" then
+        return tonumber(mp.getUptime()) or 0
+    end
+    return 0
+end
+
+local function performanceSessionKey(guid, actorId)
+    return tostring(guid) .. ":" .. tostring(actorId or "")
 end
 
 local function tableCount(value)
@@ -91,13 +110,115 @@ local function flattenBardcraftPerformancePayload(guid, source, data, event)
         bar = relayField(event, "bar"),
         instrument = relayField(event, "instrument"),
         item = relayField(event, "item"),
+        actorId = data and data.actorId,
+        sessionKey = relayField(event, "sessionKey"),
+        sessionPlayback = relayField(event, "sessionPlayback"),
+        serverTime = relayField(event, "serverTime"),
+        serverStartTime = relayField(event, "serverStartTime"),
+        sessionSequence = relayField(event, "sessionSequence"),
+        perfType = relayField(event, "perfType"),
         songTitle = song.title,
+        songId = song.id,
+        songSourceFile = song.sourceFile,
         songTempo = song.tempo,
         songTempoMod = song.tempoMod,
         songTimeSigNum = timeSig[1],
         songTimeSigDen = timeSig[2],
+        songLengthBars = song.lengthBars,
+        songResolution = song.resolution,
+        songSegmentRevision = song.segmentRevision,
+        songIsMpCustom = song.isMpCustom == true,
+        songIsServerCustom = song.isServerCustom == true,
+        songServerHosted = song.serverHosted == true,
+        partIndex = part.index,
         partInstrument = part.instrument,
     }
+end
+
+local function updateActivePerformanceSession(guid, source, actorId, payload, relayEvent, sourceCharacterId)
+    if type(payload) ~= "table" or type(relayEvent) ~= "table" then
+        return nil
+    end
+
+    local now = serverUptime()
+    local key = performanceSessionKey(guid, actorId)
+    performanceSessionSequence = performanceSessionSequence + 1
+
+    payload.sessionKey = key
+    payload.sessionPlayback = true
+    payload.serverTime = now
+    payload.serverStartTime = now
+    payload.sessionSequence = performanceSessionSequence
+    payload.actorId = actorId
+
+    activePerformanceSessions[key] = {
+        key = key,
+        sourceGuid = tonumber(guid),
+        sourceCharacterId = tonumber(sourceCharacterId),
+        sourceName = source and source.name or nil,
+        actorId = actorId,
+        cell = playerCellKey(source),
+        startMusicTime = tonumber(payload.time) or 0,
+        serverStartTime = now,
+        sessionSequence = performanceSessionSequence,
+        payload = copyRelayValue(payload, 0),
+        acked = {},
+    }
+
+    return activePerformanceSessions[key]
+end
+
+local function currentSessionPayload(session, now)
+    if type(session) ~= "table" or type(session.payload) ~= "table" then
+        return nil
+    end
+
+    now = tonumber(now) or serverUptime()
+    local payload = copyRelayValue(session.payload, 0)
+    payload.time = math.max(0, (tonumber(session.startMusicTime) or 0) + now - (tonumber(session.serverStartTime) or now))
+    payload.serverTime = now
+    payload.serverStartTime = session.serverStartTime
+    payload.sessionKey = session.key
+    payload.sessionPlayback = true
+    payload.sessionSequence = session.sessionSequence
+    payload.sourceGuid = session.sourceGuid
+    payload.sourceName = session.sourceName
+    payload.actorId = session.actorId
+    payload.eventType = "PerformStart"
+    return payload
+end
+
+local function sendActivePerformanceSessions(guid)
+    local target = guid and mp.getPlayer(guid) or nil
+    if not target then
+        return
+    end
+
+    local targetCell = playerCellKey(target)
+    local now = serverUptime()
+    local sessions = {}
+    for _, session in pairs(activePerformanceSessions) do
+        if tonumber(session.sourceGuid) ~= tonumber(guid) and session.cell == targetCell then
+            local payload = currentSessionPayload(session, now)
+            if payload then
+                table.insert(sessions, payload)
+            end
+        end
+    end
+
+    if #sessions > 0 then
+        mp.send(tonumber(guid), "BC_BardcraftPerformanceSessions", {
+            serverTime = now,
+            cell = targetCell,
+            sessions = sessions,
+        })
+    end
+
+    mp.log(string.format(
+        "[bardcraft] active performance sessions guid=%s cell=%s sent=%d",
+        tostring(guid),
+        tostring(targetCell),
+        #sessions))
 end
 
 local function knownSongCount(stats)
@@ -156,6 +277,17 @@ local function relayBardcraftPerformanceEvent(guid, data)
     end
 
     local payload = flattenBardcraftPerformancePayload(guid, source, data, relayEvent)
+    local sessionKey = performanceSessionKey(guid, data.actorId)
+    local session = activePerformanceSessions[sessionKey]
+    if eventType == "PerformStart" then
+        session = updateActivePerformanceSession(guid, source, data.actorId, payload, relayEvent, senderCharacterId(data))
+    elseif session then
+        session.cell = sourceCell
+        if eventType == "PerformStop" then
+            payload.sessionKey = session.key
+            payload.sessionSequence = session.sessionSequence
+        end
+    end
 
     if eventType == "PerformStart" or eventType == "PerformStop" then
         mp.log(string.format(
@@ -169,27 +301,53 @@ local function relayBardcraftPerformanceEvent(guid, data)
     end
 
     local sent = 0
+    local suppressed = 0
     for _, target in ipairs(mp.getPlayers()) do
         local targetGuid = tonumber(target.guid)
         if targetGuid and targetGuid ~= tonumber(guid) and playerCellKey(target) == sourceCell then
-            mp.send(targetGuid, "BCPerfRelay", payload)
-            sent = sent + 1
+            if session and highChurnPerformanceEvents[eventType] and session.acked[targetGuid] then
+                suppressed = suppressed + 1
+                session.suppressedHighChurn = (tonumber(session.suppressedHighChurn) or 0) + 1
+            else
+                if session and eventType == "PerformStart" then
+                    payload = currentSessionPayload(session, serverUptime()) or payload
+                end
+                mp.send(targetGuid, "BCPerfRelay", payload)
+                sent = sent + 1
+            end
         end
+    end
+
+    if session and suppressed > 0 and not session.suppressionLogged then
+        session.suppressionLogged = true
+        mp.log(string.format(
+            "[bardcraft] performance session suppressing high churn session=%s event=%s receivers=%d",
+            tostring(session.key),
+            tostring(eventType),
+            suppressed))
+    end
+
+    if eventType == "PerformStop" then
+        activePerformanceSessions[sessionKey] = nil
     end
 
     if eventType == "PerformStart" or eventType == "PerformStop" then
         mp.log(string.format(
-            "[bardcraft] performance relay guid=%s name=%s cell=%s event=%s sent=%d song=%s",
+            "[bardcraft] performance relay guid=%s name=%s cell=%s event=%s sent=%d suppressed=%d song=%s session=%s",
             tostring(guid),
             tostring(source.name),
             tostring(sourceCell),
             tostring(eventType),
             sent,
-            tostring(relayEvent.song and relayEvent.song.title)))
+            suppressed,
+            tostring(relayEvent.song and relayEvent.song.title),
+            tostring(sessionKey)))
         mp.send(tonumber(guid), "BC_BardcraftPerformanceRelayAck", {
             eventType = eventType,
             sent = sent,
+            suppressed = suppressed,
             song = relayEvent.song and relayEvent.song.title,
+            sessionKey = sessionKey,
         })
     end
 end
@@ -1099,6 +1257,7 @@ M.eventHandlers = {
         end
 
         sendBootstrap(guid, characterId)
+        sendActivePerformanceSessions(guid)
     end,
 
     BC_RequestBardcraftServerSongs = function(data)
@@ -1137,6 +1296,31 @@ M.eventHandlers = {
         end
 
         sendCustomSongRecords(guid, characterId, data and data.token or "", data and data.ids or {})
+    end,
+
+    BC_RequestBardcraftPerformanceSongRecord = function(data)
+        local guid = senderGuid(data)
+        local sessionKey = data and data.sessionKey
+        local session = sessionKey and activePerformanceSessions[tostring(sessionKey)] or nil
+        local sourceCharacterId = session and tonumber(session.sourceCharacterId) or nil
+        local songId = data and data.songId
+        if not guid or not sourceCharacterId or not songId then
+            mp.log(string.format(
+                "[bardcraft] performance song fetch skipped guid=%s session=%s sourceCharacterId=%s songId=%s",
+                tostring(guid),
+                tostring(sessionKey),
+                tostring(sourceCharacterId),
+                tostring(songId)))
+            return
+        end
+
+        sendCustomSongRecords(guid, sourceCharacterId, data and data.token or "", { songId })
+        mp.log(string.format(
+            "[bardcraft] performance song fetch guid=%s session=%s sourceCharacterId=%s songId=%s",
+            tostring(guid),
+            tostring(sessionKey),
+            tostring(sourceCharacterId),
+            tostring(songId)))
     end,
 
     BC_SaveBardcraftPersistence = function(data)
@@ -1183,8 +1367,33 @@ M.eventHandlers = {
             mp.send(tonumber(guid), "BCPerfPong", {
                 ok = true,
                 ts = data and data.ts,
+                serverTime = serverUptime(),
             })
         end
+    end,
+
+    BC_RequestBardcraftPerformanceSessions = function(data)
+        local guid = senderGuid(data)
+        if guid then
+            sendActivePerformanceSessions(guid)
+        end
+    end,
+
+    BC_BardcraftPerformanceSessionAck = function(data)
+        local guid = senderGuid(data)
+        local sessionKey = data and data.sessionKey
+        local session = sessionKey and activePerformanceSessions[tostring(sessionKey)] or nil
+        if not guid or not session then
+            return
+        end
+
+        session.acked[tonumber(guid)] = data.ok == true
+        mp.log(string.format(
+            "[bardcraft] performance session ack guid=%s session=%s ok=%s reason=%s",
+            tostring(guid),
+            tostring(sessionKey),
+            tostring(data.ok == true),
+            tostring(data.reason)))
     end,
 
     BC_BardcraftPerformanceRelay = function(data)
