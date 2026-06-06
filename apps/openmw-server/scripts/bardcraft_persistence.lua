@@ -335,6 +335,121 @@ local function sendActivePerformanceSessions(guid)
         #sessions))
 end
 
+local function sendPerformanceSessionPayloadToCell(payload, cell, excludeGuid)
+    if type(payload) ~= "table" or cell == nil then
+        return 0
+    end
+
+    local sent = 0
+    for _, target in ipairs(mp.getPlayers()) do
+        local targetGuid = tonumber(target.guid)
+        if targetGuid and targetGuid ~= tonumber(excludeGuid) and playerCellKey(target) == cell then
+            mp.send(targetGuid, "BCPerfRelay", payload)
+            sent = sent + 1
+        end
+    end
+    return sent
+end
+
+local function makePerformanceSessionStopPayload(session, reason)
+    if type(session) ~= "table" then
+        return nil
+    end
+
+    return {
+        sourceGuid = session.sourceGuid,
+        sourceName = session.sourceName,
+        actorId = session.actorId,
+        sessionKey = session.key,
+        sessionPlayback = true,
+        sessionSequence = session.sessionSequence,
+        eventType = "PerformStop",
+        completion = 0,
+        stopReason = reason,
+        serverTime = serverUptime(),
+    }
+end
+
+local function stopActivePerformanceSessionsForGuid(guid, reason)
+    guid = tonumber(guid)
+    if not guid then
+        return 0
+    end
+
+    local removed = 0
+    local sent = 0
+    for key, session in pairs(activePerformanceSessions) do
+        if tonumber(session.sourceGuid) == guid then
+            sent = sent + sendPerformanceSessionPayloadToCell(
+                makePerformanceSessionStopPayload(session, reason),
+                session.cell,
+                guid)
+            activePerformanceSessions[key] = nil
+            removed = removed + 1
+        end
+    end
+
+    if removed > 0 then
+        writeActivePerformanceSessionSnapshot()
+        mp.log(string.format(
+            "[bardcraft] performance sessions stopped guid=%s reason=%s sessions=%d sent=%d",
+            tostring(guid),
+            tostring(reason),
+            removed,
+            sent))
+    end
+
+    return removed
+end
+
+local function moveActivePerformanceSessionsForGuid(guid, oldCell, newCell)
+    guid = tonumber(guid)
+    if not guid or not newCell then
+        return 0
+    end
+
+    local moved = 0
+    for _, session in pairs(activePerformanceSessions) do
+        if tonumber(session.sourceGuid) == guid then
+            local previousCell = session.cell or oldCell
+            if previousCell ~= newCell then
+                local stopSent = 0
+                if previousCell then
+                    stopSent = sendPerformanceSessionPayloadToCell(
+                        makePerformanceSessionStopPayload(session, "source-cell-change"),
+                        previousCell,
+                        guid)
+                end
+
+                session.cell = newCell
+                session.acked = {}
+                session.suppressionLogged = nil
+                session.suppressedHighChurn = 0
+
+                local startPayload = currentSessionPayload(session, serverUptime())
+                local startSent = sendPerformanceSessionPayloadToCell(startPayload, newCell, guid)
+                moved = moved + 1
+
+                mp.log(string.format(
+                    "[bardcraft] performance session moved guid=%s session=%s oldCell=%s newCell=%s stopSent=%d startSent=%d song=%s",
+                    tostring(guid),
+                    tostring(session.key),
+                    tostring(previousCell),
+                    tostring(newCell),
+                    stopSent,
+                    startSent,
+                    tostring(startPayload and startPayload.songTitle)))
+            end
+        end
+    end
+
+    if moved > 0 then
+        writeActivePerformanceSessionSnapshot()
+    end
+
+    return moved
+end
+
 local function findActiveSessionForCommand(player, selector)
     local sessions = activeSessionsForPlayer(player)
     if #sessions == 0 then
@@ -582,7 +697,12 @@ local function relayBardcraftPerformanceEvent(guid, data)
     if eventType == "PerformStart" then
         session = updateActivePerformanceSession(guid, source, data.actorId, payload, relayEvent, senderCharacterId(data))
     elseif session then
-        session.cell = sourceCell
+        if sourceCell and session.cell ~= sourceCell then
+            moveActivePerformanceSessionsForGuid(guid, session.cell, sourceCell)
+            session = activePerformanceSessions[sessionKey]
+        else
+            session.cell = sourceCell
+        end
         if eventType == "PerformStop" then
             payload.sessionKey = session.key
             payload.sessionSequence = session.sessionSequence
@@ -1604,6 +1724,17 @@ M.eventHandlers = {
     OnServerInit = function(_)
         activePerformanceSessions = {}
         clearActivePerformanceSessionSnapshot()
+    end,
+
+    OnPlayerDisconnect = function(data)
+        stopActivePerformanceSessionsForGuid(data and data.guid, "source-disconnect")
+    end,
+
+    OnPlayerCellChange = function(data)
+        local guid = data and data.guid
+        local player = guid and mp.getPlayer(guid) or nil
+        local newCell = data and data.newCell or playerCellKey(player)
+        moveActivePerformanceSessionsForGuid(guid, data and data.oldCell, newCell)
     end,
 
     BC_RequestBardcraftPersistence = function(data)
