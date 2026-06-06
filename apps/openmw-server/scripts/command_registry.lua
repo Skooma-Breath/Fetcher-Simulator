@@ -3,6 +3,7 @@ local M = {}
 local CATEGORY_ORDER = {
     "General",
     "Voice",
+    "Bardcraft",
     "Travel",
     "Surf",
     "Records",
@@ -76,6 +77,12 @@ local COMMANDS = {
         category = "Voice",
         usage = "/speechhelp",
         summary = "List valid speech types and indexes.",
+    },
+    {
+        id = "bcperf",
+        category = "Bardcraft",
+        usage = "/bcperf list|join|play|playpart|instruments|stop",
+        summary = "Inspect, start, join, or prepare Bardcraft performances in your cell.",
     },
     {
         id = "login",

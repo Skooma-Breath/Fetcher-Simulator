@@ -1,6 +1,8 @@
 local mp = require("mp")
 
-local M = {}
+local M = {
+    interfaceName = "BardcraftPersistence",
+}
 
 local STORAGE_NAMESPACE = "Bardcraft"
 local STORAGE_KEYS = {
@@ -9,6 +11,8 @@ local STORAGE_KEYS = {
     "troupeRecords",
     "customSongs",
 }
+local RUNTIME_NAMESPACE = "BardcraftRuntime"
+local RUNTIME_ACTIVE_SESSIONS_KEY = "activePerformanceSessions"
 
 local MAX_HOSTED_MIDI_BYTES_PER_RESPONSE = 512 * 1024
 local KNOWN_SONGS_PER_BOOTSTRAP_CHUNK = 40
@@ -87,6 +91,45 @@ local function copyRelayValue(value, depth)
     return copy
 end
 
+local function runtimeSection()
+    return mp.storage.globalSection(RUNTIME_NAMESPACE)
+end
+
+local function clearActivePerformanceSessionSnapshot()
+    runtimeSection():set(RUNTIME_ACTIVE_SESSIONS_KEY, {})
+end
+
+local function writeActivePerformanceSessionSnapshot()
+    local snapshot = {}
+    for key, session in pairs(activePerformanceSessions) do
+        snapshot[key] = {
+            key = session.key,
+            sourceGuid = session.sourceGuid,
+            sourceCharacterId = session.sourceCharacterId,
+            sourceName = session.sourceName,
+            actorId = session.actorId,
+            cell = session.cell,
+            startMusicTime = session.startMusicTime,
+            serverStartTime = session.serverStartTime,
+            sessionSequence = session.sessionSequence,
+            payload = copyRelayValue(session.payload, 0),
+        }
+    end
+    runtimeSection():set(RUNTIME_ACTIVE_SESSIONS_KEY, snapshot)
+end
+
+local function activePerformanceSessionSource()
+    if next(activePerformanceSessions) ~= nil then
+        return activePerformanceSessions
+    end
+
+    local snapshot = runtimeSection():getCopy(RUNTIME_ACTIVE_SESSIONS_KEY) or {}
+    if type(snapshot) ~= "table" then
+        return {}
+    end
+    return snapshot
+end
+
 local function relayField(event, key)
     return event and event[key] or nil
 end
@@ -132,6 +175,8 @@ local function flattenBardcraftPerformancePayload(guid, source, data, event)
         songServerHosted = song.serverHosted == true,
         partIndex = part.index,
         partInstrument = part.instrument,
+        partTitle = part.title,
+        partNumOfType = part.numOfType,
     }
 end
 
@@ -164,6 +209,7 @@ local function updateActivePerformanceSession(guid, source, actorId, payload, re
         payload = copyRelayValue(payload, 0),
         acked = {},
     }
+    writeActivePerformanceSessionSnapshot()
 
     return activePerformanceSessions[key]
 end
@@ -186,6 +232,74 @@ local function currentSessionPayload(session, now)
     payload.actorId = session.actorId
     payload.eventType = "PerformStart"
     return payload
+end
+
+local function sessionSongIdentity(payload)
+    if type(payload) ~= "table" then
+        return nil
+    end
+    if payload.songId ~= nil then
+        return "id:" .. tostring(payload.songId)
+    end
+    if payload.songSourceFile ~= nil then
+        return "file:" .. tostring(payload.songSourceFile)
+    end
+    if payload.songTitle ~= nil then
+        return "title:" .. tostring(payload.songTitle)
+    end
+    return nil
+end
+
+local function collectOccupiedPartIndices(joinSession, now)
+    local occupied = {}
+    local wantedPayload = currentSessionPayload(joinSession, now)
+    local wantedSong = sessionSongIdentity(wantedPayload)
+    if not wantedSong then
+        return occupied
+    end
+
+    local seen = {}
+    for _, session in pairs(activePerformanceSessionSource()) do
+        if session.cell == joinSession.cell then
+            local payload = currentSessionPayload(session, now)
+            if sessionSongIdentity(payload) == wantedSong and payload.partIndex ~= nil then
+                local part = tostring(payload.partIndex)
+                if not seen[part] then
+                    seen[part] = true
+                    table.insert(occupied, payload.partIndex)
+                end
+            end
+        end
+    end
+    table.sort(occupied, function(left, right)
+        local leftNumber = tonumber(left)
+        local rightNumber = tonumber(right)
+        if leftNumber and rightNumber then
+            return leftNumber < rightNumber
+        end
+        return tostring(left) < tostring(right)
+    end)
+    return occupied
+end
+
+local function activeSessionsForPlayer(player)
+    local sessions = {}
+    local playerGuid = player and tonumber(player.guid) or nil
+    local targetCell = playerCellKey(player)
+    for _, session in pairs(activePerformanceSessionSource()) do
+        if tonumber(session.sourceGuid) ~= playerGuid and session.cell == targetCell then
+            table.insert(sessions, session)
+        end
+    end
+    table.sort(sessions, function(left, right)
+        local leftName = tostring(left.sourceName or "")
+        local rightName = tostring(right.sourceName or "")
+        if leftName ~= rightName then
+            return leftName < rightName
+        end
+        return tostring(left.key) < tostring(right.key)
+    end)
+    return sessions
 end
 
 local function sendActivePerformanceSessions(guid)
@@ -220,6 +334,192 @@ local function sendActivePerformanceSessions(guid)
         tostring(targetCell),
         #sessions))
 end
+
+local function findActiveSessionForCommand(player, selector)
+    local sessions = activeSessionsForPlayer(player)
+    if #sessions == 0 then
+        return nil, sessions
+    end
+
+    if selector == nil or selector == "" then
+        return #sessions == 1 and sessions[1] or nil, sessions
+    end
+
+    local index = tonumber(selector)
+    if index and sessions[index] then
+        return sessions[index], sessions
+    end
+
+    for _, session in ipairs(sessions) do
+        if tostring(session.key) == tostring(selector) then
+            return session, sessions
+        end
+    end
+
+    return nil, sessions
+end
+
+local function splitCommandArgs(text)
+    local args = {}
+    for token in tostring(text or ""):gmatch("%S+") do
+        table.insert(args, token)
+    end
+    return args
+end
+
+local function joinCommandArgs(args, startIndex)
+    local parts = {}
+    for index = startIndex, #args do
+        table.insert(parts, args[index])
+    end
+    return table.concat(parts, " ")
+end
+
+local function sendBardcraftSessionList(player)
+    local sessions = activeSessionsForPlayer(player)
+    if #sessions == 0 then
+        player:sendMessage("[Bardcraft] No active performances in this cell.")
+    else
+        player:sendMessage("[Bardcraft] Active performances in this cell:")
+        for index, session in ipairs(sessions) do
+            local payload = currentSessionPayload(session, serverUptime()) or {}
+            player:sendMessage(string.format(
+                "  %d. %s - %s part=%s session=%s",
+                index,
+                tostring(session.sourceName or session.sourceGuid),
+                tostring(payload.songTitle or "unknown song"),
+                tostring(payload.partIndex or "?"),
+                tostring(session.key)))
+        end
+    end
+
+    mp.log(string.format(
+        "[bardcraft] command list guid=%s name=%s cell=%s sessions=%d",
+        tostring(player and player.guid),
+        tostring(player and player.name),
+        tostring(playerCellKey(player)),
+        #sessions))
+end
+
+local function sendBardcraftJoin(player, selector, requestedPart)
+    local session, sessions = findActiveSessionForCommand(player, selector)
+    if not session then
+        if #sessions > 1 and (selector == nil or selector == "") then
+            player:sendMessage("[Bardcraft] Multiple performances are active. Use /bcperf list, then /bcperf join <number> [part].")
+        else
+            player:sendMessage("[Bardcraft] No matching active performance in this cell.")
+        end
+        mp.log(string.format(
+            "[bardcraft] command join skipped guid=%s name=%s selector=%s sessions=%d",
+            tostring(player and player.guid),
+            tostring(player and player.name),
+            tostring(selector),
+            #sessions))
+        return
+    end
+
+    local now = serverUptime()
+    local payload = currentSessionPayload(session, now)
+    if type(payload) ~= "table" then
+        player:sendMessage("[Bardcraft] That performance is no longer joinable.")
+        return
+    end
+
+    payload.requestedPartIndex = requestedPart
+    payload.occupiedPartIndices = collectOccupiedPartIndices(session, now)
+    payload.joinedSessionKey = session.key
+    mp.send(tonumber(player.guid), "BC_BardcraftJoinPerformance", payload)
+    player:sendMessage(string.format(
+        "[Bardcraft] Joining %s - %s.",
+        tostring(session.sourceName or session.sourceGuid),
+        tostring(payload.songTitle or "unknown song")))
+
+    mp.log(string.format(
+        "[bardcraft] command join guid=%s name=%s session=%s source=%s song=%s currentTime=%.3f requestedPart=%s occupiedParts=%s",
+        tostring(player.guid),
+        tostring(player.name),
+        tostring(session.key),
+        tostring(session.sourceName or session.sourceGuid),
+        tostring(payload.songTitle),
+        tonumber(payload.time) or 0,
+        tostring(requestedPart),
+        table.concat(payload.occupiedPartIndices or {}, ",")))
+end
+
+local function sendBardcraftInstrumentGrant(player)
+    mp.send(tonumber(player.guid), "BC_BardcraftGiveAllInstruments", {})
+    player:sendMessage("[Bardcraft] Adding Bardcraft instruments to your inventory.")
+    mp.log(string.format(
+        "[bardcraft] command instruments guid=%s name=%s",
+        tostring(player.guid),
+        tostring(player.name)))
+end
+
+local function sendBardcraftLocalPlay(player, selector, requestedPart)
+    selector = tostring(selector or "")
+    if selector == "" then
+        player:sendMessage("[Bardcraft] Usage: /bcperf play <song id or title> or /bcperf playpart <part> <song id or title>")
+        return
+    end
+
+    mp.send(tonumber(player.guid), "BC_BardcraftStartLocalPerformance", {
+        selector = selector,
+        requestedPartIndex = requestedPart,
+    })
+    player:sendMessage("[Bardcraft] Starting local performance: " .. selector)
+    mp.log(string.format(
+        "[bardcraft] command play guid=%s name=%s selector=%s requestedPart=%s",
+        tostring(player.guid),
+        tostring(player.name),
+        selector,
+        tostring(requestedPart)))
+end
+
+local function handleChat(player, data, env)
+    local prefix = (env and env.commandPrefix) or "/"
+    local command = prefix .. "bcperf"
+    local msg = data and data.message or ""
+    if msg ~= command and msg:sub(1, #command + 1) ~= command .. " " then
+        return nil
+    end
+
+    local rest = msg == command and "" or msg:sub(#command + 2)
+    local args = splitCommandArgs(rest)
+    local subcommand = string.lower(args[1] or "list")
+
+    if subcommand == "list" or subcommand == "" then
+        sendBardcraftSessionList(player)
+    elseif subcommand == "join" then
+        if string.lower(args[2] or "") == "part" then
+            sendBardcraftJoin(player, nil, args[3])
+        else
+            sendBardcraftJoin(player, args[2], args[3])
+        end
+    elseif subcommand == "leave" or subcommand == "stop" then
+        mp.send(tonumber(player.guid), "BC_BardcraftStopLocalPerformance", {
+            reason = "command",
+        })
+        player:sendMessage("[Bardcraft] Stopping local performance.")
+        mp.log(string.format(
+            "[bardcraft] command stop guid=%s name=%s",
+            tostring(player.guid),
+            tostring(player.name)))
+    elseif subcommand == "instruments" or subcommand == "items" then
+        sendBardcraftInstrumentGrant(player)
+    elseif subcommand == "play" then
+        sendBardcraftLocalPlay(player, joinCommandArgs(args, 2), nil)
+    elseif subcommand == "playpart" then
+        sendBardcraftLocalPlay(player, joinCommandArgs(args, 3), args[2])
+    else
+        player:sendMessage("Usage: /bcperf list | /bcperf join [number|session] [part] | /bcperf join part <part> | /bcperf play <song> | /bcperf playpart <part> <song> | /bcperf instruments | /bcperf stop")
+    end
+
+    return false
+end
+
+M.interface = {
+    handleChat = handleChat,
+}
 
 local function knownSongCount(stats)
     return type(stats) == "table" and tableCount(stats.knownSongs) or 0
@@ -329,6 +629,7 @@ local function relayBardcraftPerformanceEvent(guid, data)
 
     if eventType == "PerformStop" then
         activePerformanceSessions[sessionKey] = nil
+        writeActivePerformanceSessionSnapshot()
     end
 
     if eventType == "PerformStart" or eventType == "PerformStop" then
@@ -924,6 +1225,54 @@ local function requestedIdSet(ids)
     return set
 end
 
+local function characterHasCustomSong(characterId, songId)
+    if not characterId or songId == nil then
+        return false
+    end
+
+    local wanted = tostring(songId)
+    local customSongs = mp.getCharacterStorageForCharacter(characterId, STORAGE_NAMESPACE, "customSongs") or {}
+    for _, song in ipairs(type(customSongs) == "table" and customSongs or {}) do
+        if type(song) == "table" then
+            if song.id ~= nil and tostring(song.id) == wanted then
+                return true
+            end
+
+            local encodedSong = encodeCustomSong(song)
+            if encodedSong and encodedSong.id ~= nil and tostring(encodedSong.id) == wanted then
+                return true
+            end
+        end
+    end
+    return false
+end
+
+local function findPerformanceSongSourceCharacterId(session, songId)
+    if not session or songId == nil then
+        return nil, nil
+    end
+
+    local directCharacterId = tonumber(session.sourceCharacterId)
+    if characterHasCustomSong(directCharacterId, songId) then
+        return directCharacterId, nil
+    end
+
+    local wantedPayload = currentSessionPayload(session, serverUptime())
+    local wantedSong = sessionSongIdentity(wantedPayload)
+    for _, candidate in pairs(activePerformanceSessionSource()) do
+        if candidate ~= session and candidate.cell == session.cell then
+            local candidatePayload = currentSessionPayload(candidate, serverUptime())
+            local candidateSong = sessionSongIdentity(candidatePayload)
+            local candidateCharacterId = tonumber(candidate.sourceCharacterId)
+            if candidateSong == wantedSong and characterHasCustomSong(candidateCharacterId, songId) then
+                return candidateCharacterId, directCharacterId
+            end
+        end
+    end
+
+    return directCharacterId, nil
+end
+
 local function sendCustomSongRecords(guid, characterId, token, ids)
     local requested = requestedIdSet(ids)
     local customSongs = mp.getCharacterStorageForCharacter(characterId, STORAGE_NAMESPACE, "customSongs") or {}
@@ -1039,6 +1388,13 @@ local function sendCustomSongRecords(guid, characterId, token, ids)
         encodedChunks,
         segmentChunks,
         skipped))
+
+    return {
+        sent = sent,
+        encodedChunks = encodedChunks,
+        segmentChunks = segmentChunks,
+        skipped = skipped,
+    }
 end
 
 local function upsertCustomSongRecord(characterId, record)
@@ -1245,6 +1601,11 @@ local function persistSubmittedState(guid, characterId, data)
 end
 
 M.eventHandlers = {
+    OnServerInit = function(_)
+        activePerformanceSessions = {}
+        clearActivePerformanceSessionSnapshot()
+    end,
+
     BC_RequestBardcraftPersistence = function(data)
         local guid = senderGuid(data)
         local characterId = senderCharacterId(data)
@@ -1302,7 +1663,7 @@ M.eventHandlers = {
         local guid = senderGuid(data)
         local sessionKey = data and data.sessionKey
         local session = sessionKey and activePerformanceSessions[tostring(sessionKey)] or nil
-        local sourceCharacterId = session and tonumber(session.sourceCharacterId) or nil
+        local sourceCharacterId, fallbackFromCharacterId = findPerformanceSongSourceCharacterId(session, data and data.songId)
         local songId = data and data.songId
         if not guid or not sourceCharacterId or not songId then
             mp.log(string.format(
@@ -1314,13 +1675,15 @@ M.eventHandlers = {
             return
         end
 
-        sendCustomSongRecords(guid, sourceCharacterId, data and data.token or "", { songId })
+        local stats = sendCustomSongRecords(guid, sourceCharacterId, data and data.token or "", { songId })
         mp.log(string.format(
-            "[bardcraft] performance song fetch guid=%s session=%s sourceCharacterId=%s songId=%s",
+            "[bardcraft] performance song fetch guid=%s session=%s sourceCharacterId=%s songId=%s sent=%d fallbackFrom=%s",
             tostring(guid),
             tostring(sessionKey),
             tostring(sourceCharacterId),
-            tostring(songId)))
+            tostring(songId),
+            tonumber(stats and stats.sent) or 0,
+            tostring(fallbackFromCharacterId)))
     end,
 
     BC_SaveBardcraftPersistence = function(data)
