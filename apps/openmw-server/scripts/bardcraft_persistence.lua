@@ -159,6 +159,7 @@ local function flattenBardcraftPerformancePayload(guid, source, data, event)
         serverTime = relayField(event, "serverTime"),
         serverStartTime = relayField(event, "serverStartTime"),
         sessionSequence = relayField(event, "sessionSequence"),
+        joinedSessionKey = relayField(event, "joinedSessionKey"),
         perfType = relayField(event, "perfType"),
         songTitle = song.title,
         songId = song.id,
@@ -203,6 +204,7 @@ local function updateActivePerformanceSession(guid, source, actorId, payload, re
         sourceName = source and source.name or nil,
         actorId = actorId,
         cell = playerCellKey(source),
+        parentSessionKey = payload.joinedSessionKey and tostring(payload.joinedSessionKey) or nil,
         startMusicTime = tonumber(payload.time) or 0,
         serverStartTime = now,
         sessionSequence = performanceSessionSequence,
@@ -230,6 +232,7 @@ local function currentSessionPayload(session, now)
     payload.sourceGuid = session.sourceGuid
     payload.sourceName = session.sourceName
     payload.actorId = session.actorId
+    payload.joinedSessionKey = session.parentSessionKey
     payload.eventType = "PerformStart"
     return payload
 end
@@ -287,7 +290,7 @@ local function activeSessionsForPlayer(player)
     local playerGuid = player and tonumber(player.guid) or nil
     local targetCell = playerCellKey(player)
     for _, session in pairs(activePerformanceSessionSource()) do
-        if tonumber(session.sourceGuid) ~= playerGuid and session.cell == targetCell then
+        if tonumber(session.sourceGuid) ~= playerGuid and session.cell == targetCell and not session.parentSessionKey then
             table.insert(sessions, session)
         end
     end
@@ -754,7 +757,7 @@ local function relayBardcraftPerformanceEvent(guid, data)
 
     if eventType == "PerformStart" or eventType == "PerformStop" then
         mp.log(string.format(
-            "[bardcraft] performance relay guid=%s name=%s cell=%s event=%s sent=%d suppressed=%d song=%s session=%s",
+            "[bardcraft] performance relay guid=%s name=%s cell=%s event=%s sent=%d suppressed=%d song=%s session=%s parent=%s",
             tostring(guid),
             tostring(source.name),
             tostring(sourceCell),
@@ -762,7 +765,8 @@ local function relayBardcraftPerformanceEvent(guid, data)
             sent,
             suppressed,
             tostring(relayEvent.song and relayEvent.song.title),
-            tostring(sessionKey)))
+            tostring(sessionKey),
+            tostring(session and session.parentSessionKey)))
         mp.send(tonumber(guid), "BC_BardcraftPerformanceRelayAck", {
             eventType = eventType,
             sent = sent,
