@@ -23,6 +23,8 @@ local MAX_CUSTOM_SONG_ENCODED_CHARS = 1024 * 1024
 local MAX_CUSTOM_SONG_SEGMENT_CHARS = 1024 * 1024
 local bootstrapSequence = 0
 local performanceSessionSequence = 0
+local joinRequestSequence = 0
+local pendingJoinRequests = {}
 local activePerformanceSessions = {}
 local highChurnPerformanceEvents = {
     NoteEvent = true,
@@ -592,7 +594,8 @@ local function sendBardcraftJoin(player, selector, requestedPart)
     local session, sessions = findActiveSessionForCommand(player, selector)
     if not session then
         if #sessions > 1 and (selector == nil or selector == "") then
-            player:sendMessage("[Bardcraft] Multiple performances are active. Use /bcperf list, then /bcperf join <number> [part].")
+            player:sendMessage(
+                "[Bardcraft] Multiple performances are active. Use /bcperf list, then /bcperf join <number> [part].")
         else
             player:sendMessage("[Bardcraft] No matching active performance in this cell.")
         end
@@ -612,25 +615,70 @@ local function sendBardcraftJoin(player, selector, requestedPart)
         return
     end
 
-    payload.requestedPartIndex = requestedPart
-    payload.occupiedPartIndices = collectOccupiedPartIndices(session, now)
-    payload.joinedSessionKey = session.key
-    mp.send(tonumber(player.guid), "BC_BardcraftJoinPerformance", payload)
+    joinRequestSequence = joinRequestSequence + 1
+    local joinRequestKey = tostring(now) .. ":" .. tostring(joinRequestSequence) .. ":" .. tostring(player.guid)
+    pendingJoinRequests[joinRequestKey] = {
+        playerGuid = tonumber(player.guid),
+        sessionKey = session.key,
+        requestedPart = requestedPart,
+        createdAt = now,
+    }
+    mp.log(string.format(
+        "[bardcraft] join request stored key=%s session=%s guid=%s pendingCount=%d",
+        tostring(joinRequestKey),
+        tostring(session.key),
+        tostring(player.guid),
+        tableCount(pendingJoinRequests)))
+
+    local preparePayload = {
+        joinRequestKey = joinRequestKey,
+        sessionKey = session.key,
+        requestedPartIndex = requestedPart,
+        songId = payload.songId,
+        songTitle = payload.songTitle,
+        songSourceFile = payload.songSourceFile,
+        songSegmentRevision = payload.songSegmentRevision,
+        perfType = payload.perfType,
+        sourceName = tostring(session.sourceName or session.sourceGuid),
+        sourceGuid = tonumber(session.sourceGuid),
+        serverTime = now,
+    }
+    mp.send(tonumber(player.guid), "BC_BardcraftJoinPrepare", preparePayload)
+    mp.send(tonumber(player.guid), "BC_BardcraftJoinPreparePing", {
+        joinRequestKey = joinRequestKey,
+    })
+    local legacyPreparePayload = copyRelayValue(preparePayload, 0)
+    legacyPreparePayload.isPrepare = true
+    mp.send(tonumber(player.guid), "BC_BardcraftJoinPerformance", legacyPreparePayload)
     player:sendMessage(string.format(
-        "[Bardcraft] Joining %s - %s.",
+        "[Bardcraft] Preparing to join %s - %s.",
         tostring(session.sourceName or session.sourceGuid),
         tostring(payload.songTitle or "unknown song")))
 
     mp.log(string.format(
-        "[bardcraft] command join guid=%s name=%s session=%s source=%s song=%s currentTime=%.3f requestedPart=%s occupiedParts=%s",
+        "[bardcraft] join prepare sent guid=%s name=%s session=%s source=%s song=%s joinRequestKey=%s requestedPart=%s",
         tostring(player.guid),
         tostring(player.name),
         tostring(session.key),
         tostring(session.sourceName or session.sourceGuid),
         tostring(payload.songTitle),
-        tonumber(payload.time) or 0,
-        tostring(requestedPart),
-        table.concat(payload.occupiedPartIndices or {}, ",")))
+        joinRequestKey,
+        tostring(requestedPart)))
+end
+
+local function computeFutureJoinStart(session, now)
+    now = tonumber(now) or serverUptime()
+    local leadTime = 1.5
+    local currentMusicTime = math.max(0,
+        (tonumber(session.startMusicTime) or 0)
+        + now
+        - (tonumber(session.serverStartTime) or now))
+    return {
+        currentMusicTime = currentMusicTime,
+        startMusicTime = currentMusicTime + leadTime,
+        startServerTime = now + leadTime,
+        delaySeconds = leadTime,
+    }
 end
 
 local function sendBardcraftInstrumentGrant(player)
@@ -645,7 +693,8 @@ end
 local function sendBardcraftLocalPlay(player, selector, requestedPart)
     selector = tostring(selector or "")
     if selector == "" then
-        player:sendMessage("[Bardcraft] Usage: /bcperf play <song id or title> or /bcperf playpart <part> <song id or title>")
+        player:sendMessage(
+            "[Bardcraft] Usage: /bcperf play <song id or title> or /bcperf playpart <part> <song id or title>")
         return
     end
 
@@ -698,7 +747,8 @@ local function handleChat(player, data, env)
     elseif subcommand == "playpart" then
         sendBardcraftLocalPlay(player, joinCommandArgs(args, 3), args[2])
     else
-        player:sendMessage("Usage: /bcperf list | /bcperf join [number|session] [part] | /bcperf join part <part> | /bcperf play <song> | /bcperf playpart <part> <song> | /bcperf instruments | /bcperf stop")
+        player:sendMessage(
+            "Usage: /bcperf list | /bcperf join [number|session] [part] | /bcperf join part <part> | /bcperf play <song> | /bcperf playpart <part> <song> | /bcperf instruments | /bcperf stop")
     end
 
     return false
@@ -1870,7 +1920,8 @@ M.eventHandlers = {
         local guid = senderGuid(data)
         local sessionKey = data and data.sessionKey
         local session = sessionKey and activePerformanceSessions[tostring(sessionKey)] or nil
-        local sourceCharacterId, fallbackFromCharacterId = findPerformanceSongSourceCharacterId(session, data and data.songId)
+        local sourceCharacterId, fallbackFromCharacterId = findPerformanceSongSourceCharacterId(session,
+            data and data.songId)
         local songId = data and data.songId
         if not guid or not sourceCharacterId or not songId then
             mp.log(string.format(
@@ -1947,6 +1998,176 @@ M.eventHandlers = {
         if guid then
             sendActivePerformanceSessions(guid)
         end
+    end,
+
+    BC_BardcraftJoinReady = function(data)
+        local guid = senderGuid(data)
+        local joinRequestKey = data and data.joinRequestKey
+        mp.log(string.format(
+            "[bardcraft] join ready lookup guid=%s key=%s pendingCount=%d",
+            tostring(guid),
+            tostring(joinRequestKey),
+            tableCount(pendingJoinRequests)))
+
+        local request = joinRequestKey and pendingJoinRequests[tostring(joinRequestKey)] or nil
+
+        if not guid then
+            mp.log(string.format(
+                "[bardcraft] join ready skipped guid=%s joinRequestKey=%s reason=missing-guid",
+                tostring(guid),
+                tostring(joinRequestKey)))
+            return
+        end
+
+        if not request then
+            request = {
+                playerGuid = tonumber(guid),
+                sessionKey = data and data.sessionKey,
+                requestedPart = data and data.partIndex,
+                createdAt = serverUptime(),
+                recovered = true,
+            }
+            mp.log(string.format(
+                "[bardcraft] join ready recovered missing request guid=%s joinRequestKey=%s session=%s part=%s",
+                tostring(guid),
+                tostring(joinRequestKey),
+                tostring(request.sessionKey),
+                tostring(request.requestedPart)))
+        end
+
+        local session = activePerformanceSessions[tostring(request.sessionKey)]
+        if not session then
+            pendingJoinRequests[tostring(joinRequestKey)] = nil
+            mp.log(string.format(
+                "[bardcraft] join ready skipped guid=%s joinRequestKey=%s session=%s reason=missing-session",
+                tostring(guid),
+                tostring(joinRequestKey),
+                tostring(request.sessionKey)))
+            return
+        end
+
+        local now = serverUptime()
+        local start = computeFutureJoinStart(session, now)
+
+        local payload = currentSessionPayload(session, now) or {}
+        payload.joinRequestKey = joinRequestKey
+        payload.sessionKey = session.key
+        payload.childSessionKey = tostring(guid) .. ":" .. tostring(data.actorId or "@0x1")
+        payload.requestedPartIndex = data.partIndex or request.requestedPart
+        payload.partIndex = data.partIndex or request.requestedPart
+        payload.partInstrument = data.partInstrument
+        payload.item = data.item
+        payload.startMusicTime = start.startMusicTime
+        payload.startServerTime = start.startServerTime
+        payload.delaySeconds = start.delaySeconds
+        payload.joinStartMusicTime = start.startMusicTime
+        payload.joinStartServerTime = start.startServerTime
+        payload.serverTime = now
+        payload.sessionPlayback = true
+        payload.joinedSessionKey = session.key
+        payload.sourceGuid = session.sourceGuid
+        payload.sourceName = session.sourceName
+
+        mp.log(string.format(
+            "[bardcraft] join ready received guid=%s name=%s session=%s joinRequestKey=%s part=%s song=%s",
+            tostring(guid),
+            tostring(mp.getPlayer(guid) and mp.getPlayer(guid).name),
+            tostring(session.key),
+            tostring(joinRequestKey),
+            tostring(data and data.partIndex),
+            tostring(payload.songTitle or data and data.songId)))
+
+        mp.log(string.format(
+            "[bardcraft] join ready fields guid=%s partIndex=%s instrument=%s partInstrument=%s item=%s",
+            tostring(guid),
+            tostring(data and data.partIndex),
+            tostring(data and data.instrument),
+            tostring(data and data.partInstrument),
+            tostring(data and data.item)))
+
+        mp.log(string.format(
+            "[bardcraft] join future start chosen guid=%s session=%s currentMusicTime=%.3f startMusicTime=%.3f startServerTime=%.3f delaySeconds=%.3f",
+            tostring(guid),
+            tostring(session.key),
+            start.currentMusicTime,
+            start.startMusicTime,
+            start.startServerTime,
+            start.delaySeconds))
+
+        -- Broadcast child session to source/nearby clients so they schedule the remote performer early
+        local childRelayPayload = copyRelayValue(payload, 0)
+        childRelayPayload.eventType = "PerformStart"
+        childRelayPayload.sessionPlayback = true
+        childRelayPayload.sessionKey = payload.childSessionKey
+        childRelayPayload.joinedSessionKey = session.key
+        childRelayPayload.joinStartMusicTime = start.startMusicTime
+        childRelayPayload.joinStartServerTime = start.startServerTime
+        childRelayPayload.delaySeconds = start.delaySeconds
+        childRelayPayload.sourceGuid = tonumber(guid)
+        childRelayPayload.sourceName = mp.getPlayer(guid) and mp.getPlayer(guid).name or nil
+        childRelayPayload.actorId = data.actorId or "@0x1"
+        childRelayPayload.instrument = data.partInstrument or data.instrument
+        childRelayPayload.partIndex = data.partIndex
+        childRelayPayload.partInstrument = data.partInstrument or data.instrument
+        childRelayPayload.item = data.item
+        childRelayPayload.sourceCharacterId = senderCharacterId(data)
+        mp.log(string.format(
+            "[bardcraft] join child relay fields guid=%s child=%s parent=%s partIndex=%s instrument=%s partInstrument=%s item=%s",
+            tostring(guid),
+            tostring(childRelayPayload.sessionKey),
+            tostring(childRelayPayload.joinedSessionKey),
+            tostring(childRelayPayload.partIndex),
+            tostring(childRelayPayload.instrument),
+            tostring(childRelayPayload.partInstrument),
+            tostring(childRelayPayload.item)))
+        performanceSessionSequence = performanceSessionSequence + 1
+        activePerformanceSessions[childRelayPayload.sessionKey] = {
+            key = childRelayPayload.sessionKey,
+            sourceGuid = tonumber(guid),
+            sourceCharacterId = senderCharacterId(data),
+            sourceName = mp.getPlayer(guid) and mp.getPlayer(guid).name or nil,
+            actorId = childRelayPayload.actorId,
+            cell = session.cell,
+            parentSessionKey = session.key,
+            startMusicTime = start.startMusicTime,
+            serverStartTime = start.startServerTime,
+            sessionSequence = performanceSessionSequence,
+            payload = copyRelayValue(childRelayPayload, 0),
+            acked = {},
+        }
+        writeActivePerformanceSessionSnapshot()
+        mp.log(string.format(
+            "[bardcraft] join child session registered key=%s sourceGuid=%s sourceChar=%s parent=%s",
+            tostring(childRelayPayload.sessionKey),
+            tostring(guid),
+            tostring(senderCharacterId(data)),
+            tostring(session.key)))
+        sendPerformanceSessionPayloadToCell(childRelayPayload, session.cell, guid)
+        mp.log(string.format(
+            "[bardcraft] join child relay broadcast guid=%s session=%s cell=%s",
+            tostring(guid),
+            tostring(session.key),
+            tostring(session.cell)))
+
+        mp.send(tonumber(guid), "BC_BardcraftJoinStart", payload)
+
+        local legacyStartPayload = copyRelayValue(payload, 0)
+        legacyStartPayload.isJoinStart = true
+        mp.send(tonumber(guid), "BC_BardcraftJoinPerformance", legacyStartPayload)
+
+        mp.log(string.format(
+            "[bardcraft] join start sent guid=%s session=%s joinRequestKey=%s",
+            tostring(guid),
+            tostring(session.key),
+            tostring(joinRequestKey)))
+
+        mp.log(string.format(
+            "[bardcraft] join start legacy sent guid=%s session=%s joinRequestKey=%s",
+            tostring(guid),
+            tostring(session.key),
+            tostring(joinRequestKey)))
+
+        pendingJoinRequests[tostring(joinRequestKey)] = nil
     end,
 
     BC_BardcraftPerformanceSessionAck = function(data)
