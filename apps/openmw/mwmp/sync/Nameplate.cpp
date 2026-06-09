@@ -27,14 +27,8 @@ namespace mwmp
         // above the head without a large gap at close range.
         constexpr float NAMEPLATE_HEIGHT = 145.f;
 
-        // Character size in pixels (used with setAutoScaleToScreen).
+        // Base character size for fixed-world-size nameplates.
         constexpr float CHAR_SIZE = 16.f;
-
-        // Minimum world-space scale applied to the AutoTransform.
-        // Without a minimum the label shrinks to nothing at distance.
-        // 0.5 keeps it legible up to the far clip plane while still
-        // letting it grow naturally up close.
-        constexpr float MIN_SCALE = 0.5f;
 
         // Load the VFS font used for in-game text if available.
         osg::ref_ptr<osgText::Font> loadFont()
@@ -87,12 +81,19 @@ namespace mwmp
 
         // --- billboard transform ---------------------------------------------
         mLabelNode = new osg::AutoTransform;
+        mLabelNode->setName("MPNameplateAutoTransform:" + name);
+
+        // Keep camera-facing rotation, but avoid AutoTransform screen-size scaling.
+        // TODO(mp-nameplate): Replace this with a safe distance-based/manual scaling
+        // path if fixed world-size nameplates are too hard to read. Do not restore
+        // AutoTransform screen auto-scaling without guarding it: it produced
+        // repeated NaN cull warnings in interior first-person views when a remote
+        // player was offscreen.
         mLabelNode->setAutoRotateMode(osg::AutoTransform::ROTATE_TO_SCREEN);
-        mLabelNode->setAutoScaleToScreen(true);
-        mLabelNode->setMinimumScale(MIN_SCALE);
 
         // Offset upward so the label sits above the NPC's head
         mLabelNode->setPosition(osg::Vec3f(0.f, 0.f, NAMEPLATE_HEIGHT));
+        text->setName("MPNameplateText:" + name);
 
         // --- render state ----------------------------------------------------
         osg::StateSet* ss = mLabelNode->getOrCreateStateSet();
