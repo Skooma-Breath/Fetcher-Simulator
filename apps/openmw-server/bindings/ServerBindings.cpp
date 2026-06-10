@@ -7,6 +7,12 @@
 #include <components/openmw-mp/Base/DynamicRecord.hpp>
 #include <sol/sol.hpp>
 
+#ifdef _WIN32
+#include <windows.h>
+#else
+#include <unistd.h>
+#endif
+
 #include <algorithm>
 #include <cctype>
 #include <cstdint>
@@ -26,8 +32,34 @@ namespace
 {
     constexpr std::uintmax_t MaxBardcraftHostedMidiSize = 512 * 1024;
 
+    std::filesystem::path serverExecutableDir()
+    {
+#ifdef _WIN32
+        std::wstring buffer(MAX_PATH, L'\0');
+        DWORD size = GetModuleFileNameW(nullptr, buffer.data(), static_cast<DWORD>(buffer.size()));
+        while (size == buffer.size())
+        {
+            buffer.resize(buffer.size() * 2);
+            size = GetModuleFileNameW(nullptr, buffer.data(), static_cast<DWORD>(buffer.size()));
+        }
+        if (size == 0)
+            return {};
+        buffer.resize(size);
+        return std::filesystem::path(buffer).parent_path();
+#else
+        std::vector<char> buffer(4096, '\0');
+        const ssize_t size = readlink("/proc/self/exe", buffer.data(), buffer.size());
+        if (size <= 0)
+            return {};
+        return std::filesystem::path(std::string(buffer.data(), static_cast<std::size_t>(size))).parent_path();
+#endif
+    }
+
     std::filesystem::path bardcraftHostedMidiDir()
     {
+        const std::filesystem::path exeDir = serverExecutableDir();
+        if (!exeDir.empty())
+            return exeDir / "bardcraft" / "custom-midi";
         return std::filesystem::current_path() / "bardcraft" / "custom-midi";
     }
 
@@ -280,6 +312,9 @@ sol::table initMpPackage(LuaUtil::LuaView& view, LuaServerContext* context, LuaU
         sol::table list(lua, sol::create);
 
         const std::filesystem::path dir = bardcraftHostedMidiDir();
+        Log(Debug::Info) << "[ServerBindings] Bardcraft hosted MIDI scan"
+                         << " path=" << dir.string()
+                         << " cwd=" << std::filesystem::current_path().string();
         std::error_code ec;
         std::filesystem::create_directories(dir, ec);
         if (ec)
@@ -291,23 +326,41 @@ sol::table initMpPackage(LuaUtil::LuaView& view, LuaServerContext* context, LuaU
         }
 
         std::vector<std::pair<std::string, std::uintmax_t>> entries;
+        std::size_t skippedNotFile = 0;
+        std::size_t skippedUnsafe = 0;
+        std::size_t skippedSize = 0;
         for (std::filesystem::directory_iterator it(dir, ec), end; !ec && it != end; it.increment(ec))
         {
             std::error_code entryEc;
             const std::filesystem::directory_entry& entry = *it;
             if (!entry.is_regular_file(entryEc) || entryEc)
+            {
+                ++skippedNotFile;
                 continue;
+            }
 
             const std::string fileName = entry.path().filename().string();
             if (!isSafeBardcraftMidiName(fileName))
+            {
+                ++skippedUnsafe;
                 continue;
+            }
 
             const std::uintmax_t size = entry.file_size(entryEc);
             if (entryEc || size == 0 || size > MaxBardcraftHostedMidiSize)
+            {
+                ++skippedSize;
                 continue;
+            }
 
             entries.emplace_back(fileName, size);
         }
+        Log(Debug::Info) << "[ServerBindings] Bardcraft hosted MIDI scan result"
+                         << " path=" << dir.string()
+                         << " accepted=" << entries.size()
+                         << " skippedNotFile=" << skippedNotFile
+                         << " skippedUnsafe=" << skippedUnsafe
+                         << " skippedSize=" << skippedSize;
         if (ec)
         {
             Log(Debug::Warning) << "[ServerBindings] Failed to list Bardcraft hosted MIDI directory"
@@ -325,7 +378,7 @@ sol::table initMpPackage(LuaUtil::LuaView& view, LuaServerContext* context, LuaU
             sol::table item(lua, sol::create);
             item["name"] = fileName;
             item["size"] = static_cast<double>(size);
-            list[index++] = LuaUtil::makeReadOnly(item);
+            list[index++] = item;
         }
 
         return sol::make_object(ts, LuaUtil::makeReadOnly(list));
