@@ -26,7 +26,9 @@
 extern "C" __declspec(dllexport) DWORD AmdPowerXpressRequestHighPerformance = 0x00000001;
 #endif
 
+#include <chrono>
 #include <filesystem>
+#include <mutex>
 
 #if (defined(__APPLE__) || defined(__linux) || defined(__unix) || defined(__posix))
 #include <unistd.h>
@@ -238,6 +240,28 @@ namespace
                     level = Debug::Debug;
             }
             std::string_view s(msgCopy);
+            if (s.find("CullVisitor::apply(Geode&) detected NaN") != std::string_view::npos)
+            {
+                static std::mutex mutex;
+                static std::chrono::steady_clock::time_point lastLogTime;
+                static std::size_t suppressedCount = 0;
+
+                const auto now = std::chrono::steady_clock::now();
+                std::lock_guard lock(mutex);
+                if (lastLogTime.time_since_epoch().count() != 0 && now - lastLogTime < std::chrono::seconds(2))
+                {
+                    ++suppressedCount;
+                    return;
+                }
+
+                const std::size_t suppressed = suppressedCount;
+                suppressedCount = 0;
+                lastLogTime = now;
+                Log(level) << (s.back() == '\n' ? s.substr(0, s.size() - 1) : s)
+                           << " [rate-limited; suppressed " << suppressed
+                           << " repeats; OSG NotifyHandler did not provide the offending node name]";
+                return;
+            }
             if (s.size() < 1024)
                 Log(level) << (s.back() == '\n' ? s.substr(0, s.size() - 1) : s);
             else
