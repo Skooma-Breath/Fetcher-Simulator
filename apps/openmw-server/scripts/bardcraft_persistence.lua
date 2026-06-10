@@ -668,7 +668,7 @@ end
 
 local function computeFutureJoinStart(session, now)
     now = tonumber(now) or serverUptime()
-    local leadTime = 1.5
+    local leadTime = 3.0
     local currentMusicTime = math.max(0,
         (tonumber(session.startMusicTime) or 0)
         + now
@@ -946,12 +946,19 @@ end
 
 local function sendHostedMidiCatalog(guid)
     local payload = makeHostedMidiManifest()
+    local names = {}
+    for _, file in ipairs(payload.files or {}) do
+        if type(file) == "table" and file.name then
+            table.insert(names, tostring(file.name))
+        end
+    end
     mp.log(string.format(
-        "[bardcraft] hosted midi manifest guid=%s files=%d bytes=%d skipped=%d",
+        "[bardcraft] hosted midi manifest guid=%s files=%d bytes=%d skipped=%d names=%s",
         tostring(guid),
         tableCount(payload.files),
         tonumber(payload.totalBytes) or 0,
-        tonumber(payload.skipped) or 0))
+        tonumber(payload.skipped) or 0,
+        table.concat(names, " | ")))
     mp.send(guid, "BC_BardcraftServerSongs", payload)
 end
 
@@ -1006,13 +1013,22 @@ local function sendHostedMidiFiles(guid, names)
         end
     end
 
+    local sentNames = {}
+    for _, file in ipairs(payload.files or {}) do
+        if type(file) == "table" and file.name then
+            table.insert(sentNames, tostring(file.name))
+        end
+    end
     mp.log(string.format(
-        "[bardcraft] hosted midi files guid=%s requested=%d files=%d bytes=%d skipped=%d",
+        "[bardcraft] hosted midi files guid=%s requested=%d files=%d bytes=%d skipped=%d requestedNames=%s sentNames=%s skippedNames=%s",
         tostring(guid),
         tableCount(names),
         tableCount(payload.files),
         tonumber(payload.totalBytes) or 0,
-        tonumber(payload.skipped) or 0))
+        tonumber(payload.skipped) or 0,
+        type(names) == "table" and table.concat(names, " | ") or "",
+        table.concat(sentNames, " | "),
+        table.concat(payload.skippedNames or {}, " | ")))
     mp.send(guid, "BC_BardcraftServerSongFiles", payload)
 end
 
