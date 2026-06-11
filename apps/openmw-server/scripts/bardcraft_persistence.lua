@@ -13,6 +13,8 @@ local STORAGE_KEYS = {
 }
 local RUNTIME_NAMESPACE = "BardcraftRuntime"
 local RUNTIME_ACTIVE_SESSIONS_KEY = "activePerformanceSessions"
+local RUNTIME_ACTIVE_BANDS_KEY = "activeBands"
+local RUNTIME_PENDING_BAND_STARTS_KEY = "pendingBandStarts"
 
 local MAX_HOSTED_MIDI_BYTES_PER_RESPONSE = 512 * 1024
 local KNOWN_SONGS_PER_BOOTSTRAP_CHUNK = 40
@@ -24,8 +26,15 @@ local MAX_CUSTOM_SONG_SEGMENT_CHARS = 1024 * 1024
 local bootstrapSequence = 0
 local performanceSessionSequence = 0
 local joinRequestSequence = 0
+local bandStartSequence = 0
 local pendingJoinRequests = {}
 local activePerformanceSessions = {}
+local activeBandsByLeaderGuid = {}
+local bandLeaderByMemberGuid = {}
+local pendingBandInvitesByMemberGuid = {}
+local pendingScheduledBandStartsByLeaderGuid = {}
+local BAND_INVITE_TTL_SECONDS = 300
+local BAND_SCHEDULED_START_LEAD_SECONDS = 3.0
 local highChurnPerformanceEvents = {
     NoteEvent = true,
     NoteEndEvent = true,
@@ -73,6 +82,65 @@ local function tableCount(value)
     return count
 end
 
+local function trim(value)
+    return tostring(value or ""):gsub("^%s+", ""):gsub("%s+$", "")
+end
+
+local function normalizeLookup(value)
+    value = trim(value)
+    if value == "" then
+        return ""
+    end
+    return string.lower(value)
+end
+
+local function playerDisplayName(player)
+    if not player then
+        return "unknown"
+    end
+    return tostring(player.name or ("guid " .. tostring(player.guid)))
+end
+
+local function findOnlinePlayer(selector)
+    selector = trim(selector)
+    if selector == "" then
+        return nil, "missing-selector"
+    end
+
+    local numericGuid = tonumber(selector)
+    if numericGuid then
+        local player = mp.getPlayer(numericGuid)
+        if player then
+            return player
+        end
+    end
+
+    local wanted = normalizeLookup(selector)
+    local exact = nil
+    local partialMatches = {}
+    for _, player in ipairs(mp.getPlayers()) do
+        local name = normalizeLookup(player and player.name)
+        if name == wanted then
+            exact = player
+            break
+        end
+        if wanted ~= "" and string.find(name, wanted, 1, true) then
+            table.insert(partialMatches, player)
+        end
+    end
+
+    if exact then
+        return exact
+    end
+    if #partialMatches == 1 then
+        return partialMatches[1]
+    end
+    if #partialMatches > 1 then
+        return nil, "ambiguous"
+    end
+    return nil, "not-found"
+end
+
 local function copyRelayValue(value, depth)
     local valueType = type(value)
     if valueType == "nil" or valueType == "string" or valueType == "number" or valueType == "boolean" then
@@ -101,6 +169,59 @@ local function clearActivePerformanceSessionSnapshot()
     runtimeSection():set(RUNTIME_ACTIVE_SESSIONS_KEY, {})
 end
 
+local function clearActiveBandSnapshot()
+    runtimeSection():set(RUNTIME_ACTIVE_BANDS_KEY, {})
+end
+
+local function clearPendingScheduledBandStartSnapshot()
+    runtimeSection():set(RUNTIME_PENDING_BAND_STARTS_KEY, {})
+end
+
+local function writePendingScheduledBandStartSnapshot()
+    local snapshot = {}
+    for leaderGuid, pending in pairs(pendingScheduledBandStartsByLeaderGuid) do
+        if type(pending) == "table" then
+            snapshot[tostring(leaderGuid)] = {
+                bandSessionId = pending.bandSessionId,
+                startServerTime = pending.startServerTime,
+                expiresAt = pending.expiresAt,
+                selector = pending.selector,
+                role = pending.role,
+            }
+        end
+    end
+    runtimeSection():set(RUNTIME_PENDING_BAND_STARTS_KEY, snapshot)
+end
+
+local function loadPendingScheduledBandStartSnapshot(reason)
+    local snapshot = runtimeSection():getCopy(RUNTIME_PENDING_BAND_STARTS_KEY) or {}
+    if type(snapshot) ~= "table" then
+        return 0
+    end
+
+    local loaded = 0
+    for leaderGuid, pending in pairs(snapshot) do
+        local numericLeaderGuid = tonumber(leaderGuid)
+        if numericLeaderGuid and type(pending) == "table" then
+            pendingScheduledBandStartsByLeaderGuid[numericLeaderGuid] = {
+                bandSessionId = pending.bandSessionId,
+                startServerTime = tonumber(pending.startServerTime),
+                expiresAt = tonumber(pending.expiresAt),
+                selector = pending.selector,
+                role = pending.role,
+            }
+            loaded = loaded + 1
+        end
+    end
+    if loaded > 0 then
+        mp.log(string.format(
+            "[bardcraft] pending band start snapshot loaded reason=%s starts=%d",
+            tostring(reason),
+            loaded))
+    end
+    return loaded
+end
+
 local function writeActivePerformanceSessionSnapshot()
     local snapshot = {}
     for key, session in pairs(activePerformanceSessions) do
@@ -118,6 +239,107 @@ local function writeActivePerformanceSessionSnapshot()
         }
     end
     runtimeSection():set(RUNTIME_ACTIVE_SESSIONS_KEY, snapshot)
+end
+
+local function writeActiveBandSnapshot()
+    local snapshot = {}
+    for leaderGuid, band in pairs(activeBandsByLeaderGuid) do
+        local storedMembers = {}
+        for memberGuid, member in pairs(band.members or {}) do
+            table.insert(storedMembers, {
+                guid = tonumber(memberGuid),
+                name = member and member.name or nil,
+                invitedAt = member and member.invitedAt or nil,
+                acceptedAt = member and member.acceptedAt or nil,
+            })
+        end
+        table.sort(storedMembers, function(left, right)
+            return tostring(left.guid) < tostring(right.guid)
+        end)
+        table.insert(snapshot, {
+            leaderGuid = tonumber(leaderGuid),
+            leaderName = band.leaderName,
+            createdAt = band.createdAt,
+            members = storedMembers,
+        })
+    end
+    runtimeSection():set(RUNTIME_ACTIVE_BANDS_KEY, snapshot)
+end
+
+local function loadActiveBandSnapshot(reason)
+    local snapshot = runtimeSection():getCopy(RUNTIME_ACTIVE_BANDS_KEY) or {}
+    if type(snapshot) ~= "table" then
+        return 0
+    end
+
+    local loaded = 0
+    for _, storedBand in pairs(snapshot) do
+        if type(storedBand) == "table" then
+            local leaderGuid = tonumber(storedBand.leaderGuid)
+            if leaderGuid then
+                local band = activeBandsByLeaderGuid[leaderGuid]
+                if not band then
+                    band = {
+                        leaderGuid = leaderGuid,
+                        leaderName = storedBand.leaderName,
+                        members = {},
+                        createdAt = tonumber(storedBand.createdAt) or serverUptime(),
+                    }
+                    activeBandsByLeaderGuid[leaderGuid] = band
+                    loaded = loaded + 1
+                else
+                    band.leaderName = storedBand.leaderName or band.leaderName
+                end
+
+                for memberKey, storedMember in pairs(storedBand.members or {}) do
+                    if type(storedMember) == "table" then
+                        local memberGuid = tonumber(storedMember.guid or memberKey)
+                        if memberGuid then
+                            band.members[memberGuid] = {
+                                guid = memberGuid,
+                                name = storedMember.name,
+                                invitedAt = storedMember.invitedAt,
+                                acceptedAt = storedMember.acceptedAt,
+                            }
+                            bandLeaderByMemberGuid[memberGuid] = leaderGuid
+                        end
+                    end
+                end
+            end
+        end
+    end
+
+    if loaded > 0 then
+        mp.log(string.format(
+            "[bardcraft] active band snapshot loaded reason=%s leaders=%d memberLinks=%d",
+            tostring(reason),
+            tableCount(activeBandsByLeaderGuid),
+            tableCount(bandLeaderByMemberGuid)))
+    end
+    return loaded
+end
+
+local function activeBandForLeader(leaderGuid, reason)
+    leaderGuid = tonumber(leaderGuid)
+    if not leaderGuid then
+        return nil
+    end
+
+    local band = activeBandsByLeaderGuid[leaderGuid]
+    if band then
+        return band
+    end
+
+    loadActiveBandSnapshot(reason)
+    band = activeBandsByLeaderGuid[leaderGuid]
+    if band then
+        mp.log(string.format(
+            "[bardcraft] active band recovered leader=%s reason=%s members=%d",
+            tostring(leaderGuid),
+            tostring(reason),
+            tableCount(band.members)))
+    end
+    return band
 end
 
 local function activePerformanceSessionSource()
@@ -162,6 +384,10 @@ local function flattenBardcraftPerformancePayload(guid, source, data, event)
         serverStartTime = relayField(event, "serverStartTime"),
         sessionSequence = relayField(event, "sessionSequence"),
         joinedSessionKey = relayField(event, "joinedSessionKey"),
+        bandSessionId = relayField(event, "bandSessionId"),
+        scheduledBandStart = relayField(event, "scheduledBandStart") == true,
+        joinStartMusicTime = relayField(event, "joinStartMusicTime"),
+        joinStartServerTime = relayField(event, "joinStartServerTime"),
         perfType = relayField(event, "perfType"),
         songTitle = song.title,
         songId = song.id,
@@ -207,6 +433,7 @@ local function updateActivePerformanceSession(guid, source, actorId, payload, re
         actorId = actorId,
         cell = playerCellKey(source),
         parentSessionKey = payload.joinedSessionKey and tostring(payload.joinedSessionKey) or nil,
+        bandSessionId = payload.bandSessionId and tostring(payload.bandSessionId) or nil,
         startMusicTime = tonumber(payload.time) or 0,
         serverStartTime = now,
         sessionSequence = performanceSessionSequence,
@@ -237,6 +464,49 @@ local function currentSessionPayload(session, now)
     payload.joinedSessionKey = session.parentSessionKey
     payload.eventType = "PerformStart"
     return payload
+end
+
+local function applyPendingScheduledBandStart(guid, session, payload)
+    local leaderGuid = tonumber(guid)
+    local pending = leaderGuid and pendingScheduledBandStartsByLeaderGuid[leaderGuid] or nil
+    if not pending and leaderGuid then
+        loadPendingScheduledBandStartSnapshot("relay-match")
+        pending = pendingScheduledBandStartsByLeaderGuid[leaderGuid]
+    end
+    if type(pending) ~= "table" or type(session) ~= "table" or type(payload) ~= "table" then
+        return false
+    end
+
+    local now = serverUptime()
+    if now > (tonumber(pending.expiresAt) or 0) then
+        pendingScheduledBandStartsByLeaderGuid[leaderGuid] = nil
+        writePendingScheduledBandStartSnapshot()
+        return false
+    end
+
+    payload.bandSessionId = pending.bandSessionId
+    payload.scheduledBandStart = true
+    payload.joinStartMusicTime = 0
+    payload.joinStartServerTime = pending.startServerTime
+    session.bandSessionId = pending.bandSessionId
+    session.startMusicTime = 0
+    session.serverStartTime = pending.startServerTime
+    session.payload.bandSessionId = pending.bandSessionId
+    session.payload.scheduledBandStart = true
+    session.payload.joinStartMusicTime = 0
+    session.payload.joinStartServerTime = pending.startServerTime
+    session.payload.serverStartTime = pending.startServerTime
+    pendingScheduledBandStartsByLeaderGuid[leaderGuid] = nil
+    writePendingScheduledBandStartSnapshot()
+    writeActivePerformanceSessionSnapshot()
+    mp.log(string.format(
+        "[bardcraft] band scheduled start matched leader=%s session=%s bandSession=%s startServerTime=%.3f now=%.3f",
+        tostring(leaderGuid),
+        tostring(session.key),
+        tostring(pending.bandSessionId),
+        tonumber(pending.startServerTime) or 0,
+        now))
+    return true
 end
 
 local function sessionSongIdentity(payload)
@@ -307,13 +577,13 @@ local function activeSessionsForPlayer(player)
     return sessions
 end
 
-local function sendActivePerformanceSessions(guid)
+local function sendActivePerformanceSessions(guid, targetCellOverride)
     local target = guid and mp.getPlayer(guid) or nil
     if not target then
         return
     end
 
-    local targetCell = playerCellKey(target)
+    local targetCell = targetCellOverride and tostring(targetCellOverride) or playerCellKey(target)
     local now = serverUptime()
     local sessions = {}
     for _, session in pairs(activePerformanceSessions) do
@@ -433,6 +703,101 @@ local function stopChildPerformanceSessions(parentSessionKey, reason)
             sourceNotified))
     end
 
+    return removed
+end
+
+local function stopBandChildSessionsForMember(leaderGuid, memberGuid, reason)
+    leaderGuid = tonumber(leaderGuid)
+    memberGuid = tonumber(memberGuid)
+    if not leaderGuid or not memberGuid then
+        return 0
+    end
+
+    local childKeys = {}
+    for key, session in pairs(activePerformanceSessions) do
+        local parent = session.parentSessionKey and activePerformanceSessions[tostring(session.parentSessionKey)] or nil
+        if parent
+            and tonumber(parent.sourceGuid) == leaderGuid
+            and tonumber(session.sourceGuid) == memberGuid
+        then
+            table.insert(childKeys, key)
+        end
+    end
+
+    local removed = 0
+    local sent = 0
+    local sourceNotified = 0
+    for _, childKey in ipairs(childKeys) do
+        local childRemoved, childSent, childSourceNotified = stopPerformanceSessionByKey(childKey, reason, true)
+        removed = removed + childRemoved
+        sent = sent + childSent
+        sourceNotified = sourceNotified + childSourceNotified
+    end
+
+    if removed > 0 then
+        writeActivePerformanceSessionSnapshot()
+        mp.log(string.format(
+            "[bardcraft] band child sessions stopped leader=%s member=%s reason=%s sessions=%d sent=%d sourceNotified=%d",
+            tostring(leaderGuid),
+            tostring(memberGuid),
+            tostring(reason),
+            removed,
+            sent,
+            sourceNotified))
+    end
+
+    return removed
+end
+
+local function removeBandMembership(memberGuid, reason)
+    memberGuid = tonumber(memberGuid)
+    local leaderGuid = memberGuid and bandLeaderByMemberGuid[memberGuid] or nil
+    if not leaderGuid then
+        return nil
+    end
+
+    local band = activeBandForLeader(leaderGuid, "remove-membership")
+    if band and band.members then
+        band.members[memberGuid] = nil
+    end
+    bandLeaderByMemberGuid[memberGuid] = nil
+    stopBandChildSessionsForMember(leaderGuid, memberGuid, reason)
+    writeActiveBandSnapshot()
+    return leaderGuid
+end
+
+local function disbandBand(leaderGuid, reason, notifyPlayers)
+    leaderGuid = tonumber(leaderGuid)
+    local band = leaderGuid and activeBandForLeader(leaderGuid, "disband") or nil
+    if not band then
+        return 0
+    end
+
+    local removed = 0
+    local memberGuids = {}
+    for memberGuid, _ in pairs(band.members or {}) do
+        table.insert(memberGuids, tonumber(memberGuid))
+    end
+
+    for _, memberGuid in ipairs(memberGuids) do
+        bandLeaderByMemberGuid[memberGuid] = nil
+        stopBandChildSessionsForMember(leaderGuid, memberGuid, reason)
+        removed = removed + 1
+        if notifyPlayers then
+            local member = mp.getPlayer(memberGuid)
+            if member then
+                member:sendMessage("[Bardcraft] Your band has been disbanded.")
+            end
+        end
+    end
+
+    activeBandsByLeaderGuid[leaderGuid] = nil
+    writeActiveBandSnapshot()
+    mp.log(string.format(
+        "[bardcraft] band disbanded leader=%s reason=%s members=%d",
+        tostring(leaderGuid),
+        tostring(reason),
+        removed))
     return removed
 end
 
@@ -590,21 +955,25 @@ local function sendBardcraftSessionList(player)
         #sessions))
 end
 
-local function sendBardcraftJoin(player, selector, requestedPart)
+local function sendBardcraftJoin(player, selector, requestedPart, options)
+    options = options or {}
     local session, sessions = findActiveSessionForCommand(player, selector)
     if not session then
-        if #sessions > 1 and (selector == nil or selector == "") then
-            player:sendMessage(
-                "[Bardcraft] Multiple performances are active. Use /bcperf list, then /bcperf join <number> [part].")
-        else
-            player:sendMessage("[Bardcraft] No matching active performance in this cell.")
+        if not options.silent then
+            if #sessions > 1 and (selector == nil or selector == "") then
+                player:sendMessage(
+                    "[Bardcraft] Multiple performances are active. Use /bcperf list, then /bcperf join <number> [part].")
+            else
+                player:sendMessage("[Bardcraft] No matching active performance in this cell.")
+            end
         end
         mp.log(string.format(
-            "[bardcraft] command join skipped guid=%s name=%s selector=%s sessions=%d",
+            "[bardcraft] command join skipped guid=%s name=%s selector=%s sessions=%d reason=%s",
             tostring(player and player.guid),
             tostring(player and player.name),
             tostring(selector),
-            #sessions))
+            #sessions,
+            tostring(options.reason)))
         return
     end
 
@@ -614,6 +983,7 @@ local function sendBardcraftJoin(player, selector, requestedPart)
         player:sendMessage("[Bardcraft] That performance is no longer joinable.")
         return
     end
+    local occupiedPartIndices = collectOccupiedPartIndices(session, now)
 
     joinRequestSequence = joinRequestSequence + 1
     local joinRequestKey = tostring(now) .. ":" .. tostring(joinRequestSequence) .. ":" .. tostring(player.guid)
@@ -621,6 +991,7 @@ local function sendBardcraftJoin(player, selector, requestedPart)
         playerGuid = tonumber(player.guid),
         sessionKey = session.key,
         requestedPart = requestedPart,
+        occupiedPartIndices = occupiedPartIndices,
         createdAt = now,
     }
     mp.log(string.format(
@@ -642,6 +1013,8 @@ local function sendBardcraftJoin(player, selector, requestedPart)
         sourceName = tostring(session.sourceName or session.sourceGuid),
         sourceGuid = tonumber(session.sourceGuid),
         serverTime = now,
+        reason = options.reason,
+        occupiedPartIndices = occupiedPartIndices,
     }
     mp.send(tonumber(player.guid), "BC_BardcraftJoinPrepare", preparePayload)
     mp.send(tonumber(player.guid), "BC_BardcraftJoinPreparePing", {
@@ -650,20 +1023,24 @@ local function sendBardcraftJoin(player, selector, requestedPart)
     local legacyPreparePayload = copyRelayValue(preparePayload, 0)
     legacyPreparePayload.isPrepare = true
     mp.send(tonumber(player.guid), "BC_BardcraftJoinPerformance", legacyPreparePayload)
-    player:sendMessage(string.format(
-        "[Bardcraft] Preparing to join %s - %s.",
-        tostring(session.sourceName or session.sourceGuid),
-        tostring(payload.songTitle or "unknown song")))
+    if not options.silent then
+        player:sendMessage(string.format(
+            "[Bardcraft] Preparing to join %s - %s.",
+            tostring(session.sourceName or session.sourceGuid),
+            tostring(payload.songTitle or "unknown song")))
+    end
 
     mp.log(string.format(
-        "[bardcraft] join prepare sent guid=%s name=%s session=%s source=%s song=%s joinRequestKey=%s requestedPart=%s",
+        "[bardcraft] join prepare sent guid=%s name=%s session=%s source=%s song=%s joinRequestKey=%s requestedPart=%s occupied=%d reason=%s",
         tostring(player.guid),
         tostring(player.name),
         tostring(session.key),
         tostring(session.sourceName or session.sourceGuid),
         tostring(payload.songTitle),
         joinRequestKey,
-        tostring(requestedPart)))
+        tostring(requestedPart),
+        #occupiedPartIndices,
+        tostring(options.reason)))
 end
 
 local function computeFutureJoinStart(session, now)
@@ -681,6 +1058,472 @@ local function computeFutureJoinStart(session, now)
     }
 end
 
+local function getOrCreateBand(leader)
+    local leaderGuid = tonumber(leader and leader.guid)
+    if not leaderGuid then
+        return nil
+    end
+
+    local band = activeBandsByLeaderGuid[leaderGuid]
+    if not band then
+        band = {
+            leaderGuid = leaderGuid,
+            leaderName = playerDisplayName(leader),
+            members = {},
+            createdAt = serverUptime(),
+        }
+        activeBandsByLeaderGuid[leaderGuid] = band
+    else
+        band.leaderName = playerDisplayName(leader)
+    end
+    return band
+end
+
+local function bandMemberList(band)
+    local names = {}
+    for memberGuid, member in pairs(band and band.members or {}) do
+        table.insert(names, string.format("%s(%s)", tostring(member.name or "unknown"), tostring(memberGuid)))
+    end
+    table.sort(names)
+    return names
+end
+
+local function purgeExpiredBandInvites(memberGuid)
+    memberGuid = tonumber(memberGuid)
+    local invites = memberGuid and pendingBandInvitesByMemberGuid[memberGuid] or nil
+    if not invites then
+        return
+    end
+
+    local now = serverUptime()
+    for leaderGuid, invite in pairs(invites) do
+        if not invite or (now - (tonumber(invite.invitedAt) or 0)) > BAND_INVITE_TTL_SECONDS then
+            invites[leaderGuid] = nil
+        end
+    end
+    if next(invites) == nil then
+        pendingBandInvitesByMemberGuid[memberGuid] = nil
+    end
+end
+
+local function clearPendingBandInvitesFromLeader(leaderGuid)
+    leaderGuid = tonumber(leaderGuid)
+    if not leaderGuid then
+        return 0
+    end
+
+    local removed = 0
+    for memberGuid, invites in pairs(pendingBandInvitesByMemberGuid) do
+        if invites and invites[leaderGuid] then
+            invites[leaderGuid] = nil
+            removed = removed + 1
+            if next(invites) == nil then
+                pendingBandInvitesByMemberGuid[memberGuid] = nil
+            end
+        end
+    end
+    if removed > 0 then
+        mp.log(string.format(
+            "[bardcraft] pending band invites cleared leader=%s removed=%d",
+            tostring(leaderGuid),
+            removed))
+    end
+    return removed
+end
+
+local function collectBandInviteList(memberGuid)
+    memberGuid = tonumber(memberGuid)
+    purgeExpiredBandInvites(memberGuid)
+
+    local invites = memberGuid and pendingBandInvitesByMemberGuid[memberGuid] or nil
+    local names = {}
+    for leaderGuid, invite in pairs(invites or {}) do
+        table.insert(names, string.format("%s(%s)", tostring(invite.leaderName or leaderGuid), tostring(leaderGuid)))
+    end
+    table.sort(names)
+    return names
+end
+
+local function collectOutgoingBandInviteList(leaderGuid)
+    leaderGuid = tonumber(leaderGuid)
+    local names = {}
+    if not leaderGuid then
+        return names
+    end
+
+    local memberGuids = {}
+    for memberGuid, _ in pairs(pendingBandInvitesByMemberGuid) do
+        table.insert(memberGuids, memberGuid)
+    end
+
+    for _, memberGuid in ipairs(memberGuids) do
+        purgeExpiredBandInvites(memberGuid)
+        local invites = pendingBandInvitesByMemberGuid[memberGuid]
+        local invite = invites and invites[leaderGuid]
+        if invite then
+            table.insert(names, string.format("%s(%s)", tostring(invite.memberName or memberGuid), tostring(memberGuid)))
+        end
+    end
+    table.sort(names)
+    return names
+end
+
+local function findPendingBandInvite(member, selector)
+    local memberGuid = tonumber(member and member.guid)
+    if not memberGuid then
+        return nil, "missing-member"
+    end
+
+    purgeExpiredBandInvites(memberGuid)
+    local invites = pendingBandInvitesByMemberGuid[memberGuid]
+    if not invites then
+        return nil, "no-invites"
+    end
+
+    selector = trim(selector)
+    if selector == "" then
+        local onlyLeaderGuid = nil
+        local count = 0
+        for leaderGuid, _ in pairs(invites) do
+            onlyLeaderGuid = leaderGuid
+            count = count + 1
+        end
+        if count == 1 then
+            return tonumber(onlyLeaderGuid), invites[onlyLeaderGuid]
+        end
+        return nil, count > 1 and "ambiguous" or "no-invites"
+    end
+
+    local numericGuid = tonumber(selector)
+    if numericGuid and invites[numericGuid] then
+        return numericGuid, invites[numericGuid]
+    end
+
+    local wanted = normalizeLookup(selector)
+    local exactLeaderGuid = nil
+    local partialMatches = {}
+    for leaderGuid, invite in pairs(invites) do
+        local name = normalizeLookup(invite and invite.leaderName)
+        if name == wanted then
+            exactLeaderGuid = leaderGuid
+            break
+        end
+        if wanted ~= "" and string.find(name, wanted, 1, true) then
+            table.insert(partialMatches, leaderGuid)
+        end
+    end
+
+    if exactLeaderGuid then
+        return tonumber(exactLeaderGuid), invites[exactLeaderGuid]
+    end
+    if #partialMatches == 1 then
+        local leaderGuid = partialMatches[1]
+        return tonumber(leaderGuid), invites[leaderGuid]
+    end
+    if #partialMatches > 1 then
+        return nil, "ambiguous"
+    end
+    return nil, "not-found"
+end
+
+local function sendBandStatus(player)
+    local guid = tonumber(player and player.guid)
+    if not guid then
+        return
+    end
+
+    local ownBand = activeBandForLeader(guid, "status")
+    if ownBand then
+        local members = bandMemberList(ownBand)
+        if #members == 0 then
+            player:sendMessage("[Bardcraft] You are leading an empty band.")
+        else
+            player:sendMessage("[Bardcraft] Band members: " .. table.concat(members, ", "))
+        end
+        return
+    end
+
+    local leaderGuid = bandLeaderByMemberGuid[guid]
+    if leaderGuid then
+        local band = activeBandForLeader(leaderGuid, "status-member")
+        player:sendMessage("[Bardcraft] You are in " .. tostring(band and band.leaderName or leaderGuid) .. "'s band.")
+        return
+    end
+
+    local invites = collectBandInviteList(guid)
+    if #invites > 0 then
+        player:sendMessage("[Bardcraft] Pending invites: " .. table.concat(invites, ", "))
+        player:sendMessage("[Bardcraft] Use /bc accept <leader> or /bc decline <leader>.")
+        return
+    end
+
+    local outgoingInvites = collectOutgoingBandInviteList(guid)
+    if #outgoingInvites > 0 then
+        player:sendMessage("[Bardcraft] Pending outgoing invites: " .. table.concat(outgoingInvites, ", "))
+        player:sendMessage("[Bardcraft] Use /bc disband to cancel pending invites.")
+        return
+    end
+
+    player:sendMessage("[Bardcraft] You are not in a band. Use /bc invite <player> to create one.")
+end
+
+local function inviteBandMember(leader, selector)
+    local leaderGuid = tonumber(leader and leader.guid)
+    local target, reason = findOnlinePlayer(selector)
+    if not leaderGuid or not target then
+        leader:sendMessage("[Bardcraft] Could not find player: " .. tostring(selector))
+        mp.log(string.format(
+            "[bardcraft] band invite skipped leader=%s selector=%s reason=%s",
+            tostring(leaderGuid),
+            tostring(selector),
+            tostring(reason)))
+        return
+    end
+
+    local currentLeader = bandLeaderByMemberGuid[leaderGuid]
+    if currentLeader then
+        leader:sendMessage("[Bardcraft] Leave your current band before starting one.")
+        mp.log(string.format(
+            "[bardcraft] band invite skipped leader=%s selector=%s reason=leader-is-member currentLeader=%s",
+            tostring(leaderGuid),
+            tostring(selector),
+            tostring(currentLeader)))
+        return
+    end
+
+    local targetGuid = tonumber(target.guid)
+    if targetGuid == leaderGuid then
+        leader:sendMessage("[Bardcraft] You cannot invite yourself.")
+        return
+    end
+    if activeBandForLeader(targetGuid, "invite-target-leading") then
+        leader:sendMessage("[Bardcraft] " .. playerDisplayName(target) .. " is already leading a band.")
+        return
+    end
+    local existingLeader = bandLeaderByMemberGuid[targetGuid]
+    if existingLeader == leaderGuid then
+        leader:sendMessage("[Bardcraft] " .. playerDisplayName(target) .. " is already in your band.")
+        return
+    end
+    if existingLeader and existingLeader ~= leaderGuid then
+        leader:sendMessage("[Bardcraft] " .. playerDisplayName(target) .. " is already in another band.")
+        return
+    end
+
+    pendingBandInvitesByMemberGuid[targetGuid] = pendingBandInvitesByMemberGuid[targetGuid] or {}
+    pendingBandInvitesByMemberGuid[targetGuid][leaderGuid] = {
+        leaderGuid = leaderGuid,
+        leaderName = playerDisplayName(leader),
+        memberGuid = targetGuid,
+        memberName = playerDisplayName(target),
+        invitedAt = serverUptime(),
+    }
+
+    leader:sendMessage("[Bardcraft] Invited " .. playerDisplayName(target) .. " to your band.")
+    target:sendMessage("[Bardcraft] " .. playerDisplayName(leader) .. " invited you to their band. Use /bc accept "
+        .. playerDisplayName(leader) .. " to join.")
+    mp.log(string.format(
+        "[bardcraft] band invite pending leader=%s leaderName=%s member=%s memberName=%s pending=%d",
+        tostring(leaderGuid),
+        playerDisplayName(leader),
+        tostring(targetGuid),
+        playerDisplayName(target),
+        tableCount(pendingBandInvitesByMemberGuid[targetGuid])))
+end
+
+local function acceptBandInvite(member, selector)
+    local memberGuid = tonumber(member and member.guid)
+    if not memberGuid then
+        return
+    end
+    if activeBandForLeader(memberGuid, "accept-member-leading") then
+        member:sendMessage("[Bardcraft] Disband your current band before joining another.")
+        return
+    end
+    if bandLeaderByMemberGuid[memberGuid] then
+        member:sendMessage("[Bardcraft] You are already in a band.")
+        return
+    end
+
+    local leaderGuid, inviteOrReason = findPendingBandInvite(member, selector)
+    if not leaderGuid then
+        if inviteOrReason == "ambiguous" then
+            member:sendMessage("[Bardcraft] Multiple band invites are pending. Use /bc status, then /bc accept <leader>.")
+        else
+            member:sendMessage("[Bardcraft] No matching band invite.")
+        end
+        mp.log(string.format(
+            "[bardcraft] band accept skipped member=%s selector=%s reason=%s",
+            tostring(memberGuid),
+            tostring(selector),
+            tostring(inviteOrReason)))
+        return
+    end
+
+    local leader = mp.getPlayer(leaderGuid)
+    if not leader then
+        pendingBandInvitesByMemberGuid[memberGuid][leaderGuid] = nil
+        member:sendMessage("[Bardcraft] That band leader is no longer online.")
+        return
+    end
+    if bandLeaderByMemberGuid[leaderGuid] then
+        pendingBandInvitesByMemberGuid[memberGuid][leaderGuid] = nil
+        member:sendMessage("[Bardcraft] That player is no longer leading a band.")
+        return
+    end
+
+    local band = getOrCreateBand(leader)
+    band.members[memberGuid] = {
+        guid = memberGuid,
+        name = playerDisplayName(member),
+        invitedAt = inviteOrReason and inviteOrReason.invitedAt or nil,
+        acceptedAt = serverUptime(),
+    }
+    bandLeaderByMemberGuid[memberGuid] = leaderGuid
+    pendingBandInvitesByMemberGuid[memberGuid] = nil
+    writeActiveBandSnapshot()
+
+    member:sendMessage("[Bardcraft] You joined " .. playerDisplayName(leader) .. "'s band.")
+    leader:sendMessage("[Bardcraft] " .. playerDisplayName(member) .. " joined your band.")
+    mp.log(string.format(
+        "[bardcraft] band invite accepted leader=%s leaderName=%s member=%s memberName=%s members=%d leaders=%d memberLinks=%d",
+        tostring(leaderGuid),
+        playerDisplayName(leader),
+        tostring(memberGuid),
+        playerDisplayName(member),
+        tableCount(band.members),
+        tableCount(activeBandsByLeaderGuid),
+        tableCount(bandLeaderByMemberGuid)))
+end
+
+local function declineBandInvite(member, selector)
+    local memberGuid = tonumber(member and member.guid)
+    local leaderGuid, inviteOrReason = findPendingBandInvite(member, selector)
+    if not memberGuid or not leaderGuid then
+        member:sendMessage("[Bardcraft] No matching band invite.")
+        mp.log(string.format(
+            "[bardcraft] band decline skipped member=%s selector=%s reason=%s",
+            tostring(memberGuid),
+            tostring(selector),
+            tostring(inviteOrReason)))
+        return
+    end
+
+    local invite = pendingBandInvitesByMemberGuid[memberGuid] and pendingBandInvitesByMemberGuid[memberGuid][leaderGuid]
+    pendingBandInvitesByMemberGuid[memberGuid][leaderGuid] = nil
+    if next(pendingBandInvitesByMemberGuid[memberGuid]) == nil then
+        pendingBandInvitesByMemberGuid[memberGuid] = nil
+    end
+
+    member:sendMessage("[Bardcraft] Band invite declined.")
+    local leader = mp.getPlayer(leaderGuid)
+    if leader then
+        leader:sendMessage("[Bardcraft] " .. playerDisplayName(member) .. " declined your band invite.")
+    end
+    mp.log(string.format(
+        "[bardcraft] band invite declined leader=%s leaderName=%s member=%s memberName=%s",
+        tostring(leaderGuid),
+        tostring(invite and invite.leaderName),
+        tostring(memberGuid),
+        playerDisplayName(member)))
+end
+
+local function kickBandMember(leader, selector)
+    local leaderGuid = tonumber(leader and leader.guid)
+    local band = leaderGuid and activeBandForLeader(leaderGuid, "kick") or nil
+    if not band then
+        leader:sendMessage("[Bardcraft] You are not leading a band.")
+        return
+    end
+
+    local target, reason = findOnlinePlayer(selector)
+    local targetGuid = target and tonumber(target.guid) or tonumber(selector)
+    if not targetGuid or not band.members[targetGuid] then
+        leader:sendMessage("[Bardcraft] That player is not in your band.")
+        mp.log(string.format(
+            "[bardcraft] band kick skipped leader=%s selector=%s reason=%s",
+            tostring(leaderGuid),
+            tostring(selector),
+            tostring(reason)))
+        return
+    end
+
+    local memberName = band.members[targetGuid].name or (target and playerDisplayName(target)) or tostring(targetGuid)
+    band.members[targetGuid] = nil
+    bandLeaderByMemberGuid[targetGuid] = nil
+    stopBandChildSessionsForMember(leaderGuid, targetGuid, "band-kick")
+    writeActiveBandSnapshot()
+
+    leader:sendMessage("[Bardcraft] Removed " .. tostring(memberName) .. " from your band.")
+    if target then
+        target:sendMessage("[Bardcraft] You were removed from " .. playerDisplayName(leader) .. "'s band.")
+    end
+    mp.log(string.format(
+        "[bardcraft] band kick leader=%s member=%s remaining=%d",
+        tostring(leaderGuid),
+        tostring(targetGuid),
+        tableCount(band.members)))
+end
+
+local function autoJoinBandMembersForSession(session)
+    if type(session) ~= "table" or session.parentSessionKey then
+        return 0
+    end
+
+    local leaderGuid = tonumber(session.sourceGuid)
+    if type(session.payload) == "table"
+        and (session.payload.scheduledBandStart == true or session.payload.bandSessionId ~= nil) then
+        mp.log(string.format(
+            "[bardcraft] band auto-join skipped leader=%s session=%s reason=scheduled-band-start bandSession=%s",
+            tostring(leaderGuid),
+            tostring(session.key),
+            tostring(session.payload.bandSessionId)))
+        return 0
+    end
+
+    local band = leaderGuid and activeBandForLeader(leaderGuid, "auto-join") or nil
+    if not band or tableCount(band.members) == 0 then
+        mp.log(string.format(
+            "[bardcraft] band auto-join skipped leader=%s session=%s reason=no-band members=%d leaders=%d memberLinks=%d",
+            tostring(leaderGuid),
+            tostring(session.key),
+            band and tableCount(band.members) or 0,
+            tableCount(activeBandsByLeaderGuid),
+            tableCount(bandLeaderByMemberGuid)))
+        return 0
+    end
+
+    local sent = 0
+    for memberGuid, _ in pairs(band.members) do
+        local member = mp.getPlayer(tonumber(memberGuid))
+        if member and playerCellKey(member) == session.cell then
+            member:sendMessage("[Bardcraft] Band leader started a performance; joining.")
+            sendBardcraftJoin(member, session.key, nil, {
+                silent = true,
+                reason = "band-start",
+            })
+            sent = sent + 1
+        else
+            mp.log(string.format(
+                "[bardcraft] band auto-join skipped leader=%s member=%s session=%s reason=%s memberCell=%s sessionCell=%s",
+                tostring(leaderGuid),
+                tostring(memberGuid),
+                tostring(session.key),
+                member and "different-cell" or "offline",
+                tostring(member and playerCellKey(member)),
+                tostring(session.cell)))
+        end
+    end
+
+    mp.log(string.format(
+        "[bardcraft] band auto-join leader=%s session=%s members=%d sent=%d",
+        tostring(leaderGuid),
+        tostring(session.key),
+        tableCount(band.members),
+        sent))
+    return sent
+end
+
 local function sendBardcraftInstrumentGrant(player)
     mp.send(tonumber(player.guid), "BC_BardcraftGiveAllInstruments", {})
     player:sendMessage("[Bardcraft] Adding Bardcraft instruments to your inventory.")
@@ -690,11 +1533,175 @@ local function sendBardcraftInstrumentGrant(player)
         tostring(player.name)))
 end
 
+local function normalizedPartIndex(value)
+    local number = tonumber(value)
+    if number and number > 0 then
+        return math.floor(number)
+    end
+    return nil
+end
+
+local function occupiedPartList(occupied)
+    local parts = {}
+    for part, enabled in pairs(occupied or {}) do
+        if enabled then
+            table.insert(parts, part)
+        end
+    end
+    table.sort(parts, function(left, right)
+        return tonumber(left) < tonumber(right)
+    end)
+    return parts
+end
+
+local function firstAvailableSuggestedPart(occupied, preferred)
+    local candidate = normalizedPartIndex(preferred) or 1
+    while occupied[candidate] do
+        candidate = candidate + 1
+    end
+    return candidate
+end
+
+local function sameCellBandMembers(leader, band)
+    local members = {}
+    local leaderCell = playerCellKey(leader)
+    for memberGuid, _ in pairs(band and band.members or {}) do
+        local member = mp.getPlayer(tonumber(memberGuid))
+        if member and playerCellKey(member) == leaderCell then
+            table.insert(members, {
+                guid = tonumber(memberGuid),
+                player = member,
+                name = playerDisplayName(member),
+            })
+        else
+            mp.log(string.format(
+                "[bardcraft] band scheduled start member skipped leader=%s member=%s reason=%s memberCell=%s leaderCell=%s",
+                tostring(leader and leader.guid),
+                tostring(memberGuid),
+                member and "different-cell" or "offline",
+                tostring(member and playerCellKey(member)),
+                tostring(leaderCell)))
+        end
+    end
+    table.sort(members, function(left, right)
+        return tonumber(left.guid) < tonumber(right.guid)
+    end)
+    return members
+end
+
+local function sendScheduledBandLocalPlay(target, selector, requestedPart, occupied, startServerTime, now, leader, bandSessionId, role)
+    local delaySeconds = math.max(0, (tonumber(startServerTime) or now) - now)
+    mp.send(tonumber(target.guid), "BC_BardcraftStartLocalPerformance", {
+        selector = selector,
+        requestedPartIndex = requestedPart,
+        occupiedPartIndices = occupiedPartList(occupied),
+        serverTime = now,
+        startServerTime = startServerTime,
+        delaySeconds = delaySeconds,
+        bandSessionId = bandSessionId,
+        bandLeaderGuid = tonumber(leader and leader.guid),
+        bandLeaderName = playerDisplayName(leader),
+        bandScheduledStart = true,
+        reason = "band-scheduled-start",
+        bandRole = role,
+    })
+end
+
+local function trySendScheduledBandLocalPlay(player, selector, requestedPart)
+    local leaderGuid = tonumber(player and player.guid)
+    local band = leaderGuid and activeBandForLeader(leaderGuid, "command-play") or nil
+    if not band or tableCount(band.members) == 0 then
+        return false
+    end
+
+    local members = sameCellBandMembers(player, band)
+    if #members == 0 then
+        return false
+    end
+
+    local now = serverUptime()
+    local startServerTime = now + BAND_SCHEDULED_START_LEAD_SECONDS
+    bandStartSequence = bandStartSequence + 1
+    local bandSessionId = string.format(
+        "%s:band:%d:%d",
+        tostring(leaderGuid),
+        math.floor(startServerTime * 1000),
+        bandStartSequence)
+    pendingScheduledBandStartsByLeaderGuid[leaderGuid] = {
+        bandSessionId = bandSessionId,
+        startServerTime = startServerTime,
+        expiresAt = startServerTime + 8.0,
+        selector = selector,
+        role = "leader",
+    }
+    local occupied = {}
+    local leaderPart = normalizedPartIndex(requestedPart) or 1
+
+    sendScheduledBandLocalPlay(
+        player,
+        selector,
+        requestedPart or leaderPart,
+        occupied,
+        startServerTime,
+        now,
+        player,
+        bandSessionId,
+        "leader")
+    occupied[leaderPart] = true
+
+    for index, member in ipairs(members) do
+        local memberPart = firstAvailableSuggestedPart(occupied, leaderPart + index)
+        pendingScheduledBandStartsByLeaderGuid[tonumber(member.guid)] = {
+            bandSessionId = bandSessionId,
+            startServerTime = startServerTime,
+            expiresAt = startServerTime + 8.0,
+            selector = selector,
+            role = "member",
+        }
+        sendScheduledBandLocalPlay(
+            member.player,
+            selector,
+            memberPart,
+            occupied,
+            startServerTime,
+            now,
+            player,
+            bandSessionId,
+            "member")
+        occupied[memberPart] = true
+        member.player:sendMessage(string.format(
+            "[Bardcraft] Band performance scheduled by %s.",
+            playerDisplayName(player)))
+    end
+    writePendingScheduledBandStartSnapshot()
+
+    player:sendMessage(string.format(
+        "[Bardcraft] Band performance scheduled in %.1fs for %d member(s): %s",
+        BAND_SCHEDULED_START_LEAD_SECONDS,
+        #members,
+        selector))
+    mp.log(string.format(
+        "[bardcraft] band scheduled start leader=%s name=%s selector=%s requestedPart=%s members=%d startServerTime=%.3f delay=%.3f bandSession=%s",
+        tostring(player.guid),
+        tostring(player.name),
+        tostring(selector),
+        tostring(requestedPart),
+        #members,
+        startServerTime,
+        BAND_SCHEDULED_START_LEAD_SECONDS,
+        tostring(bandSessionId)))
+    return true
+end
+
 local function sendBardcraftLocalPlay(player, selector, requestedPart)
     selector = tostring(selector or "")
     if selector == "" then
         player:sendMessage(
             "[Bardcraft] Usage: /bcperf play <song id or title> or /bcperf playpart <part> <song id or title>")
+        return
+    end
+
+    if trySendScheduledBandLocalPlay(player, selector, requestedPart) then
         return
     end
 
@@ -711,15 +1718,104 @@ local function sendBardcraftLocalPlay(player, selector, requestedPart)
         tostring(requestedPart)))
 end
 
+local function commandRest(msg, command)
+    if msg == command then
+        return ""
+    end
+    if msg:sub(1, #command + 1) == command .. " " then
+        return msg:sub(#command + 2)
+    end
+    return nil
+end
+
+local function sendBandUsage(player)
+    player:sendMessage(
+        "Usage: /bc invite <player|pid> | /bc accept <leader|pid> | /bc decline <leader|pid> | /bc kick <player|pid> | /bc disband | /bc leave | /bc status")
+end
+
+local function handleBandCommand(player, args)
+    local subcommand = string.lower(args[1] or "status")
+
+    if subcommand == "status" or subcommand == "list" or subcommand == "" then
+        sendBandStatus(player)
+    elseif subcommand == "invite" then
+        inviteBandMember(player, joinCommandArgs(args, 2))
+    elseif subcommand == "accept" then
+        acceptBandInvite(player, joinCommandArgs(args, 2))
+    elseif subcommand == "decline" or subcommand == "reject" then
+        declineBandInvite(player, joinCommandArgs(args, 2))
+    elseif subcommand == "kick" then
+        kickBandMember(player, joinCommandArgs(args, 2))
+    elseif subcommand == "disband" then
+        local leaderGuid = tonumber(player and player.guid)
+        if not leaderGuid then
+            player:sendMessage("[Bardcraft] You are not leading a band.")
+            return
+        end
+        local canceledInvites = clearPendingBandInvitesFromLeader(leaderGuid)
+        if not activeBandForLeader(leaderGuid, "command-disband") then
+            if canceledInvites > 0 then
+                player:sendMessage(string.format("[Bardcraft] Canceled %d pending invite%s.",
+                    canceledInvites,
+                    canceledInvites == 1 and "" or "s"))
+            else
+                player:sendMessage("[Bardcraft] You are not leading a band.")
+            end
+            return
+        end
+        local removed = disbandBand(leaderGuid, "band-disband", true)
+        player:sendMessage(string.format("[Bardcraft] Band disbanded. Removed %d member%s and canceled %d invite%s.",
+            removed,
+            removed == 1 and "" or "s",
+            canceledInvites,
+            canceledInvites == 1 and "" or "s"))
+    elseif subcommand == "leave" then
+        local guid = tonumber(player and player.guid)
+        local leaderGuid = removeBandMembership(guid, "band-leave")
+        if leaderGuid then
+            player:sendMessage("[Bardcraft] You left the band.")
+            local leader = mp.getPlayer(leaderGuid)
+            if leader then
+                leader:sendMessage("[Bardcraft] " .. playerDisplayName(player) .. " left your band.")
+            end
+            mp.log(string.format(
+                "[bardcraft] band leave member=%s leader=%s",
+                tostring(guid),
+                tostring(leaderGuid)))
+        else
+            player:sendMessage("[Bardcraft] You are not in a band.")
+        end
+    else
+        sendBandUsage(player)
+    end
+end
+
 local function handleChat(player, data, env)
     local prefix = (env and env.commandPrefix) or "/"
-    local command = prefix .. "bcperf"
     local msg = data and data.message or ""
-    if msg ~= command and msg:sub(1, #command + 1) ~= command .. " " then
+
+    local bandMenuRest = commandRest(msg, prefix .. "bcm")
+    if bandMenuRest ~= nil then
+        sendBandStatus(player)
+        player:sendMessage("[Bardcraft] Band menu UI is not implemented yet. Use /bc commands for now.")
+        mp.log(string.format(
+            "[bardcraft] command band menu guid=%s name=%s",
+            tostring(player and player.guid),
+            tostring(player and player.name)))
+        return false
+    end
+
+    local bandRest = commandRest(msg, prefix .. "bc")
+    if bandRest ~= nil then
+        handleBandCommand(player, splitCommandArgs(bandRest))
+        return false
+    end
+
+    local rest = commandRest(msg, prefix .. "bcperf")
+    if rest == nil then
         return nil
     end
 
-    local rest = msg == command and "" or msg:sub(#command + 2)
     local args = splitCommandArgs(rest)
     local subcommand = string.lower(args[1] or "list")
 
@@ -818,6 +1914,9 @@ local function relayBardcraftPerformanceEvent(guid, data)
     local session = activePerformanceSessions[sessionKey]
     if eventType == "PerformStart" then
         session = updateActivePerformanceSession(guid, source, data.actorId, payload, relayEvent, senderCharacterId(data))
+        if session then
+            applyPendingScheduledBandStart(guid, session, payload)
+        end
     elseif session then
         if sourceCell and session.cell ~= sourceCell then
             moveActivePerformanceSessionsForGuid(guid, session.cell, sourceCell)
@@ -875,6 +1974,10 @@ local function relayBardcraftPerformanceEvent(guid, data)
         end
         activePerformanceSessions[sessionKey] = nil
         writeActivePerformanceSessionSnapshot()
+    end
+
+    if eventType == "PerformStart" and session and not session.parentSessionKey then
+        autoJoinBandMembersForSession(session)
     end
 
     if eventType == "PerformStart" or eventType == "PerformStop" then
@@ -1865,11 +2968,37 @@ end
 M.eventHandlers = {
     OnServerInit = function(_)
         activePerformanceSessions = {}
+        activeBandsByLeaderGuid = {}
+        bandLeaderByMemberGuid = {}
+        pendingBandInvitesByMemberGuid = {}
+        pendingScheduledBandStartsByLeaderGuid = {}
         clearActivePerformanceSessionSnapshot()
+        clearActiveBandSnapshot()
+        clearPendingScheduledBandStartSnapshot()
     end,
 
     OnPlayerDisconnect = function(data)
-        stopActivePerformanceSessionsForGuid(data and data.guid, "source-disconnect")
+        local guid = tonumber(data and data.guid)
+        stopActivePerformanceSessionsForGuid(guid, "source-disconnect")
+        if guid then
+            if activeBandsByLeaderGuid[guid] then
+                disbandBand(guid, "leader-disconnect", true)
+            end
+            clearPendingBandInvitesFromLeader(guid)
+            pendingBandInvitesByMemberGuid[guid] = nil
+
+            local leaderGuid = removeBandMembership(guid, "member-disconnect")
+            if leaderGuid then
+                local leader = mp.getPlayer(leaderGuid)
+                if leader then
+                    leader:sendMessage("[Bardcraft] " .. tostring(guid) .. " left your band by disconnecting.")
+                end
+                mp.log(string.format(
+                    "[bardcraft] band member disconnected member=%s leader=%s",
+                    tostring(guid),
+                    tostring(leaderGuid)))
+            end
+        end
     end,
 
     OnPlayerCellChange = function(data)
@@ -1877,6 +3006,7 @@ M.eventHandlers = {
         local player = guid and mp.getPlayer(guid) or nil
         local newCell = data and data.newCell or playerCellKey(player)
         moveActivePerformanceSessionsForGuid(guid, data and data.oldCell, newCell)
+        sendActivePerformanceSessions(guid, newCell)
     end,
 
     BC_RequestBardcraftPersistence = function(data)
@@ -2013,6 +3143,17 @@ M.eventHandlers = {
         local guid = senderGuid(data)
         if guid then
             sendActivePerformanceSessions(guid)
+        end
+    end,
+
+    BC_RequestBardcraftPerformanceAutoJoin = function(data)
+        local guid = senderGuid(data)
+        local player = guid and mp.getPlayer(guid) or nil
+        if player then
+            sendBardcraftJoin(player, data and data.selector, data and data.part, {
+                silent = true,
+                reason = data and data.reason or "auto-join",
+            })
         end
     end,
 
@@ -2211,6 +3352,8 @@ M.eventHandlers = {
 
         relayBardcraftPerformanceEvent(guid, data)
     end,
+
+
 }
 
 return M

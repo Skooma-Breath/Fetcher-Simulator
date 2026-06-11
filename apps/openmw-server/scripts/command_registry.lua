@@ -85,6 +85,18 @@ local COMMANDS = {
         summary = "Inspect, start, join, or prepare Bardcraft performances in your cell.",
     },
     {
+        id = "bc",
+        category = "Bardcraft",
+        usage = "/bc invite|accept|decline|kick|disband|leave|status",
+        summary = "Invite, accept, and manage live Bardcraft band membership.",
+    },
+    {
+        id = "bcm",
+        category = "Bardcraft",
+        usage = "/bcm",
+        summary = "Show current Bardcraft band status.",
+    },
+    {
         id = "login",
         category = "General",
         usage = "/login <password>",

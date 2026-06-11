@@ -8712,6 +8712,14 @@ AdminHttpServer::Response MPServer::handleAdminHttpRequest(
     AdminHttpServer::Response response;
     response.contentType = "application/json; charset=utf-8";
 
+    if (action == "shutdown")
+    {
+        Log(Debug::Info) << "[Server] Admin HTTP shutdown requested";
+        requestStop();
+        response.body = "{\"ok\":true,\"status\":\"shutting_down\"}";
+        return response;
+    }
+
     if (!mLua.isLoaded() || !mLua.isRunning())
     {
         response.status = 503;
