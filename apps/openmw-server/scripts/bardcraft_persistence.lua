@@ -82,6 +82,31 @@ local function tableCount(value)
     return count
 end
 
+local function bandMemberGuidList(band)
+    local guids = {}
+    for memberGuid, _ in pairs((band and band.members) or {}) do
+        table.insert(guids, tonumber(memberGuid) or tostring(memberGuid))
+    end
+
+    table.sort(guids, function(left, right)
+        local leftNumber = tonumber(left)
+        local rightNumber = tonumber(right)
+        if leftNumber and rightNumber then
+            return leftNumber < rightNumber
+        end
+        return tostring(left) < tostring(right)
+    end)
+
+    for index, memberGuid in ipairs(guids) do
+        guids[index] = tostring(memberGuid)
+    end
+
+    if #guids == 0 then
+        return "-"
+    end
+    return table.concat(guids, ",")
+end
+
 local function trim(value)
     return tostring(value or ""):gsub("^%s+", ""):gsub("%s+$", "")
 end
@@ -763,6 +788,13 @@ local function removeBandMembership(memberGuid, reason)
     bandLeaderByMemberGuid[memberGuid] = nil
     stopBandChildSessionsForMember(leaderGuid, memberGuid, reason)
     writeActiveBandSnapshot()
+    mp.log(string.format(
+        "[bardcraft] band membership removed leader=%s member=%s reason=%s remaining=%d memberGuids=%s",
+        tostring(leaderGuid),
+        tostring(memberGuid),
+        tostring(reason),
+        band and tableCount(band.members) or 0,
+        bandMemberGuidList(band)))
     return leaderGuid
 end
 
@@ -774,6 +806,7 @@ local function disbandBand(leaderGuid, reason, notifyPlayers)
     end
 
     local removed = 0
+    local memberGuidSummary = bandMemberGuidList(band)
     local memberGuids = {}
     for memberGuid, _ in pairs(band.members or {}) do
         table.insert(memberGuids, tonumber(memberGuid))
@@ -794,10 +827,11 @@ local function disbandBand(leaderGuid, reason, notifyPlayers)
     activeBandsByLeaderGuid[leaderGuid] = nil
     writeActiveBandSnapshot()
     mp.log(string.format(
-        "[bardcraft] band disbanded leader=%s reason=%s members=%d",
+        "[bardcraft] band disbanded leader=%s reason=%s members=%d memberGuids=%s",
         tostring(leaderGuid),
         tostring(reason),
-        removed))
+        removed,
+        memberGuidSummary))
     return removed
 end
 
@@ -1386,12 +1420,13 @@ local function acceptBandInvite(member, selector)
     member:sendMessage("[Bardcraft] You joined " .. playerDisplayName(leader) .. "'s band.")
     leader:sendMessage("[Bardcraft] " .. playerDisplayName(member) .. " joined your band.")
     mp.log(string.format(
-        "[bardcraft] band invite accepted leader=%s leaderName=%s member=%s memberName=%s members=%d leaders=%d memberLinks=%d",
+        "[bardcraft] band invite accepted leader=%s leaderName=%s member=%s memberName=%s members=%d memberGuids=%s leaders=%d memberLinks=%d",
         tostring(leaderGuid),
         playerDisplayName(leader),
         tostring(memberGuid),
         playerDisplayName(member),
         tableCount(band.members),
+        bandMemberGuidList(band),
         tableCount(activeBandsByLeaderGuid),
         tableCount(bandLeaderByMemberGuid)))
 end
@@ -1484,10 +1519,11 @@ local function autoJoinBandMembersForSession(session)
     local band = leaderGuid and activeBandForLeader(leaderGuid, "auto-join") or nil
     if not band or tableCount(band.members) == 0 then
         mp.log(string.format(
-            "[bardcraft] band auto-join skipped leader=%s session=%s reason=no-band members=%d leaders=%d memberLinks=%d",
+            "[bardcraft] band auto-join skipped leader=%s session=%s reason=no-band members=%d memberGuids=%s leaders=%d memberLinks=%d",
             tostring(leaderGuid),
             tostring(session.key),
             band and tableCount(band.members) or 0,
+            bandMemberGuidList(band),
             tableCount(activeBandsByLeaderGuid),
             tableCount(bandLeaderByMemberGuid)))
         return 0
@@ -1516,10 +1552,11 @@ local function autoJoinBandMembersForSession(session)
     end
 
     mp.log(string.format(
-        "[bardcraft] band auto-join leader=%s session=%s members=%d sent=%d",
+        "[bardcraft] band auto-join leader=%s session=%s members=%d memberGuids=%s sent=%d",
         tostring(leaderGuid),
         tostring(session.key),
         tableCount(band.members),
+        bandMemberGuidList(band),
         sent))
     return sent
 end
@@ -2987,16 +3024,16 @@ M.eventHandlers = {
             clearPendingBandInvitesFromLeader(guid)
             pendingBandInvitesByMemberGuid[guid] = nil
 
-            local leaderGuid = removeBandMembership(guid, "member-disconnect")
+            local leaderGuid = bandLeaderByMemberGuid[guid]
             if leaderGuid then
-                local leader = mp.getPlayer(leaderGuid)
-                if leader then
-                    leader:sendMessage("[Bardcraft] " .. tostring(guid) .. " left your band by disconnecting.")
-                end
+                stopBandChildSessionsForMember(leaderGuid, guid, "member-disconnect")
+                local band = activeBandForLeader(leaderGuid, "member-disconnect")
                 mp.log(string.format(
-                    "[bardcraft] band member disconnected member=%s leader=%s",
+                    "[bardcraft] band membership retained on disconnect member=%s leader=%s members=%d memberGuids=%s",
                     tostring(guid),
-                    tostring(leaderGuid)))
+                    tostring(leaderGuid),
+                    band and tableCount(band.members) or 0,
+                    bandMemberGuidList(band)))
             end
         end
     end,
