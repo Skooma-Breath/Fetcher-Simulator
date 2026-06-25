@@ -5,6 +5,7 @@
 #include <set>
 #include <string>
 #include <variant>
+#include <chrono>
 
 #include <components/debug/debuglog.hpp>
 #include <components/esm/luascripts.hpp>
@@ -14,6 +15,14 @@
 
 namespace LuaUtil
 {
+    inline double scriptPerfElapsedMs(std::chrono::steady_clock::time_point start,
+        std::chrono::steady_clock::time_point end)
+    {
+        return std::chrono::duration<double, std::milli>(end - start).count();
+    }
+
+    inline constexpr double scriptHandlerPerfThresholdMs = 5.0;
+
     class ScriptTracker;
 
     // ScriptsContainer is a base class for all scripts containers (LocalScripts,
@@ -221,7 +230,17 @@ namespace LuaUtil
             {
                 try
                 {
+                    const auto start = std::chrono::steady_clock::now();
                     LuaUtil::call({ this, handler.mScriptId }, handler.mFn, args...);
+                    const double elapsed = scriptPerfElapsedMs(start, std::chrono::steady_clock::now());
+                    if (elapsed >= scriptHandlerPerfThresholdMs)
+                    {
+                        Log(Debug::Info) << "[Perf] Lua handler spike"
+                                         << " container=" << mNamePrefix
+                                         << " script=" << scriptPath(handler.mScriptId)
+                                         << " handler=" << handlers.mName
+                                         << " ms=" << elapsed;
+                    }
                 }
                 catch (std::exception& e)
                 {

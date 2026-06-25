@@ -475,6 +475,7 @@ void Main::onDisconnected()
     mCharacterList.clear();
     mAutoCharacterSelectSent = false;
     mAutoEnterPending = false;
+    mAutoEnterAllowNewCharacterUi = false;
     mIsLinked       = false;
     mLocalPublicKey.clear();
     MWPhysics::resetSurfPhysicsSettings();
@@ -548,17 +549,10 @@ void Main::tryAutoSelectCharacter()
         return;
     }
 
-    if (characterIt->isNew)
-    {
-        mRejectReason = "Auto character '" + mAutoCharacterName
-            + "' is incomplete and still requires character creation.";
-        Log(Debug::Error) << "[MP] " << mRejectReason;
-        disconnect(mRejectReason);
-        return;
-    }
-
     mAutoCharacterSelectSent = true;
-    Log(Debug::Info) << "[MP] Auto-selecting character '" << characterIt->name << "'";
+    mAutoEnterAllowNewCharacterUi = characterIt->isNew;
+    Log(Debug::Info) << "[MP] Auto-selecting character '" << characterIt->name
+                     << "' incomplete=" << characterIt->isNew;
     sendCharacterSelect(characterIt->name, false);
 }
 
@@ -602,6 +596,7 @@ bool Main::enterSelectedCharacterWorld(bool allowNewCharacterUi)
                 }
                 MWBase::Environment::get().getWindowManager()->setNewGame(false);
             });
+        windowManager->startCharGen();
         windowManager->pushGuiMode(MWGui::GM_Race);
         return true;
     }
@@ -713,8 +708,10 @@ void Main::tryAutoEnterWorld()
     if (!mAutoEnterPending || !mCharacterDataReady)
         return;
 
+    const bool allowNewCharacterUi = mAutoEnterAllowNewCharacterUi;
     mAutoEnterPending = false;
-    enterSelectedCharacterWorld(false);
+    mAutoEnterAllowNewCharacterUi = false;
+    enterSelectedCharacterWorld(allowNewCharacterUi);
 }
 
 // ---------------------------------------------------------------------------
@@ -782,6 +779,14 @@ void Main::registerProtocolHandlers()
             mCharacterList = pkt.characters;
             Log(Debug::Info) << "[MP] Received character list: "
                              << mCharacterList.size() << " character(s)";
+            for (const auto& entry : mCharacterList)
+            {
+                Log(Debug::Info) << "[MP] Character entry"
+                                 << " name=" << entry.name
+                                 << " isNew=" << entry.isNew
+                                 << " race=" << entry.race
+                                 << " class=" << entry.className;
+            }
 
             // Signal AccountDialog that the connection is ready so it can
             // open CharacterSelectDialog.
@@ -890,7 +895,11 @@ void Main::registerProtocolHandlers()
 
             mCharacterDataReady = true;
             if (!mAutoCharacterName.empty())
+            {
+                if (mIsNewCharacter)
+                    mAutoEnterAllowNewCharacterUi = true;
                 mAutoEnterPending = true;
+            }
             // NOTE: do NOT call forceFullSync() here for returning players.
             // At this point world->getPlayerPtr() still has the blank template
             // NPC record — setPlayerRace() has not been called yet.

@@ -173,6 +173,7 @@ namespace mwmp
         std::string mAutoCharacterName;
         bool        mAutoCharacterSelectSent = false;
         bool        mAutoEnterPending = false;
+        bool        mAutoEnterAllowNewCharacterUi = false;
         bool        mUnexpectedDisconnect = false; ///< set by onDisconnected when world was ready; polled on main thread
         std::string mHost;
         uint16_t    mPort           = 25565;

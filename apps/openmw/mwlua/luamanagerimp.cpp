@@ -4,6 +4,7 @@
 
 #include <MyGUI_InputManager.h>
 #include <osg/Stats>
+#include <osg/Timer>
 
 #include <sol/object.hpp>
 #include <sol/table.hpp>
@@ -49,6 +50,142 @@ namespace MWLua
 {
     namespace
     {
+#ifdef BUILD_MULTIPLAYER
+        constexpr double luaPerfLogThresholdMs = 1.5;
+        constexpr double luaPerfLogIntervalSec = 1.0;
+
+        double elapsedMs(const osg::Timer& timer, osg::Timer_t start, osg::Timer_t end)
+        {
+            return timer.delta_s(start, end) * 1000.0;
+        }
+
+        bool shouldLogLuaPerf(const osg::Timer& timer, osg::Timer_t end, double totalMs, osg::Timer_t& lastLogTick,
+            unsigned& suppressed)
+        {
+            if (totalMs < luaPerfLogThresholdMs)
+                return false;
+
+            if (lastLogTick != 0 && timer.delta_s(lastLogTick, end) < luaPerfLogIntervalSec)
+            {
+                ++suppressed;
+                return false;
+            }
+
+            return true;
+        }
+
+        struct LuaUpdatePerf
+        {
+            double gc = 0.0;
+            double objectLists = 0.0;
+            double autoScripts = 0.0;
+            double purgeInactive = 0.0;
+            double stats = 0.0;
+            double network = 0.0;
+            double inboundEvents = 0.0;
+            double finalizeEvents = 0.0;
+            double timers = 0.0;
+            double eventHandlers = 0.0;
+            double callbacks = 0.0;
+            double engineHandlers = 0.0;
+            double localUpdates = 0.0;
+            double globalUpdate = 0.0;
+            double unloadInactive = 0.0;
+        };
+
+        struct LuaSyncPerf
+        {
+            double newGame = 0.0;
+            double menuInput = 0.0;
+            double playerInput = 0.0;
+            double menuEvents = 0.0;
+            double inputActions = 0.0;
+            double menuFrame = 0.0;
+            double playerFrame = 0.0;
+            double uiMessages = 0.0;
+            double consoleMessages = 0.0;
+            double delayedActions = 0.0;
+            double reloadScripts = 0.0;
+            double uiModeChanged = 0.0;
+        };
+
+        void logLuaUpdatePerf(const osg::Timer& timer, osg::Timer_t end, double totalMs, const LuaUpdatePerf& perf,
+            std::size_t activeLocalScripts, std::size_t queuedAutoScripts, std::size_t inboundEvents,
+            std::size_t queuedCallbacks)
+        {
+            static osg::Timer_t lastLogTick = 0;
+            static unsigned suppressed = 0;
+
+            if (!shouldLogLuaPerf(timer, end, totalMs, lastLogTick, suppressed))
+                return;
+
+            Log(Debug::Info) << "[Perf] Lua update spike"
+                             << " totalMs=" << totalMs
+                             << " activeLocalScripts=" << activeLocalScripts
+                             << " queuedAutoScripts=" << queuedAutoScripts
+                             << " inboundEvents=" << inboundEvents
+                             << " queuedCallbacks=" << queuedCallbacks
+                             << " gcMs=" << perf.gc
+                             << " objectListsMs=" << perf.objectLists
+                             << " autoScriptsMs=" << perf.autoScripts
+                             << " purgeInactiveMs=" << perf.purgeInactive
+                             << " statsMs=" << perf.stats
+                             << " networkMs=" << perf.network
+                             << " inboundEventsMs=" << perf.inboundEvents
+                             << " finalizeEventsMs=" << perf.finalizeEvents
+                             << " timersMs=" << perf.timers
+                             << " eventHandlersMs=" << perf.eventHandlers
+                             << " callbacksMs=" << perf.callbacks
+                             << " engineHandlersMs=" << perf.engineHandlers
+                             << " localUpdatesMs=" << perf.localUpdates
+                             << " globalUpdateMs=" << perf.globalUpdate
+                             << " unloadInactiveMs=" << perf.unloadInactive
+                             << " suppressed=" << suppressed;
+
+            suppressed = 0;
+            lastLogTick = end;
+        }
+
+        void logLuaSyncPerf(const osg::Timer& timer, osg::Timer_t end, double totalMs, const LuaSyncPerf& perf,
+            std::size_t menuInputEvents, std::size_t playerInputEvents, std::size_t uiMessages,
+            std::size_t consoleMessages, std::size_t delayedActions, bool hadTeleportAction, bool reloadRequested,
+            bool hadUiModeChanged)
+        {
+            static osg::Timer_t lastLogTick = 0;
+            static unsigned suppressed = 0;
+
+            if (!shouldLogLuaPerf(timer, end, totalMs, lastLogTick, suppressed))
+                return;
+
+            Log(Debug::Info) << "[Perf] Lua sync spike"
+                             << " totalMs=" << totalMs
+                             << " menuInputEvents=" << menuInputEvents
+                             << " playerInputEvents=" << playerInputEvents
+                             << " uiMessages=" << uiMessages
+                             << " consoleMessages=" << consoleMessages
+                             << " delayedActions=" << delayedActions
+                             << " hadTeleportAction=" << hadTeleportAction
+                             << " reloadRequested=" << reloadRequested
+                             << " hadUiModeChanged=" << hadUiModeChanged
+                             << " newGameMs=" << perf.newGame
+                             << " menuInputMs=" << perf.menuInput
+                             << " playerInputMs=" << perf.playerInput
+                             << " menuEventsMs=" << perf.menuEvents
+                             << " inputActionsMs=" << perf.inputActions
+                             << " menuFrameMs=" << perf.menuFrame
+                             << " playerFrameMs=" << perf.playerFrame
+                             << " uiMessagesMs=" << perf.uiMessages
+                             << " consoleMessagesMs=" << perf.consoleMessages
+                             << " delayedActionsMs=" << perf.delayedActions
+                             << " reloadScriptsMs=" << perf.reloadScripts
+                             << " uiModeChangedMs=" << perf.uiModeChanged
+                             << " suppressed=" << suppressed;
+
+            suppressed = 0;
+            lastLogTick = end;
+        }
+#endif
+
         struct BoolScopeGuard
         {
             bool& mValue;
@@ -213,8 +350,27 @@ namespace MWLua
 
     void LuaManager::update()
     {
+#ifdef BUILD_MULTIPLAYER
+        const osg::Timer* const perfTimer = osg::Timer::instance();
+        const osg::Timer_t perfStart = perfTimer->tick();
+        osg::Timer_t perfPhaseStart = perfStart;
+        LuaUpdatePerf perf;
+        auto markPerf = [&](double& bucket) {
+            const osg::Timer_t now = perfTimer->tick();
+            bucket += elapsedMs(*perfTimer, perfPhaseStart, now);
+            perfPhaseStart = now;
+        };
+        const std::size_t activeLocalScriptCount = mActiveLocalScripts.size();
+        const std::size_t queuedAutoScriptCount = mQueuedAutoStartedScripts.size();
+        const std::size_t queuedCallbackCount = mQueuedCallbacks.size();
+        std::size_t inboundEventCount = 0;
+#endif
+
         if (const int steps = Settings::lua().mGcStepsPerFrame; steps > 0)
             lua_gc(mLua.unsafeState(), LUA_GCSTEP, steps);
+#ifdef BUILD_MULTIPLAYER
+        markPerf(perf.gc);
+#endif
 
         if (mPlayer.isEmpty())
             return; // The game is not started yet.
@@ -229,21 +385,34 @@ namespace MWLua
         }
 
         mObjectLists.update();
+#ifdef BUILD_MULTIPLAYER
+        markPerf(perf.objectLists);
+#endif
 
         for (auto scripts : mQueuedAutoStartedScripts)
             scripts->addAutoStartedScripts();
         mQueuedAutoStartedScripts.clear();
+#ifdef BUILD_MULTIPLAYER
+        markPerf(perf.autoScripts);
+#endif
 
         std::erase_if(mActiveLocalScripts,
             [](const LocalScripts* l) { return l->getPtrOrEmpty().isEmpty() || l->getPtrOrEmpty().mRef->isDeleted(); });
+#ifdef BUILD_MULTIPLAYER
+        markPerf(perf.purgeInactive);
+#endif
 
         mGlobalScripts.statsNextFrame();
         for (LocalScripts* scripts : mActiveLocalScripts)
             scripts->statsNextFrame();
+#ifdef BUILD_MULTIPLAYER
+        markPerf(perf.stats);
+#endif
 
 #ifdef BUILD_MULTIPLAYER
         if (mwmp::Main::isInitialised())
             mwmp::Main::get().getNetworkBridge().processIncoming(*this);
+        markPerf(perf.network);
 #endif
 
         std::vector<LuaEvents::Global> inboundEvents;
@@ -251,10 +420,19 @@ namespace MWLua
             std::lock_guard<std::mutex> lock(mInboundGlobalEventsMutex);
             inboundEvents.swap(mInboundGlobalEvents);
         }
+#ifdef BUILD_MULTIPLAYER
+        inboundEventCount = inboundEvents.size();
+#endif
         for (auto& event : inboundEvents)
             mLuaEvents.addGlobalEvent(std::move(event));
+#ifdef BUILD_MULTIPLAYER
+        markPerf(perf.inboundEvents);
+#endif
 
         mLuaEvents.finalizeEventBatch();
+#ifdef BUILD_MULTIPLAYER
+        markPerf(perf.finalizeEvents);
+#endif
 
         MWWorld::DateTimeManager& timeManager = *MWBase::Environment::get().getWorld()->getTimeManager();
         bool luaPaused = timeManager.isPaused();
@@ -269,27 +447,54 @@ namespace MWLua
             for (LocalScripts* scripts : mActiveLocalScripts)
                 scripts->processTimers(timeManager.getSimulationTime(), timeManager.getGameTime());
         }
+#ifdef BUILD_MULTIPLAYER
+        markPerf(perf.timers);
+#endif
 
         // Run event handlers for events that were sent before `finalizeEventBatch`.
         mLuaEvents.callEventHandlers();
+#ifdef BUILD_MULTIPLAYER
+        markPerf(perf.eventHandlers);
+#endif
 
         mLua.protectedCall([&](LuaUtil::LuaView& lua) {
             // Run queued callbacks
             for (CallbackWithData& c : mQueuedCallbacks)
                 c.mCallback.tryCall(c.mArg);
             mQueuedCallbacks.clear();
+#ifdef BUILD_MULTIPLAYER
+            markPerf(perf.callbacks);
+#endif
 
             // Run engine handlers
             mEngineEvents.callEngineHandlers();
+#ifdef BUILD_MULTIPLAYER
+            markPerf(perf.engineHandlers);
+#endif
             bool isPaused = luaPaused;
 
             float frameDuration = MWBase::Environment::get().getFrameDuration();
             for (LocalScripts* scripts : mActiveLocalScripts)
                 scripts->update(isPaused ? 0 : frameDuration);
+#ifdef BUILD_MULTIPLAYER
+            markPerf(perf.localUpdates);
+#endif
             mGlobalScripts.update(isPaused ? 0 : frameDuration);
+#ifdef BUILD_MULTIPLAYER
+            markPerf(perf.globalUpdate);
+#endif
 
             mScriptTracker.unloadInactiveScripts(lua);
+#ifdef BUILD_MULTIPLAYER
+            markPerf(perf.unloadInactive);
+#endif
         });
+
+#ifdef BUILD_MULTIPLAYER
+        const osg::Timer_t perfEnd = perfTimer->tick();
+        logLuaUpdatePerf(*perfTimer, perfEnd, elapsedMs(*perfTimer, perfStart, perfEnd), perf, activeLocalScriptCount,
+            queuedAutoScriptCount, inboundEventCount, queuedCallbackCount);
+#endif
     }
 
     void LuaManager::objectTeleported(const MWWorld::Ptr& ptr)
@@ -324,6 +529,26 @@ namespace MWLua
 
     void LuaManager::synchronizedUpdateUnsafe()
     {
+#ifdef BUILD_MULTIPLAYER
+        const osg::Timer* const perfTimer = osg::Timer::instance();
+        const osg::Timer_t perfStart = perfTimer->tick();
+        osg::Timer_t perfPhaseStart = perfStart;
+        LuaSyncPerf perf;
+        auto markPerf = [&](double& bucket) {
+            const osg::Timer_t now = perfTimer->tick();
+            bucket += elapsedMs(*perfTimer, perfPhaseStart, now);
+            perfPhaseStart = now;
+        };
+        const std::size_t menuInputEventCount = mMenuInputEvents.size();
+        const std::size_t playerInputEventCount = mInputEvents.size();
+        const std::size_t uiMessageCount = mUIMessages.size();
+        const std::size_t consoleMessageCount = mInGameConsoleMessages.size();
+        const std::size_t delayedActionCount = mActionQueue.size();
+        const bool hadTeleportAction = mTeleportPlayerAction.has_value();
+        const bool reloadRequested = mReloadAllScriptsRequested;
+        const bool hadUiModeChanged = mDelayedUiModeChangedArg.has_value();
+#endif
+
         if (mNewGameStarted)
         {
             mNewGameStarted = false;
@@ -331,6 +556,9 @@ namespace MWLua
             // can teleport the player to the starting location before the first frame is rendered.
             mGlobalScripts.newGameStarted();
         }
+#ifdef BUILD_MULTIPLAYER
+        markPerf(perf.newGame);
+#endif
         BoolScopeGuard updateGuard(mRunningSynchronizedUpdates);
 
         MWBase::WindowManager* windowManager = MWBase::Environment::get().getWindowManager();
@@ -343,13 +571,22 @@ namespace MWLua
             for (const auto& event : mMenuInputEvents)
                 mMenuScripts.processInputEvent(event);
             mMenuInputEvents.clear();
+#ifdef BUILD_MULTIPLAYER
+            markPerf(perf.menuInput);
+#endif
             if (playerScripts && !windowManager->containsMode(MWGui::GM_MainMenu))
             {
                 for (const auto& event : mInputEvents)
                     playerScripts->processInputEvent(event);
             }
             mInputEvents.clear();
+#ifdef BUILD_MULTIPLAYER
+            markPerf(perf.playerInput);
+#endif
             mLuaEvents.callMenuEventHandlers();
+#ifdef BUILD_MULTIPLAYER
+            markPerf(perf.menuEvents);
+#endif
             bool luaPaused = MWBase::Environment::get().getWorld()->getTimeManager()->isPaused();
 #ifdef BUILD_MULTIPLAYER
             if (luaPaused && mwmp::Main::isConnected())
@@ -359,19 +596,37 @@ namespace MWLua
                 ? 0.f
                 : MWBase::Environment::get().getFrameDuration();
             mInputActions.update(frameDuration);
+#ifdef BUILD_MULTIPLAYER
+            markPerf(perf.inputActions);
+#endif
             mMenuScripts.onFrame(frameDuration);
+#ifdef BUILD_MULTIPLAYER
+            markPerf(perf.menuFrame);
+#endif
             if (playerScripts)
                 playerScripts->onFrame(frameDuration);
+#ifdef BUILD_MULTIPLAYER
+            markPerf(perf.playerFrame);
+#endif
         }
 
         for (const auto& [message, mode] : mUIMessages)
             windowManager->messageBox(message, mode);
         mUIMessages.clear();
+#ifdef BUILD_MULTIPLAYER
+        markPerf(perf.uiMessages);
+#endif
         for (auto& [msg, color] : mInGameConsoleMessages)
             windowManager->printToConsole(msg, "#" + color.toHex());
         mInGameConsoleMessages.clear();
+#ifdef BUILD_MULTIPLAYER
+        markPerf(perf.consoleMessages);
+#endif
 
         applyDelayedActions();
+#ifdef BUILD_MULTIPLAYER
+        markPerf(perf.delayedActions);
+#endif
 
         if (mReloadAllScriptsRequested)
         {
@@ -379,6 +634,9 @@ namespace MWLua
             reloadAllScriptsImpl();
             mReloadAllScriptsRequested = false;
         }
+#ifdef BUILD_MULTIPLAYER
+        markPerf(perf.reloadScripts);
+#endif
 
         if (mDelayedUiModeChangedArg)
         {
@@ -386,6 +644,13 @@ namespace MWLua
                 playerScripts->uiModeChanged(*mDelayedUiModeChangedArg, true);
             mDelayedUiModeChangedArg = std::nullopt;
         }
+#ifdef BUILD_MULTIPLAYER
+        markPerf(perf.uiModeChanged);
+        const osg::Timer_t perfEnd = perfTimer->tick();
+        logLuaSyncPerf(*perfTimer, perfEnd, elapsedMs(*perfTimer, perfStart, perfEnd), perf, menuInputEventCount,
+            playerInputEventCount, uiMessageCount, consoleMessageCount, delayedActionCount, hadTeleportAction,
+            reloadRequested, hadUiModeChanged);
+#endif
     }
 
     void LuaManager::applyDelayedActions()

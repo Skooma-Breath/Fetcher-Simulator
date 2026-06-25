@@ -4,6 +4,8 @@
 
 #include <components/esm/luascripts.hpp>
 
+#include <chrono>
+
 namespace
 {
     struct ScriptInfo
@@ -370,7 +372,17 @@ namespace LuaUtil
                 const Handler& h = list[i - 1];
                 try
                 {
+                    const auto start = std::chrono::steady_clock::now();
                     sol::object res = LuaUtil::call({ this, h.mScriptId }, h.mFn, object);
+                    const double elapsed = scriptPerfElapsedMs(start, std::chrono::steady_clock::now());
+                    if (elapsed >= scriptHandlerPerfThresholdMs)
+                    {
+                        Log(Debug::Info) << "[Perf] Lua handler spike"
+                                         << " container=" << mNamePrefix
+                                         << " script=" << scriptPath(h.mScriptId)
+                                         << " handler=event:" << eventName
+                                         << " ms=" << elapsed;
+                    }
                     if (res.is<bool>() && !res.as<bool>())
                         break; // Skip other handlers if 'false' was returned.
                 }
@@ -721,6 +733,7 @@ namespace LuaUtil
         try
         {
             Script& script = getScript(t.mScriptId);
+            const auto start = std::chrono::steady_clock::now();
             if (t.mSerializable)
             {
                 const std::string& callbackName = std::get<std::string>(t.mCallback);
@@ -728,11 +741,29 @@ namespace LuaUtil
                 if (it == script.mRegisteredCallbacks.end())
                     throw std::logic_error("Callback '" + callbackName + "' doesn't exist");
                 LuaUtil::call({ this, t.mScriptId }, it->second, t.mArg);
+                const double elapsed = scriptPerfElapsedMs(start, std::chrono::steady_clock::now());
+                if (elapsed >= scriptHandlerPerfThresholdMs)
+                {
+                    Log(Debug::Info) << "[Perf] Lua handler spike"
+                                     << " container=" << mNamePrefix
+                                     << " script=" << scriptPath(t.mScriptId)
+                                     << " handler=timer:" << callbackName
+                                     << " ms=" << elapsed;
+                }
             }
             else
             {
                 int64_t id = std::get<int64_t>(t.mCallback);
                 LuaUtil::call({ this, t.mScriptId }, script.mTemporaryCallbacks.at(id));
+                const double elapsed = scriptPerfElapsedMs(start, std::chrono::steady_clock::now());
+                if (elapsed >= scriptHandlerPerfThresholdMs)
+                {
+                    Log(Debug::Info) << "[Perf] Lua handler spike"
+                                     << " container=" << mNamePrefix
+                                     << " script=" << scriptPath(t.mScriptId)
+                                     << " handler=timer:temporary"
+                                     << " ms=" << elapsed;
+                }
                 script.mTemporaryCallbacks.erase(id);
             }
         }

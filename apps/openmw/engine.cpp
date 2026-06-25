@@ -176,6 +176,82 @@ namespace
         for (osg::Camera* camera : cameras)
             camera->getStats()->report(stream, frameNumber);
     }
+
+#ifdef BUILD_MULTIPLAYER
+    constexpr double clientFrameHitchThresholdMs = 30.0;
+    constexpr double clientFrameHitchLogIntervalSec = 1.0;
+
+    struct ClientFrameTimings
+    {
+        double input = 0.0;
+        double network = 0.0;
+        double sound = 0.0;
+        double luaSync = 0.0;
+        double state = 0.0;
+        double script = 0.0;
+        double mechanics = 0.0;
+        double physics = 0.0;
+        double world = 0.0;
+        double gui = 0.0;
+        double postUpdate = 0.0;
+        double maintenance = 0.0;
+        double viewerUpdate = 0.0;
+        double focus = 0.0;
+        double luaAllow = 0.0;
+        double render = 0.0;
+        double luaFinish = 0.0;
+    };
+
+    double elapsedMs(const osg::Timer& timer, osg::Timer_t start, osg::Timer_t end)
+    {
+        return timer.delta_s(start, end) * 1000.0;
+    }
+
+    void logClientFrameHitch(const osg::Timer& timer, osg::Timer_t endTick, unsigned frameNumber, float frametime,
+        int state, bool paused, double totalMs, const ClientFrameTimings& timings)
+    {
+        static osg::Timer_t lastLogTick = 0;
+        static unsigned suppressedHitches = 0;
+
+        if (totalMs < clientFrameHitchThresholdMs)
+            return;
+
+        if (lastLogTick != 0 && timer.delta_s(lastLogTick, endTick) < clientFrameHitchLogIntervalSec)
+        {
+            ++suppressedHitches;
+            return;
+        }
+
+        Log(Debug::Info) << "[Perf] Client frame hitch"
+                         << " frame=" << frameNumber
+                         << " totalMs=" << totalMs
+                         << " frametimeMs=" << (frametime * 1000.0f)
+                         << " state=" << state
+                         << " paused=" << paused
+                         << " mpConnected=" << mwmp::Main::isConnected()
+                         << " inputMs=" << timings.input
+                         << " networkMs=" << timings.network
+                         << " soundMs=" << timings.sound
+                         << " luaSyncMs=" << timings.luaSync
+                         << " stateMs=" << timings.state
+                         << " scriptMs=" << timings.script
+                         << " mechanicsMs=" << timings.mechanics
+                         << " physicsMs=" << timings.physics
+                         << " worldMs=" << timings.world
+                         << " guiMs=" << timings.gui
+                         << " postUpdateMs=" << timings.postUpdate
+                         << " maintenanceMs=" << timings.maintenance
+                         << " viewerUpdateMs=" << timings.viewerUpdate
+                         << " focusMs=" << timings.focus
+                         << " luaAllowMs=" << timings.luaAllow
+                         << " renderMs=" << timings.render
+                         << " luaFinishMs=" << timings.luaFinish
+                         << " suppressed=" << suppressedHitches;
+
+        suppressedHitches = 0;
+        lastLogTick = endTick;
+    }
+#endif
 }
 
 void OMW::Engine::executeLocalScripts()
@@ -199,6 +275,20 @@ bool OMW::Engine::frame(unsigned frameNumber, float frametime)
 
     mEnvironment.setFrameDuration(frametime);
 
+    bool paused = false;
+
+#ifdef BUILD_MULTIPLAYER
+    ClientFrameTimings hitchTimings;
+    const osg::Timer_t hitchFrameStart = timer->tick();
+    osg::Timer_t hitchPhaseStart = hitchFrameStart;
+    auto markHitchPhase = [&](double& bucket) {
+        const osg::Timer_t now = timer->tick();
+        bucket += elapsedMs(*timer, hitchPhaseStart, now);
+        hitchPhaseStart = now;
+    };
+    int hitchState = static_cast<int>(mStateManager->getState());
+#endif
+
     try
     {
         // update input
@@ -206,6 +296,9 @@ bool OMW::Engine::frame(unsigned frameNumber, float frametime)
             ScopedProfile<UserStatsType::Input> profile(frameStart, frameNumber, *timer, *stats);
             mInputManager->update(frametime, false);
         }
+#ifdef BUILD_MULTIPLAYER
+        markHitchPhase(hitchTimings.input);
+#endif
 
         // Keep the MP network tick alive even when the window is not visible.
         // The GNS connection must keep polling regardless of window focus/minimize
@@ -214,6 +307,7 @@ bool OMW::Engine::frame(unsigned frameNumber, float frametime)
 #ifdef BUILD_MULTIPLAYER
         if (mwmp::Main::isInitialised())
             mwmp::Main::get().frame(frametime);
+        markHitchPhase(hitchTimings.network);
 #endif
 
         // When the window is minimized, pause the game. Currently this *has* to be here to work around a MyGUI bug.
@@ -235,6 +329,9 @@ bool OMW::Engine::frame(unsigned frameNumber, float frametime)
             if (mUseSound)
                 mSoundManager->update(frametime);
         }
+#ifdef BUILD_MULTIPLAYER
+        markHitchPhase(hitchTimings.sound);
+#endif
 
         {
             ScopedProfile<UserStatsType::LuaSyncUpdate> profile(frameStart, frameNumber, *timer, *stats);
@@ -242,14 +339,21 @@ bool OMW::Engine::frame(unsigned frameNumber, float frametime)
             // It applies to the game world queued changes from the previous frame.
             mLuaManager->synchronizedUpdate();
         }
+#ifdef BUILD_MULTIPLAYER
+        markHitchPhase(hitchTimings.luaSync);
+#endif
 
         // update game state
         {
             ScopedProfile<UserStatsType::State> profile(frameStart, frameNumber, *timer, *stats);
             mStateManager->update(frametime);
         }
+#ifdef BUILD_MULTIPLAYER
+        markHitchPhase(hitchTimings.state);
+        hitchState = static_cast<int>(mStateManager->getState());
+#endif
 
-        bool paused = mWorld->getTimeManager()->isPaused();
+        paused = mWorld->getTimeManager()->isPaused();
 
 #ifdef BUILD_MULTIPLAYER
         // In multiplayer the server is the authoritative simulation clock and
@@ -291,6 +395,9 @@ bool OMW::Engine::frame(unsigned frameNumber, float frametime)
                 }
             }
         }
+#ifdef BUILD_MULTIPLAYER
+        markHitchPhase(hitchTimings.script);
+#endif
 
         // update mechanics
         {
@@ -313,6 +420,9 @@ bool OMW::Engine::frame(unsigned frameNumber, float frametime)
                     mStateManager->endGame();
             }
         }
+#ifdef BUILD_MULTIPLAYER
+        markHitchPhase(hitchTimings.mechanics);
+#endif
 
         // update physics
         {
@@ -323,6 +433,9 @@ bool OMW::Engine::frame(unsigned frameNumber, float frametime)
                 mWorld->updatePhysics(frametime, paused, frameStart, frameNumber, *stats);
             }
         }
+#ifdef BUILD_MULTIPLAYER
+        markHitchPhase(hitchTimings.physics);
+#endif
 
         // update world
         {
@@ -333,18 +446,27 @@ bool OMW::Engine::frame(unsigned frameNumber, float frametime)
                 mWorld->update(frametime, paused);
             }
         }
+#ifdef BUILD_MULTIPLAYER
+        markHitchPhase(hitchTimings.world);
+#endif
 
         // update GUI
         {
             ScopedProfile<UserStatsType::Gui> profile(frameStart, frameNumber, *timer, *stats);
             mWindowManager->update(frametime);
         }
+#ifdef BUILD_MULTIPLAYER
+        markHitchPhase(hitchTimings.gui);
+#endif
 
     }
     catch (const std::exception& e)
     {
         Log(Debug::Error) << "Error in frame: " << e.what();
     }
+#ifdef BUILD_MULTIPLAYER
+    markHitchPhase(hitchTimings.postUpdate);
+#endif
 
     const bool reportResource = stats->collectStats("resource");
 
@@ -370,22 +492,43 @@ bool OMW::Engine::frame(unsigned frameNumber, float frametime)
     }
 
     mStereoManager->updateSettings(Settings::camera().mNearClip, Settings::camera().mViewingDistance);
+#ifdef BUILD_MULTIPLAYER
+    markHitchPhase(hitchTimings.maintenance);
+#endif
 
     mViewer->eventTraversal();
     mViewer->updateTraversal();
+#ifdef BUILD_MULTIPLAYER
+    markHitchPhase(hitchTimings.viewerUpdate);
+#endif
 
     // update focus object for GUI
     {
         ScopedProfile<UserStatsType::Focus> profile(frameStart, frameNumber, *timer, *stats);
         mWorld->updateFocusObject();
     }
+#ifdef BUILD_MULTIPLAYER
+    markHitchPhase(hitchTimings.focus);
+#endif
 
     // if there is a separate Lua thread, it starts the update now
     mLuaWorker->allowUpdate(frameStart, frameNumber, *stats);
+#ifdef BUILD_MULTIPLAYER
+    markHitchPhase(hitchTimings.luaAllow);
+#endif
 
     mViewer->renderingTraversals();
+#ifdef BUILD_MULTIPLAYER
+    markHitchPhase(hitchTimings.render);
+#endif
 
     mLuaWorker->finishUpdate(frameStart, frameNumber, *stats);
+#ifdef BUILD_MULTIPLAYER
+    markHitchPhase(hitchTimings.luaFinish);
+    const osg::Timer_t hitchEnd = timer->tick();
+    logClientFrameHitch(*timer, hitchEnd, frameNumber, frametime, hitchState, paused,
+        elapsedMs(*timer, hitchFrameStart, hitchEnd), hitchTimings);
+#endif
 
     return true;
 }

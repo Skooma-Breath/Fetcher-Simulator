@@ -4075,7 +4075,8 @@ void MPServer::handleCharacterSelect(ConnectedClient& c, const uint8_t* data, si
                 }
                 c.dbCharacterId      = rec->characterId;
                 c.dbChargenCompletePending = rec->isNew;
-                cdPkt.isNewCharacter = false;
+                cdPkt.isNewCharacter = rec->isNew;
+                c.player.charGenComplete = !rec->isNew;
                 if (rec->cell.empty())
                 {
                     applyDefaultSpawn(cdPkt);
@@ -4100,7 +4101,7 @@ void MPServer::handleCharacterSelect(ConnectedClient& c, const uint8_t* data, si
                 cdPkt.birthSign = rec->birthSign;
                 cdPkt.classData = rec->classData;
 
-                if (rec->hasSavedInventory)
+                if (!rec->isNew && rec->hasSavedInventory)
                 {
                     c.player.inventoryChanges.action = BasePlayer::InventoryChanges::Action::Set;
                     c.player.inventoryChanges.items = mPlayerDb->loadCharacterInventory(rec->characterId);
@@ -4110,7 +4111,7 @@ void MPServer::handleCharacterSelect(ConnectedClient& c, const uint8_t* data, si
                     sendSavedInventory = true;
                 }
 
-                if (rec->hasSavedEquipment)
+                if (!rec->isNew && rec->hasSavedEquipment)
                 {
                     for (auto& slotEntry : c.player.equipment)
                         slotEntry.item = {};
@@ -4153,7 +4154,7 @@ void MPServer::handleCharacterSelect(ConnectedClient& c, const uint8_t* data, si
                     }
                 }
 
-                if (rec->hasSavedStats && mPlayerDb->loadCharacterStats(rec->characterId, c.player))
+                if (!rec->isNew && rec->hasSavedStats && mPlayerDb->loadCharacterStats(rec->characterId, c.player))
                 {
                     cdPkt.hasSavedStats = true;
                     cdPkt.dynamicStats = c.player.dynamicStats;
@@ -4182,6 +4183,13 @@ void MPServer::handleCharacterSelect(ConnectedClient& c, const uint8_t* data, si
                                  << "' selected for " << c.name
                                  << " (dbNew=" << rec->isNew
                                  << ", responseNew=" << cdPkt.isNewCharacter << ")";
+                if (rec->isNew)
+                {
+                    Log(Debug::Info) << "[Server] Resuming incomplete chargen for '" << sel.charName
+                                     << "' race=" << rec->race
+                                     << " class=" << rec->className
+                                     << " birthSign=" << rec->birthSign;
+                }
             }
             mPlayerDb->touch(c.dbCharacterId);
             mLua.setPlayerMarks(c.guid, mPlayerDb->loadCharacterMarks(c.dbCharacterId));
@@ -4496,6 +4504,19 @@ void MPServer::handlePlayerCellChange(ConnectedClient& c, const uint8_t* data, s
 
     const std::string newCell = makeCellKey(c.player.cell);
     Log(Debug::Info) << "[Server] " << c.name << " → cell: " << newCell;
+
+    if (oldCell == newCell)
+    {
+        Log(Debug::Verbose) << "[Server] Ignoring same-cell PlayerCellChange side effects for "
+                            << c.name << " cell=" << newCell
+                            << " sequence=" << cellChangeSequence;
+
+        PacketPlayerPosition positionPacket;
+        positionPacket.setPlayer(&c.player);
+        broadcastToAll(positionPacket.encode(cellChangeSequence), c.conn);
+        c.player.position.isTeleporting = false;
+        return;
+    }
 
     syncLuaSnapshot();
     mLua.onPlayerCellChange(c.guid, c.name, newCell, oldCell);

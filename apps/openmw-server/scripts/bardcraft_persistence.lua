@@ -190,6 +190,44 @@ local function copyRelayValue(value, depth)
     return copy
 end
 
+local function shouldDropHighChurnRelayBeforeCopy(guid, sourceCell, session, eventType)
+    if not highChurnPerformanceEvents[eventType] then
+        return false
+    end
+
+    if not session then
+        return true
+    end
+
+    local receiverCount = 0
+    local ackedCount = 0
+    for _, target in ipairs(mp.getPlayers()) do
+        local targetGuid = tonumber(target.guid)
+        if targetGuid and targetGuid ~= tonumber(guid) and playerCellKey(target) == sourceCell then
+            receiverCount = receiverCount + 1
+            if session.acked and session.acked[targetGuid] then
+                ackedCount = ackedCount + 1
+            else
+                return false
+            end
+        end
+    end
+
+    session.suppressedHighChurn = (tonumber(session.suppressedHighChurn) or 0) + receiverCount
+    if not session.highChurnFastDropLogged then
+        session.highChurnFastDropLogged = true
+        mp.log(string.format(
+            "[bardcraft] performance session fast-dropping high churn session=%s event=%s reason=%s receivers=%d acked=%d",
+            tostring(session.key),
+            tostring(eventType),
+            receiverCount == 0 and "no-receivers" or "receivers-already-session-acked",
+            receiverCount,
+            ackedCount))
+    end
+
+    return true
+end
+
 local function runtimeSection()
     return mp.storage.globalSection(RUNTIME_NAMESPACE)
 end
@@ -2387,6 +2425,12 @@ local function relayBardcraftPerformanceEvent(guid, data)
     end
 
     local sourceCell = playerCellKey(source)
+    local sessionKey = performanceSessionKey(guid, data.actorId)
+    local session = activePerformanceSessions[sessionKey]
+    if shouldDropHighChurnRelayBeforeCopy(guid, sourceCell, session, eventType) then
+        return
+    end
+
     local relayEvent = copyRelayValue(data.event, 0)
     if type(relayEvent) ~= "table" or type(relayEvent.type) ~= "string" then
         mp.log(string.format(
@@ -2398,8 +2442,6 @@ local function relayBardcraftPerformanceEvent(guid, data)
     end
 
     local payload = flattenBardcraftPerformancePayload(guid, source, data, relayEvent)
-    local sessionKey = performanceSessionKey(guid, data.actorId)
-    local session = activePerformanceSessions[sessionKey]
     if eventType == "PerformStart" then
         if tryConvertBandUiStartToScheduled(source, payload) then
             mp.send(tonumber(guid), "BC_BardcraftPerformanceRelayAck", {
@@ -2407,6 +2449,7 @@ local function relayBardcraftPerformanceEvent(guid, data)
                 sent = 0,
                 suppressed = 0,
                 sessionKey = sessionKey,
+                actorId = tostring(data.actorId),
                 consumedForScheduledBandStart = true,
             })
             return
@@ -2508,6 +2551,7 @@ local function relayBardcraftPerformanceEvent(guid, data)
             suppressed = suppressed,
             song = relayEvent.song and relayEvent.song.title,
             sessionKey = sessionKey,
+            actorId = tostring(data.actorId),
         })
     end
 end
@@ -3517,7 +3561,11 @@ M.eventHandlers = {
         local guid = data and data.guid
         local player = guid and mp.getPlayer(guid) or nil
         local newCell = data and data.newCell or playerCellKey(player)
-        moveActivePerformanceSessionsForGuid(guid, data and data.oldCell, newCell)
+        local oldCell = data and data.oldCell or nil
+        if not guid or not newCell or oldCell == newCell then
+            return
+        end
+        moveActivePerformanceSessionsForGuid(guid, oldCell, newCell)
         sendActivePerformanceSessions(guid, newCell)
     end,
 
