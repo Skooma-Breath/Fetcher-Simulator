@@ -1,0 +1,153 @@
+[
+  {
+    "name": "Tamriel Data",
+    "author": "<a href=\"https://next.nexusmods.com/profile/CrossProjectCoordination/about-me\">Cross-Project Coordination</a>",
+    "description": "Adds game data files required by mods such as Tamriel Rebuilt, Project Cyrodiil, and Skyrim Home of the Nords.",
+    "url": "https://www.nexusmods.com/morrowind/mods/44537",
+    "category": "ModdingResources",
+    "dl_url": "",
+    "usage_notes": "<p>Download the <code>Tamriel Data (Vanilla)</code> file.</p>\n",
+    "compat": 4,
+    "dir": "TamrielData",
+    "slug": "tamriel-data",
+    "date_added": "2018-04-12T02:00:00+00:00",
+    "date_updated": "2023-12-24T14:26:47+00:00",
+    "download_info": [
+      {
+        "direct_download": null,
+        "file_name": "Tamriel Data (Vanilla)",
+        "extract_to": "TamrielData",
+        "nexus_file_id": null,
+        "pinned": false,
+        "actions": []
+      }
+    ],
+    "tags": [
+      "high-res",
+      "non-hd",
+      "openmw-lua",
+      "tamriel-data"
+    ],
+    "on_lists": [
+      "fetcher-bardcraft"
+    ],
+    "data_paths": [
+      "TamrielData/00 Data Files"
+    ],
+    "plugins": [
+      "Tamriel_Data.esm",
+      "Tamriel_Data.omwscripts"
+    ]
+  },
+  {
+    "name": "Skill Framework (OpenMW)",
+    "author": "<a href=\"https://next.nexusmods.com/profile/therealralts/about-me\">Ralts</a>",
+    "description": "OpenMW Lua framework for adding custom skills and exposing them to compatible UI mods.",
+    "url": "https://www.nexusmods.com/morrowind/mods/57765",
+    "category": "ModdingResources",
+    "dl_url": "",
+    "usage_notes": "",
+    "compat": 4,
+    "dir": "SkillFrameworkOpenMW",
+    "slug": "skill-framework-openmw",
+    "date_added": "2026-06-26T00:00:00+00:00",
+    "date_updated": "2026-06-26T00:00:00+00:00",
+    "download_info": [
+      {
+        "direct_download": null,
+        "file_name": "Skill Framework",
+        "extract_to": "SkillFrameworkOpenMW",
+        "nexus_file_id": null,
+        "pinned": false,
+        "actions": []
+      }
+    ],
+    "tags": [
+      "openmw-lua"
+    ],
+    "on_lists": [
+      "fetcher-bardcraft"
+    ],
+    "data_paths": [
+      "SkillFrameworkOpenMW"
+    ],
+    "plugins": [
+      "SkillFramework.omwscripts"
+    ]
+  },
+  {
+    "name": "Stats Window Extender (OpenMW)",
+    "author": "<a href=\"https://next.nexusmods.com/profile/therealralts/about-me\">Ralts</a>",
+    "description": "A replacement for the Stats window with built-in tweaks and an API for modders to add new content.",
+    "url": "https://www.nexusmods.com/morrowind/mods/57727",
+    "category": "ModdingResources",
+    "dl_url": "",
+    "usage_notes": "",
+    "compat": 4,
+    "dir": "StatsWindowExtenderOpenMW",
+    "slug": "stats-window-extender-openmw",
+    "date_added": "2025-11-21T15:50:00+00:00",
+    "date_updated": "2025-11-21T15:50:00+00:00",
+    "download_info": [
+      {
+        "direct_download": null,
+        "file_name": "Stats Window Extender",
+        "extract_to": "StatsWindowExtenderOpenMW",
+        "nexus_file_id": null,
+        "pinned": false,
+        "actions": []
+      }
+    ],
+    "tags": [
+      "openmw-lua"
+    ],
+    "on_lists": [
+      "fetcher-bardcraft"
+    ],
+    "data_paths": [
+      "StatsWindowExtenderOpenMW"
+    ],
+    "plugins": [
+      "StatsWindow.ESP",
+      "StatsWindow.omwscripts"
+    ]
+  },
+  {
+    "name": "Bardcraft (OpenMW)",
+    "author": "<a href=\"https://next.nexusmods.com/profile/therealralts/about-me\">Ralts</a>",
+    "description": "Playable instruments, songwriting, performances, and bard progression for OpenMW.",
+    "url": "https://www.nexusmods.com/morrowind/mods/56814",
+    "category": "Gameplay",
+    "dl_url": "",
+    "usage_notes": "Requires Tamriel Data, Skill Framework, and Stats Window Extender.",
+    "compat": 4,
+    "dir": "BardcraftOpenMW",
+    "slug": "bardcraft-openmw",
+    "date_added": "2026-06-26T00:00:00+00:00",
+    "date_updated": "2026-06-26T00:00:00+00:00",
+    "download_info": [
+      {
+        "direct_download": null,
+        "file_name": "Bardcraft",
+        "extract_to": "BardcraftOpenMW",
+        "nexus_file_id": null,
+        "pinned": false,
+        "actions": []
+      }
+    ],
+    "tags": [
+      "openmw-lua",
+      "bardcraft"
+    ],
+    "on_lists": [
+      "fetcher-bardcraft"
+    ],
+    "data_paths": [
+      "BardcraftOpenMW"
+    ],
+    "plugins": [
+      "Bardcraft.ESP",
+      "Bardcraft.omwscripts"
+    ]
+  }
+]

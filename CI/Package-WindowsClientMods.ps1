@@ -201,6 +201,11 @@ Set-Content -LiteralPath $settingsCfg -Encoding ASCII -Value $settingsLines
 $userSettingsCfg = Join-Path $userConfigPath "settings.cfg"
 Set-Content -LiteralPath $userSettingsCfg -Encoding ASCII -Value $settingsLines
 
+$releaseRootFiles = Join-Path $repoRoot "CI\release-root"
+if (Test-Path -LiteralPath $releaseRootFiles) {
+    Copy-DirectoryContents -Source $releaseRootFiles -Destination $installPath
+}
+
 $readmePath = Join-Path $installPath "TESTER_PACKAGE_README.txt"
 Set-Content -LiteralPath $readmePath -Encoding ASCII -Value @(
     "OpenMW tester package",
