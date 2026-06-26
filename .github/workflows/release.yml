@@ -35,4 +35,6 @@ jobs:
       release-name: ${{ github.ref == 'refs/heads/main' && 'Fetcher-Simulator' || '' }}
       release-zip-name: ${{ github.ref == 'refs/heads/main' && 'fetcher-simulator.zip' || '' }}
       release-include-installer: ${{ github.ref != 'refs/heads/main' }}
+      mod-bundle-release-tag: ${{ github.ref == 'refs/heads/main' && 'openmw-client-mods-mp-clients' || '' }}
+      mod-bundle-asset: openmw-client-mods.zip
     secrets: inherit
