@@ -129,16 +129,16 @@ openmw.cfg next to the original file.
 If the BAT reports missing files, install that mod or add the correct data=
 folder to openmw.cfg, then run the BAT again.
 
-Required OpenMW animation setting
----------------------------------
+OpenMW animation settings
+-------------------------
 
-Bardcraft needs additional animation sources.
+This package enables the required Bardcraft settings automatically in both
+settings.cfg files:
 
-Open the OpenMW launcher, then enable:
-
-   Settings -> Visuals -> Animations -> Use Additional Animation Sources
-
-Smooth Animation Transitions is also recommended.
+   shield sheathing = true
+   smooth animation transitions = true
+   use additional anim sources = true
+   weapon sheathing = true
 
 Troubleshooting
 ---------------
