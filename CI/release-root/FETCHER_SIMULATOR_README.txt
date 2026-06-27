@@ -17,6 +17,16 @@ Required downloads
 Bardcraft's Nexus permissions do not allow reuploading the mod archive to other
 sites. Do not ask another player to send you Bardcraft. Download it from Nexus.
 
+First-time setup
+----------------
+
+1. Run openmw-wizard.exe from this folder.
+2. Point the wizard at your Morrowind installation and finish its setup.
+3. Return to this folder and run Install-Fetcher-Bardcraft-With-UMO.bat.
+
+The Bardcraft installer stops before downloading mods if Morrowind.esm is not
+registered in this portable install's openmw.cfg.
+
 UMO install path
 ----------------
 
@@ -41,6 +51,12 @@ The helper downloads umo.exe and tes3cmd.exe into this folder if they are not
 already present, then uses the included fetcher-bardcraft-umo.json modlist. If
 that file is missing, the helper tries to download it from the Fetcher Simulator
 GitHub prerelease.
+
+After UMO installs the Nexus version of Bardcraft, the helper downloads the
+small Fetcher Bardcraft multiplayer compatibility patch from its own GitHub
+prerelease. It verifies the patch checksum and the installed Bardcraft scripts
+before applying anything. Unsupported or locally modified Bardcraft versions
+are left unchanged and reported as an error.
 
 The helper tells UMO to install the mods inside this package under:
 

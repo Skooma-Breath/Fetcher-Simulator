@@ -32,7 +32,6 @@ if (-not (Test-Path -LiteralPath $cfgPath)) {
 
 $existingLines = @(Get-Content -LiteralPath $cfgPath)
 $backupPath = Join-Path $root ("openmw.cfg.before-fetcher-public-test-{0}.bak" -f (Get-Date -Format "yyyyMMdd-HHmmss"))
-Copy-Item -LiteralPath $cfgPath -Destination $backupPath -Force
 
 $dataBeginMarker = "# BEGIN Fetcher Simulator UMO data paths"
 $dataEndMarker = "# END Fetcher Simulator UMO data paths"
@@ -153,7 +152,31 @@ foreach ($content in $requiredContent) {
 $newLines.Add($endMarker)
 $newLines.Add("")
 
-Set-Content -LiteralPath $cfgPath -Value $newLines -Encoding ASCII
+$stagedCfgPath = Join-Path $root (".openmw.cfg.fetcher-{0}.tmp" -f [Guid]::NewGuid().ToString("N"))
+try {
+    Set-Content -LiteralPath $stagedCfgPath -Value $newLines -Encoding ASCII
+    $configWritten = $false
+    $lastWriteError = $null
+    for ($attempt = 1; $attempt -le 8; ++$attempt) {
+        try {
+            [System.IO.File]::Replace($stagedCfgPath, $cfgPath, $backupPath, $true)
+            $configWritten = $true
+            break
+        }
+        catch [System.IO.IOException] {
+            $lastWriteError = $_.Exception
+            Start-Sleep -Milliseconds 250
+        }
+    }
+    if (-not $configWritten) {
+        throw "Could not update $cfgPath after repeated attempts. Close OpenMW, the launcher, and any editor using openmw.cfg, then run this script again. Details: $($lastWriteError.Message)"
+    }
+}
+finally {
+    if (Test-Path -LiteralPath $stagedCfgPath) {
+        Remove-Item -LiteralPath $stagedCfgPath -Force
+    }
+}
 
 function Convert-ToDataPath {
     param([string] $Value)

@@ -8,7 +8,13 @@ param(
     [bool] $DownloadUmoIfMissing = $true,
     [string] $Tes3cmdPath = "",
     [string] $Tes3cmdUrl = "https://gitlab.com/modding-openmw/tes3cmd/-/jobs/artifacts/master/raw/tes3cmd.0.40-PRE-RELEASE-2-win.zip?job=build_win",
-    [bool] $DownloadTes3cmdIfMissing = $true
+    [bool] $DownloadTes3cmdIfMissing = $true,
+    [bool] $RequireMorrowindData = $true,
+    [bool] $ApplyBardcraftMultiplayerPatch = $true,
+    [bool] $ApplyPublicTestConfig = $true,
+    [string] $BardcraftPatchAssetName = "fetcher-bardcraft-mp-patch-v1.zip",
+    [string] $BardcraftPatchUrl = "https://github.com/Skooma-Breath/Fetcher-Simulator/releases/download/fetcher-bardcraft-mp-patch-v1/fetcher-bardcraft-mp-patch-v1.zip",
+    [string] $BardcraftPatchSha256 = "93763186d59d425afadbe0e18f3e95265b4202e4b392b3d2dda304063ddc7e70"
 )
 
 $ErrorActionPreference = "Stop"
@@ -226,6 +232,112 @@ function Invoke-Checked {
     }
 }
 
+function Test-MorrowindDataConfigured {
+    $cfgPath = Join-Path $root "openmw.cfg"
+    if (-not (Test-Path -LiteralPath $cfgPath -PathType Leaf)) {
+        return $false
+    }
+
+    foreach ($line in Get-Content -LiteralPath $cfgPath) {
+        if ($line -notmatch "^\s*data\s*=\s*(.+?)\s*$") {
+            continue
+        }
+
+        $dataPath = $Matches[1].Trim()
+        if (($dataPath.StartsWith('"') -and $dataPath.EndsWith('"')) -or
+            ($dataPath.StartsWith("'") -and $dataPath.EndsWith("'"))) {
+            $dataPath = $dataPath.Substring(1, $dataPath.Length - 2)
+        }
+        $dataPath = [Environment]::ExpandEnvironmentVariables($dataPath)
+        if (-not [System.IO.Path]::IsPathRooted($dataPath)) {
+            $dataPath = Join-Path $root $dataPath
+        }
+
+        if (Test-Path -LiteralPath (Join-Path $dataPath "Morrowind.esm") -PathType Leaf) {
+            return $true
+        }
+    }
+
+    return $false
+}
+
+function Resolve-BardcraftDataRoot {
+    $parsedMods = Get-Content -Raw -LiteralPath $ModListFile | ConvertFrom-Json
+    if ($parsedMods -is [System.Array]) {
+        $mods = @($parsedMods | ForEach-Object { $_ })
+    }
+    else {
+        $mods = @($parsedMods)
+    }
+    $bardcraft = $mods |
+        Where-Object { @($_.plugins) -contains "Bardcraft.ESP" } |
+        Select-Object -First 1
+    if (-not $bardcraft) {
+        throw "The UMO modlist does not define the Bardcraft.ESP data root."
+    }
+
+    foreach ($dataPath in @($bardcraft.data_paths)) {
+        if ([string]::IsNullOrWhiteSpace([string]$dataPath)) {
+            continue
+        }
+        $candidate = Join-Path (Join-Path (Join-Path $UmoBasePath $ModListName) ([string]$bardcraft.category)) ([string]$dataPath)
+        if ((Test-Path -LiteralPath (Join-Path $candidate "Bardcraft.ESP") -PathType Leaf) -and
+            (Test-Path -LiteralPath (Join-Path $candidate "scripts\Bardcraft") -PathType Container)) {
+            return (Resolve-Path -LiteralPath $candidate).Path
+        }
+    }
+
+    throw "UMO finished, but the installed Bardcraft data root could not be found under $UmoBasePath\$ModListName."
+}
+
+function Install-BardcraftMultiplayerPatch {
+    param([Parameter(Mandatory = $true)][string] $BardcraftDataRoot)
+
+    if ([string]::IsNullOrWhiteSpace($BardcraftPatchSha256)) {
+        throw "BardcraftPatchSha256 must be set when the multiplayer patch is enabled."
+    }
+
+    $patchRoot = Join-Path $umoWorkRoot "bardcraft-mp-patch"
+    $extractRoot = Join-Path $patchRoot "extracted"
+    $zipPath = Join-Path $patchRoot $BardcraftPatchAssetName
+    New-Item -ItemType Directory -Force -Path $patchRoot | Out-Null
+
+    $expectedHash = $BardcraftPatchSha256.ToLowerInvariant()
+    $downloadRequired = $true
+    if (Test-Path -LiteralPath $zipPath -PathType Leaf) {
+        $downloadRequired = (Get-FileHash -LiteralPath $zipPath -Algorithm SHA256).Hash.ToLowerInvariant() -ne $expectedHash
+    }
+
+    if ($downloadRequired) {
+        Write-Host "Downloading Fetcher Bardcraft multiplayer patch:"
+        Write-Host "  $BardcraftPatchUrl"
+        Invoke-WebRequest -UseBasicParsing -Uri $BardcraftPatchUrl -OutFile $zipPath
+    }
+
+    $actualHash = (Get-FileHash -LiteralPath $zipPath -Algorithm SHA256).Hash.ToLowerInvariant()
+    if ($actualHash -ne $expectedHash) {
+        throw "Downloaded Bardcraft patch checksum mismatch. Expected $expectedHash but got $actualHash."
+    }
+
+    if (Test-Path -LiteralPath $extractRoot) {
+        Remove-Item -LiteralPath $extractRoot -Recurse -Force
+    }
+    New-Item -ItemType Directory -Force -Path $extractRoot | Out-Null
+    Expand-Archive -LiteralPath $zipPath -DestinationPath $extractRoot -Force
+
+    $appliers = @(Get-ChildItem -LiteralPath $extractRoot -Recurse -File -Filter "Apply-Fetcher-Bardcraft-MPPatch.ps1")
+    if ($appliers.Count -ne 1) {
+        throw "Expected exactly one Bardcraft patch applier in $zipPath, found $($appliers.Count)."
+    }
+
+    Write-Host "Applying Fetcher Bardcraft multiplayer compatibility patch..."
+    & $appliers[0].FullName -BardcraftDataRoot $BardcraftDataRoot
+}
+
+if ($RequireMorrowindData -and -not (Test-MorrowindDataConfigured)) {
+    throw "Morrowind.esm is not configured for this portable install. Run openmw-wizard.exe, point it at your Morrowind installation, then run this installer again."
+}
+
 $umo = Resolve-UmoPath $UmoPath
 $tes3cmd = Resolve-Tes3cmdPath $Tes3cmdPath
 $umoWorkRoot = Join-Path $root "_fetcher_umo"
@@ -314,14 +426,22 @@ Invoke-Checked -Description "umo install $ModListName" -Command {
     & $umo install $ModListName
 }
 
-$applyConfig = Join-Path $root "Apply-Fetcher-Public-Test-Config.ps1"
-if (Test-Path -LiteralPath $applyConfig) {
+if ($ApplyBardcraftMultiplayerPatch) {
     Write-Host ""
-    Write-Host "Applying Fetcher public test OpenMW load order..."
-    & $applyConfig
+    $bardcraftDataRoot = Resolve-BardcraftDataRoot
+    Install-BardcraftMultiplayerPatch -BardcraftDataRoot $bardcraftDataRoot
 }
-else {
-    Write-Warning "Could not find Apply-Fetcher-Public-Test-Config.ps1. Run Apply-Fetcher-Public-Test-Config.bat manually after installing mods."
+
+if ($ApplyPublicTestConfig) {
+    $applyConfig = Join-Path $root "Apply-Fetcher-Public-Test-Config.ps1"
+    if (Test-Path -LiteralPath $applyConfig) {
+        Write-Host ""
+        Write-Host "Applying Fetcher public test OpenMW load order..."
+        & $applyConfig
+    }
+    else {
+        Write-Warning "Could not find Apply-Fetcher-Public-Test-Config.ps1. Run Apply-Fetcher-Public-Test-Config.bat manually after installing mods."
+    }
 }
 
 Write-Host ""
