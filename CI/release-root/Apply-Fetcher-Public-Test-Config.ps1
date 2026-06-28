@@ -13,8 +13,6 @@ $requiredContent = @(
     "surf_mesa_mw.omwaddon",
     "surf_utopia_mw.omwaddon",
     "surf_kitsune.omwaddon",
-    "surf_deathstar.omwaddon",
-    "surf_deathstar.omwscripts",
     "surf_kitsune.omwscripts",
     "surf_kitsune2.omwaddon",
     "mp_phase7_test.omwscripts",

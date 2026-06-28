@@ -11,7 +11,6 @@ local destructibleSpawners = require("destructible_spawners")
 local speechCommands = require("speech_commands")
 local surfCommands = require("surf_commands")
 local surfTimer = require("surf_timer")
-local bardcraftPersistence = require("bardcraft_persistence")
 
 ------------------------------------------------------------------------
 -- Config
@@ -1535,15 +1534,6 @@ local function handleChat(player, data)
         })
         if spawnerHandled ~= nil then
             return spawnerHandled
-        end
-
-        if bardcraftPersistence.interface and bardcraftPersistence.interface.handleChat then
-            local bardcraftHandled = bardcraftPersistence.interface.handleChat(player, data, {
-                commandPrefix = COMMAND_PREFIX,
-            })
-            if bardcraftHandled ~= nil then
-                return bardcraftHandled
-            end
         end
 
         local adminUiHandled = adminUiService.handleChat(player, data, {

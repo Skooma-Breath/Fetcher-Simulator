@@ -1,8 +1,7 @@
 local mp = require("mp")
+local config = require("config")
 
-local M = {
-    interfaceName = "BardcraftPersistence",
-}
+local M = {}
 
 local STORAGE_NAMESPACE = "Bardcraft"
 local STORAGE_KEYS = {
@@ -11,12 +10,6 @@ local STORAGE_KEYS = {
     "troupeRecords",
     "customSongs",
 }
-local RUNTIME_NAMESPACE = "BardcraftRuntime"
-local RUNTIME_ACTIVE_SESSIONS_KEY = "activePerformanceSessions"
-local RUNTIME_ACTIVE_BANDS_KEY = "activeBands"
-local RUNTIME_PENDING_BAND_STARTS_KEY = "pendingBandStarts"
-local RUNTIME_DISBANDED_BANDS_KEY = "disbandedBands"
-
 local MAX_HOSTED_MIDI_BYTES_PER_RESPONSE = 512 * 1024
 local KNOWN_SONGS_PER_BOOTSTRAP_CHUNK = 40
 local CUSTOM_SONG_ENCODED_CHARS_PER_CHUNK = 8192
@@ -115,6 +108,55 @@ local function trim(value)
     return tostring(value or ""):gsub("^%s+", ""):gsub("%s+$", "")
 end
 
+local rawBardcraftConfig = type(config.Bardcraft) == "table" and config.Bardcraft or {}
+local bardcraftNetworkPolicy = {
+    requireLocalSongHash = rawBardcraftConfig.requireLocalSongHash ~= false,
+    communitySongSharingMode = rawBardcraftConfig.communitySongSharingMode == true,
+    communitySongPackUrl = trim(rawBardcraftConfig.communitySongPackUrl),
+}
+bardcraftNetworkPolicy.allowServerHostedMidiDownloads = bardcraftNetworkPolicy.communitySongSharingMode
+    and rawBardcraftConfig.allowServerHostedMidiDownloads == true
+bardcraftNetworkPolicy.allowPlayerSongUpload = bardcraftNetworkPolicy.communitySongSharingMode
+    and rawBardcraftConfig.allowPlayerSongUpload == true
+bardcraftNetworkPolicy.allowImportedMidiLiveRelayFallback = bardcraftNetworkPolicy.communitySongSharingMode
+    and rawBardcraftConfig.allowImportedMidiLiveRelayFallback == true
+
+local function copyNetworkPolicy()
+    return {
+        requireLocalSongHash = bardcraftNetworkPolicy.requireLocalSongHash,
+        communitySongSharingMode = bardcraftNetworkPolicy.communitySongSharingMode,
+        allowServerHostedMidiDownloads = bardcraftNetworkPolicy.allowServerHostedMidiDownloads,
+        allowPlayerSongUpload = bardcraftNetworkPolicy.allowPlayerSongUpload,
+        allowImportedMidiLiveRelayFallback = bardcraftNetworkPolicy.allowImportedMidiLiveRelayFallback,
+        communitySongPackUrl = bardcraftNetworkPolicy.communitySongPackUrl,
+    }
+end
+
+local function applyNetworkPolicyFields(payload)
+    if type(payload) ~= "table" then
+        return payload
+    end
+    payload.bardcraftRequireLocalSongHash = bardcraftNetworkPolicy.requireLocalSongHash
+    payload.bardcraftCommunitySongSharingMode = bardcraftNetworkPolicy.communitySongSharingMode
+    payload.bardcraftAllowServerHostedMidiDownloads = bardcraftNetworkPolicy.allowServerHostedMidiDownloads
+    payload.bardcraftAllowPlayerSongUpload = bardcraftNetworkPolicy.allowPlayerSongUpload
+    payload.bardcraftAllowImportedMidiLiveRelayFallback = bardcraftNetworkPolicy.allowImportedMidiLiveRelayFallback
+    payload.bardcraftCommunitySongPackUrl = bardcraftNetworkPolicy.communitySongPackUrl
+    return payload
+end
+
+local function sendSongUnavailable(guid, reason, songTitle, expectedHash, actualHash)
+    if not guid then
+        return
+    end
+    mp.send(tonumber(guid), "BC_BardcraftSongUnavailable", applyNetworkPolicyFields({
+        reason = reason,
+        songTitle = songTitle,
+        expectedHash = expectedHash,
+        actualHash = actualHash,
+    }))
+end
+
 local function normalizeLookup(value)
     value = trim(value)
     if value == "" then
@@ -199,6 +241,24 @@ local function shouldDropHighChurnRelayBeforeCopy(guid, sourceCell, session, eve
         return true
     end
 
+    local sessionPayload = type(session.payload) == "table" and session.payload or {}
+    local importedSong = sessionPayload.songIsImportedMidi == true
+        or sessionPayload.songIsMpCustom == true
+        or sessionPayload.songIsServerCustom == true
+        or sessionPayload.songServerHosted == true
+    if importedSong and not bardcraftNetworkPolicy.allowImportedMidiLiveRelayFallback then
+        session.suppressedHighChurn = (tonumber(session.suppressedHighChurn) or 0) + 1
+        if not session.importedRelayPolicyDropLogged then
+            session.importedRelayPolicyDropLogged = true
+            mp.log(string.format(
+                "[bardcraft] imported midi high-churn relay disabled session=%s song=%s event=%s",
+                tostring(session.key),
+                tostring(sessionPayload.songTitle),
+                tostring(eventType)))
+        end
+        return true
+    end
+
     local receiverCount = 0
     local ackedCount = 0
     for _, target in ipairs(mp.getPlayers()) do
@@ -228,48 +288,6 @@ local function shouldDropHighChurnRelayBeforeCopy(guid, sourceCell, session, eve
     return true
 end
 
-local function runtimeSection()
-    return mp.storage.globalSection(RUNTIME_NAMESPACE)
-end
-
-local function clearActivePerformanceSessionSnapshot()
-    runtimeSection():set(RUNTIME_ACTIVE_SESSIONS_KEY, {})
-end
-
-local function clearActiveBandSnapshot()
-    runtimeSection():set(RUNTIME_ACTIVE_BANDS_KEY, {})
-end
-
-local function clearPendingScheduledBandStartSnapshot()
-    runtimeSection():set(RUNTIME_PENDING_BAND_STARTS_KEY, {})
-end
-
-local function clearDisbandedBandSnapshot()
-    runtimeSection():set(RUNTIME_DISBANDED_BANDS_KEY, {})
-end
-
-local function readDisbandedBandSnapshot()
-    local snapshot = runtimeSection():getCopy(RUNTIME_DISBANDED_BANDS_KEY) or {}
-    if type(snapshot) ~= "table" then
-        snapshot = {}
-    end
-    return snapshot
-end
-
-local function disbandedBandSnapshotValue(snapshot, leaderGuid)
-    leaderGuid = tonumber(leaderGuid)
-    if type(snapshot) ~= "table" or not leaderGuid then
-        return nil
-    end
-
-    for key, value in pairs(snapshot) do
-        if tonumber(key) == leaderGuid then
-            return value
-        end
-    end
-    return nil
-end
-
 local function disbandedBandTime(leaderGuid)
     leaderGuid = tonumber(leaderGuid)
     if not leaderGuid then
@@ -282,13 +300,6 @@ local function disbandedBandTime(leaderGuid)
         return 0
     end
 
-    local snapshot = readDisbandedBandSnapshot()
-    local value = disbandedBandSnapshotValue(snapshot, leaderGuid)
-    if value ~= nil then
-        local disbandedAt = tonumber(value) or 0
-        disbandedBandLeadersByGuid[leaderGuid] = disbandedAt
-        return disbandedAt
-    end
     return nil
 end
 
@@ -317,9 +328,6 @@ local function markBandDisbanded(leaderGuid)
 
     local disbandedAt = serverUptime()
     disbandedBandLeadersByGuid[leaderGuid] = disbandedAt
-    local snapshot = readDisbandedBandSnapshot()
-    snapshot[tostring(leaderGuid)] = disbandedAt
-    runtimeSection():set(RUNTIME_DISBANDED_BANDS_KEY, snapshot)
 end
 
 local function clearBandDisbanded(leaderGuid)
@@ -329,19 +337,6 @@ local function clearBandDisbanded(leaderGuid)
     end
 
     disbandedBandLeadersByGuid[leaderGuid] = nil
-    local snapshot = readDisbandedBandSnapshot()
-    local changed = false
-    local filtered = {}
-    for key, value in pairs(snapshot) do
-        if tonumber(key) == leaderGuid then
-            changed = true
-        else
-            filtered[key] = value
-        end
-    end
-    if changed then
-        runtimeSection():set(RUNTIME_DISBANDED_BANDS_KEY, filtered)
-    end
 end
 
 local function removeBandRuntimeStateForLeader(leaderGuid)
@@ -368,169 +363,7 @@ local function removeBandRuntimeStateForLeader(leaderGuid)
     end
 end
 
-local function writePendingScheduledBandStartSnapshot()
-    local snapshot = {}
-    for leaderGuid, pending in pairs(pendingScheduledBandStartsByLeaderGuid) do
-        if type(pending) == "table" then
-            local pendingLeaderGuid = tonumber(pending.leaderGuid) or tonumber(leaderGuid)
-            if pendingLeaderGuid and isBandDisbanded(pendingLeaderGuid) then
-                pendingScheduledBandStartsByLeaderGuid[leaderGuid] = nil
-            else
-                snapshot[tostring(leaderGuid)] = {
-                    bandSessionId = pending.bandSessionId,
-                    startServerTime = pending.startServerTime,
-                    expiresAt = pending.expiresAt,
-                    selector = pending.selector,
-                    role = pending.role,
-                    leaderGuid = pending.leaderGuid,
-                    perfType = pending.perfType,
-                }
-            end
-        end
-    end
-    runtimeSection():set(RUNTIME_PENDING_BAND_STARTS_KEY, snapshot)
-end
-
-local function loadPendingScheduledBandStartSnapshot(reason)
-    local snapshot = runtimeSection():getCopy(RUNTIME_PENDING_BAND_STARTS_KEY) or {}
-    if type(snapshot) ~= "table" then
-        return 0
-    end
-
-    local loaded = 0
-    for leaderGuid, pending in pairs(snapshot) do
-        local numericLeaderGuid = tonumber(leaderGuid)
-        if numericLeaderGuid and type(pending) == "table" then
-            local pendingLeaderGuid = tonumber(pending.leaderGuid) or numericLeaderGuid
-            if isBandDisbanded(pendingLeaderGuid) then
-                pendingScheduledBandStartsByLeaderGuid[numericLeaderGuid] = nil
-            else
-                pendingScheduledBandStartsByLeaderGuid[numericLeaderGuid] = {
-                    bandSessionId = pending.bandSessionId,
-                    startServerTime = tonumber(pending.startServerTime),
-                    expiresAt = tonumber(pending.expiresAt),
-                    selector = pending.selector,
-                    role = pending.role,
-                    leaderGuid = pendingLeaderGuid,
-                    perfType = pending.perfType,
-                }
-                loaded = loaded + 1
-            end
-        end
-    end
-    if loaded > 0 then
-        mp.log(string.format(
-            "[bardcraft] pending band start snapshot loaded reason=%s starts=%d",
-            tostring(reason),
-            loaded))
-    end
-    return loaded
-end
-
-local function writeActivePerformanceSessionSnapshot()
-    local snapshot = {}
-    for key, session in pairs(activePerformanceSessions) do
-        snapshot[key] = {
-            key = session.key,
-            sourceGuid = session.sourceGuid,
-            sourceCharacterId = session.sourceCharacterId,
-            sourceName = session.sourceName,
-            actorId = session.actorId,
-            cell = session.cell,
-            startMusicTime = session.startMusicTime,
-            serverStartTime = session.serverStartTime,
-            sessionSequence = session.sessionSequence,
-            payload = copyRelayValue(session.payload, 0),
-        }
-    end
-    runtimeSection():set(RUNTIME_ACTIVE_SESSIONS_KEY, snapshot)
-end
-
-local function writeActiveBandSnapshot()
-    local snapshot = {}
-    for leaderGuid, band in pairs(activeBandsByLeaderGuid) do
-        if bandIsOlderThanDisband(leaderGuid, band) then
-            activeBandsByLeaderGuid[leaderGuid] = nil
-        else
-            clearBandDisbanded(leaderGuid)
-            local storedMembers = {}
-            for memberGuid, member in pairs(band.members or {}) do
-                table.insert(storedMembers, {
-                    guid = tonumber(memberGuid),
-                    name = member and member.name or nil,
-                    invitedAt = member and member.invitedAt or nil,
-                    acceptedAt = member and member.acceptedAt or nil,
-                })
-            end
-            table.sort(storedMembers, function(left, right)
-                return tostring(left.guid) < tostring(right.guid)
-            end)
-            table.insert(snapshot, {
-                leaderGuid = tonumber(leaderGuid),
-                leaderName = band.leaderName,
-                createdAt = band.createdAt,
-                members = storedMembers,
-            })
-        end
-    end
-    runtimeSection():set(RUNTIME_ACTIVE_BANDS_KEY, snapshot)
-end
-
-local function loadActiveBandSnapshot(reason)
-    local snapshot = runtimeSection():getCopy(RUNTIME_ACTIVE_BANDS_KEY) or {}
-    if type(snapshot) ~= "table" then
-        return 0
-    end
-
-    local loaded = 0
-    for _, storedBand in pairs(snapshot) do
-        if type(storedBand) == "table" then
-            local leaderGuid = tonumber(storedBand.leaderGuid)
-            if leaderGuid and not bandIsOlderThanDisband(leaderGuid, storedBand) then
-                clearBandDisbanded(leaderGuid)
-                local band = activeBandsByLeaderGuid[leaderGuid]
-                if not band then
-                    band = {
-                        leaderGuid = leaderGuid,
-                        leaderName = storedBand.leaderName,
-                        members = {},
-                        createdAt = tonumber(storedBand.createdAt) or serverUptime(),
-                    }
-                    activeBandsByLeaderGuid[leaderGuid] = band
-                    loaded = loaded + 1
-                else
-                    band.leaderName = storedBand.leaderName or band.leaderName
-                end
-
-                for memberKey, storedMember in pairs(storedBand.members or {}) do
-                    if type(storedMember) == "table" then
-                        local memberGuid = tonumber(storedMember.guid or memberKey)
-                        if memberGuid then
-                            band.members[memberGuid] = {
-                                guid = memberGuid,
-                                name = storedMember.name,
-                                invitedAt = storedMember.invitedAt,
-                                acceptedAt = storedMember.acceptedAt,
-                            }
-                            bandLeaderByMemberGuid[memberGuid] = leaderGuid
-                        end
-                    end
-                end
-            end
-        end
-    end
-
-    if loaded > 0 then
-        mp.log(string.format(
-            "[bardcraft] active band snapshot loaded reason=%s leaders=%d memberLinks=%d",
-            tostring(reason),
-            tableCount(activeBandsByLeaderGuid),
-            tableCount(bandLeaderByMemberGuid)))
-    end
-    return loaded
-end
-
-local function activeBandForLeader(leaderGuid, reason, allowSnapshotRecovery)
+local function activeBandForLeader(leaderGuid)
     leaderGuid = tonumber(leaderGuid)
     if not leaderGuid then
         return nil
@@ -546,65 +379,11 @@ local function activeBandForLeader(leaderGuid, reason, allowSnapshotRecovery)
         end
     end
 
-    if allowSnapshotRecovery == false then
-        return nil
-    end
-
-    loadActiveBandSnapshot(reason)
-    band = activeBandsByLeaderGuid[leaderGuid]
-    if band then
-        if bandIsOlderThanDisband(leaderGuid, band) then
-            activeBandsByLeaderGuid[leaderGuid] = nil
-            return nil
-        end
-        clearBandDisbanded(leaderGuid)
-        mp.log(string.format(
-            "[bardcraft] active band recovered leader=%s reason=%s members=%d",
-            tostring(leaderGuid),
-            tostring(reason),
-            tableCount(band.members)))
-    end
-    return band
+    return nil
 end
 
 local function activePerformanceSessionSource()
-    if next(activePerformanceSessions) ~= nil then
-        return activePerformanceSessions
-    end
-
-    local snapshot = runtimeSection():getCopy(RUNTIME_ACTIVE_SESSIONS_KEY) or {}
-    if type(snapshot) ~= "table" then
-        return {}
-    end
-    return snapshot
-end
-
-local function ensureActivePerformanceSessionsLoaded(reason)
-    if next(activePerformanceSessions) ~= nil then
-        return 0
-    end
-
-    local snapshot = runtimeSection():getCopy(RUNTIME_ACTIVE_SESSIONS_KEY) or {}
-    if type(snapshot) ~= "table" then
-        return 0
-    end
-
-    local loaded = 0
-    for key, session in pairs(snapshot) do
-        if type(session) == "table" then
-            session.key = session.key or key
-            session.acked = session.acked or {}
-            activePerformanceSessions[tostring(key)] = session
-            loaded = loaded + 1
-        end
-    end
-    if loaded > 0 then
-        mp.log(string.format(
-            "[bardcraft] active performance session snapshot loaded reason=%s sessions=%d",
-            tostring(reason),
-            loaded))
-    end
-    return loaded
+    return activePerformanceSessions
 end
 
 local function relayField(event, key)
@@ -616,7 +395,7 @@ local function flattenBardcraftPerformancePayload(guid, source, data, event)
     local part = type(event.part) == "table" and event.part or {}
     local timeSig = type(song.timeSig) == "table" and song.timeSig or {}
 
-    return {
+    return applyNetworkPolicyFields({
         sourceGuid = guid,
         sourceName = source and source.name or nil,
         eventType = event.type,
@@ -654,14 +433,19 @@ local function flattenBardcraftPerformancePayload(guid, source, data, event)
         songLengthBars = song.lengthBars,
         songResolution = song.resolution,
         songSegmentRevision = song.segmentRevision,
+        songHash = song.contentHash,
         songIsMpCustom = song.isMpCustom == true,
         songIsServerCustom = song.isServerCustom == true,
         songServerHosted = song.serverHosted == true,
+        songIsImportedMidi = song.isImportedMidi == true
+            or song.isMpCustom == true
+            or song.isServerCustom == true
+            or song.serverHosted == true,
         partIndex = part.index,
         partInstrument = part.instrument,
         partTitle = part.title,
         partNumOfType = part.numOfType,
-    }
+    })
 end
 
 local function updateActivePerformanceSession(guid, source, actorId, payload, relayEvent, sourceCharacterId)
@@ -697,8 +481,6 @@ local function updateActivePerformanceSession(guid, source, actorId, payload, re
         payload = copyRelayValue(payload, 0),
         acked = {},
     }
-    writeActivePerformanceSessionSnapshot()
-
     return activePerformanceSessions[key]
 end
 
@@ -729,10 +511,6 @@ end
 local function applyPendingScheduledBandStart(guid, session, payload)
     local leaderGuid = tonumber(guid)
     local pending = leaderGuid and pendingScheduledBandStartsByLeaderGuid[leaderGuid] or nil
-    if not pending and leaderGuid then
-        loadPendingScheduledBandStartSnapshot("relay-match")
-        pending = pendingScheduledBandStartsByLeaderGuid[leaderGuid]
-    end
     if type(pending) ~= "table" or type(session) ~= "table" or type(payload) ~= "table" then
         return false
     end
@@ -740,7 +518,6 @@ local function applyPendingScheduledBandStart(guid, session, payload)
     local now = serverUptime()
     if now > (tonumber(pending.expiresAt) or 0) then
         pendingScheduledBandStartsByLeaderGuid[leaderGuid] = nil
-        writePendingScheduledBandStartSnapshot()
         return false
     end
 
@@ -765,8 +542,6 @@ local function applyPendingScheduledBandStart(guid, session, payload)
     session.payload.joinStartServerTime = pending.startServerTime
     session.payload.serverStartTime = pending.startServerTime
     pendingScheduledBandStartsByLeaderGuid[leaderGuid] = nil
-    writePendingScheduledBandStartSnapshot()
-    writeActivePerformanceSessionSnapshot()
     mp.log(string.format(
         "[bardcraft] band scheduled start matched leader=%s session=%s bandSession=%s startServerTime=%.3f now=%.3f",
         tostring(leaderGuid),
@@ -779,6 +554,12 @@ end
 
 local function sessionSongIdentity(payload)
     if type(payload) ~= "table" then
+        return nil
+    end
+    if trim(payload.songHash) ~= "" then
+        return "hash:" .. tostring(payload.songHash)
+    end
+    if bardcraftNetworkPolicy.requireLocalSongHash then
         return nil
     end
     if payload.songId ~= nil then
@@ -964,7 +745,6 @@ local function stopChildPerformanceSessions(parentSessionKey, reason)
     end
 
     if removed > 0 then
-        writeActivePerformanceSessionSnapshot()
         mp.log(string.format(
             "[bardcraft] child performance sessions stopped parent=%s reason=%s sessions=%d sent=%d sourceNotified=%d",
             tostring(parentSessionKey),
@@ -982,7 +762,6 @@ local function stopBandSessionPerformanceSessions(bandSessionId, sourceSessionKe
         return 0
     end
 
-    ensureActivePerformanceSessionsLoaded("stop-band-session")
     local sessionKeys = {}
     for key, session in pairs(activePerformanceSessions) do
         if tostring(session.bandSessionId) == tostring(bandSessionId)
@@ -1005,7 +784,6 @@ local function stopBandSessionPerformanceSessions(bandSessionId, sourceSessionKe
     end
 
     if removed > 0 then
-        writeActivePerformanceSessionSnapshot()
         mp.log(string.format(
             "[bardcraft] band performance sessions stopped bandSession=%s source=%s reason=%s sessions=%d sent=%d sourceNotified=%d",
             tostring(bandSessionId),
@@ -1026,7 +804,6 @@ local function stopBandPerformanceSessionsForLeader(leaderGuid, reason)
     end
 
     local bandSessions = {}
-    ensureActivePerformanceSessionsLoaded("stop-band-leader")
     for _, session in pairs(activePerformanceSessions) do
         if session.bandSessionId
             and (tonumber(session.bandLeaderGuid) == leaderGuid or tonumber(session.sourceGuid) == leaderGuid) then
@@ -1049,7 +826,6 @@ local function stopBandChildSessionsForMember(leaderGuid, memberGuid, reason)
     end
 
     local childKeys = {}
-    ensureActivePerformanceSessionsLoaded("stop-band-member")
     for key, session in pairs(activePerformanceSessions) do
         local parent = session.parentSessionKey and activePerformanceSessions[tostring(session.parentSessionKey)] or nil
         if ((parent and tonumber(parent.sourceGuid) == leaderGuid)
@@ -1070,7 +846,6 @@ local function stopBandChildSessionsForMember(leaderGuid, memberGuid, reason)
     end
 
     if removed > 0 then
-        writeActivePerformanceSessionSnapshot()
         mp.log(string.format(
             "[bardcraft] band child sessions stopped leader=%s member=%s reason=%s sessions=%d sent=%d sourceNotified=%d",
             tostring(leaderGuid),
@@ -1097,7 +872,6 @@ local function removeBandMembership(memberGuid, reason)
     end
     bandLeaderByMemberGuid[memberGuid] = nil
     stopBandChildSessionsForMember(leaderGuid, memberGuid, reason)
-    writeActiveBandSnapshot()
     sendBandStateToGuid(memberGuid, reason)
     sendBandStateForBand(leaderGuid, reason)
     mp.log(string.format(
@@ -1139,8 +913,6 @@ local function disbandBand(leaderGuid, reason, notifyPlayers)
 
     removeBandRuntimeStateForLeader(leaderGuid)
     markBandDisbanded(leaderGuid)
-    writeActiveBandSnapshot()
-    writePendingScheduledBandStartSnapshot()
     sendBandStateToGuid(leaderGuid, reason)
     for _, memberGuid in ipairs(memberGuids) do
         sendBandStateToGuid(memberGuid, reason)
@@ -1178,7 +950,6 @@ local function stopActivePerformanceSessionsForGuid(guid, reason)
     end
 
     if removed > 0 then
-        writeActivePerformanceSessionSnapshot()
         mp.log(string.format(
             "[bardcraft] performance sessions stopped guid=%s reason=%s sessions=%d sent=%d",
             tostring(guid),
@@ -1233,10 +1004,6 @@ local function moveActivePerformanceSessionsForGuid(guid, oldCell, newCell)
                     tostring(startPayload and startPayload.songTitle)))
             end
         end
-    end
-
-    if moved > 0 then
-        writeActivePerformanceSessionSnapshot()
     end
 
     return moved
@@ -1362,6 +1129,7 @@ local function sendBardcraftJoin(player, selector, requestedPart, options)
         songTitle = payload.songTitle,
         songSourceFile = payload.songSourceFile,
         songSegmentRevision = payload.songSegmentRevision,
+        songHash = payload.songHash,
         perfType = payload.perfType,
         sourceName = tostring(session.sourceName or session.sourceGuid),
         sourceGuid = tonumber(session.sourceGuid),
@@ -1369,13 +1137,8 @@ local function sendBardcraftJoin(player, selector, requestedPart, options)
         reason = options.reason,
         occupiedPartIndices = occupiedPartIndices,
     }
+    applyNetworkPolicyFields(preparePayload)
     mp.send(tonumber(player.guid), "BC_BardcraftJoinPrepare", preparePayload)
-    mp.send(tonumber(player.guid), "BC_BardcraftJoinPreparePing", {
-        joinRequestKey = joinRequestKey,
-    })
-    local legacyPreparePayload = copyRelayValue(preparePayload, 0)
-    legacyPreparePayload.isPrepare = true
-    mp.send(tonumber(player.guid), "BC_BardcraftJoinPerformance", legacyPreparePayload)
     if not options.silent then
         player:sendMessage(string.format(
             "[Bardcraft] Preparing to join %s - %s.",
@@ -1735,7 +1498,6 @@ local function acceptBandInvite(member, selector)
     }
     bandLeaderByMemberGuid[memberGuid] = leaderGuid
     pendingBandInvitesByMemberGuid[memberGuid] = nil
-    writeActiveBandSnapshot()
     sendBandStateForBand(leaderGuid, "band-accept")
 
     member:sendMessage("[Bardcraft] You joined " .. playerDisplayName(leader) .. "'s band.")
@@ -1808,7 +1570,6 @@ local function kickBandMember(leader, selector)
     band.members[targetGuid] = nil
     bandLeaderByMemberGuid[targetGuid] = nil
     stopBandChildSessionsForMember(leaderGuid, targetGuid, "band-kick")
-    writeActiveBandSnapshot()
     sendBandStateToGuid(targetGuid, "band-kick")
     sendBandStateForBand(leaderGuid, "band-kick")
 
@@ -2069,8 +1830,6 @@ local function trySendScheduledBandLocalPlay(player, selector, requestedPart, pe
             "[Bardcraft] Band performance scheduled by %s.",
             playerDisplayName(player)))
     end
-    writePendingScheduledBandStartSnapshot()
-
     player:sendMessage(string.format(
         "[Bardcraft] Band performance scheduled in %.1fs for %d member(s): %s",
         BAND_SCHEDULED_START_LEAD_SECONDS,
@@ -2320,6 +2079,12 @@ local function handleChat(player, data, env)
     local prefix = (env and env.commandPrefix) or "/"
     local msg = data and data.message or ""
 
+    local bandJoinRest = commandRest(msg, prefix .. "bcjoin")
+    if bandJoinRest ~= nil then
+        acceptBandInvite(player, bandJoinRest)
+        return false
+    end
+
     local bandMenuRest = commandRest(msg, prefix .. "bcm")
     if bandMenuRest ~= nil then
         sendBandStatus(player)
@@ -2375,10 +2140,6 @@ local function handleChat(player, data, env)
 
     return false
 end
-
-M.interface = {
-    handleChat = handleChat,
-}
 
 local function knownSongCount(stats)
     return type(stats) == "table" and tableCount(stats.knownSongs) or 0
@@ -2443,6 +2204,23 @@ local function relayBardcraftPerformanceEvent(guid, data)
 
     local payload = flattenBardcraftPerformancePayload(guid, source, data, relayEvent)
     if eventType == "PerformStart" then
+        if bardcraftNetworkPolicy.requireLocalSongHash and trim(payload.songHash) == "" then
+            sendSongUnavailable(guid, "local-song-hash-missing", payload.songTitle, nil, nil)
+            mp.log(string.format(
+                "[bardcraft] performance start rejected guid=%s name=%s song=%s reason=missing-song-hash",
+                tostring(guid),
+                tostring(source.name),
+                tostring(payload.songTitle)))
+            mp.send(tonumber(guid), "BC_BardcraftPerformanceRelayAck", {
+                eventType = eventType,
+                sent = 0,
+                suppressed = 0,
+                rejected = true,
+                reason = "local-song-hash-missing",
+                actorId = tostring(data.actorId),
+            })
+            return
+        end
         if tryConvertBandUiStartToScheduled(source, payload) then
             mp.send(tonumber(guid), "BC_BardcraftPerformanceRelayAck", {
                 eventType = eventType,
@@ -2526,7 +2304,6 @@ local function relayBardcraftPerformanceEvent(guid, data)
             stopChildPerformanceSessions(sessionKey, "root-stop")
         end
         activePerformanceSessions[sessionKey] = nil
-        writeActivePerformanceSessionSnapshot()
     end
 
     if eventType == "PerformStart" and session and not session.parentSessionKey then
@@ -2549,6 +2326,9 @@ local function relayBardcraftPerformanceEvent(guid, data)
             eventType = eventType,
             sent = sent,
             suppressed = suppressed,
+            suppressHighChurn = eventType == "PerformStart"
+                and payload.songIsImportedMidi == true
+                and not bardcraftNetworkPolicy.allowImportedMidiLiveRelayFallback,
             song = relayEvent.song and relayEvent.song.title,
             sessionKey = sessionKey,
             actorId = tostring(data.actorId),
@@ -2602,7 +2382,18 @@ local function makeHostedMidiManifest()
 end
 
 local function sendHostedMidiCatalog(guid)
+    if not bardcraftNetworkPolicy.allowServerHostedMidiDownloads then
+        mp.send(guid, "BC_BardcraftServerSongs", applyNetworkPolicyFields({
+            files = {},
+            skipped = 0,
+            totalBytes = 0,
+            disabled = true,
+        }))
+        return
+    end
+
     local payload = makeHostedMidiManifest()
+    applyNetworkPolicyFields(payload)
     local names = {}
     for _, file in ipairs(payload.files or {}) do
         if type(file) == "table" and file.name then
@@ -2640,6 +2431,13 @@ local function sendHostedMidiFiles(guid, names)
         skippedNames = {},
         totalBytes = 0,
     }
+
+    if not bardcraftNetworkPolicy.allowServerHostedMidiDownloads then
+        payload.disabled = true
+        applyNetworkPolicyFields(payload)
+        mp.send(guid, "BC_BardcraftServerSongFiles", payload)
+        return
+    end
 
     if type(mp.listBardcraftHostedMidiFiles) == "function"
         and type(mp.readBardcraftHostedMidiFile) == "function"
@@ -2827,6 +2625,7 @@ local function encodeCustomSong(song)
             segmentRevision = song.segmentRevision or revision,
             segmentNoteCount = song.segmentNoteCount or noteCount,
             segmentBytes = song.segmentBytes or byteCount,
+            contentHash = song.contentHash,
             isServerCustom = song.isServerCustom == true,
             serverHosted = song.serverHosted == true,
         }
@@ -2852,6 +2651,7 @@ local function encodeCustomSong(song)
             resolution = song.resolution,
             lyrics = song.lyrics,
             parts = song.parts,
+            contentHash = song.contentHash,
             isServerCustom = song.isServerCustom == true,
             serverHosted = song.serverHosted == true,
         }
@@ -2916,6 +2716,7 @@ local function encodeCustomSong(song)
         segmentRevision = #noteSegments > 0 and segmentRevisionValue or nil,
         segmentNoteCount = #noteSegments > 0 and segmentNoteCount or nil,
         segmentBytes = #noteSegments > 0 and segmentBytes or nil,
+        contentHash = song.contentHash,
     }
 end
 
@@ -3109,6 +2910,7 @@ local function makeCustomSongManifestEntry(song, storageIndex)
         segmentRevision = encodedSong.segmentRevision,
         segmentNoteCount = encodedSong.segmentNoteCount,
         segmentBytes = encodedSong.segmentBytes,
+        contentHash = encodedSong.contentHash,
         storageIndex = storageIndex,
         requiresServerFetch = true,
         isMpCustom = true,
@@ -3238,6 +3040,7 @@ local function sendCustomSongRecords(guid, characterId, token, ids)
                     segmentRevision = encodedSong.segmentRevision,
                     segmentNoteCount = encodedSong.segmentNoteCount,
                     segmentBytes = encodedSong.segmentBytes,
+                    contentHash = encodedSong.contentHash,
                     storageIndex = index,
                 })
 
@@ -3361,6 +3164,7 @@ local function upsertCustomSongRecord(characterId, record)
         segmentRevision = encodedSong.segmentRevision,
         segmentNoteCount = encodedSong.segmentNoteCount,
         segmentBytes = encodedSong.segmentBytes,
+        contentHash = encodedSong.contentHash,
     }
 
     local updated = false
@@ -3388,10 +3192,14 @@ end
 local function sendBootstrap(guid, characterId)
     local payload = {
         loaded = true,
+        networkPolicy = copyNetworkPolicy(),
     }
+    applyNetworkPolicyFields(payload)
 
     for _, key in ipairs(STORAGE_KEYS) do
-        payload[key] = mp.getCharacterStorageForCharacter(characterId, STORAGE_NAMESPACE, key)
+        if key ~= "customSongs" or bardcraftNetworkPolicy.allowPlayerSongUpload then
+            payload[key] = mp.getCharacterStorageForCharacter(characterId, STORAGE_NAMESPACE, key)
+        end
     end
 
     if type(payload.knownSongs) ~= "table"
@@ -3404,12 +3212,16 @@ local function sendBootstrap(guid, characterId)
 
     local knownSongs = type(payload.knownSongs) == "table" and payload.knownSongs or {}
     local customSongs = type(payload.customSongs) == "table" and payload.customSongs or {}
-    local customSongManifest, customSongSkipped = makeCustomSongManifest(customSongs)
+    local customSongManifest, customSongSkipped = {}, 0
+    if bardcraftNetworkPolicy.allowPlayerSongUpload then
+        customSongManifest, customSongSkipped = makeCustomSongManifest(customSongs)
+    end
     payload.performerStats = copyPerformerStatsWithoutKnownSongs(payload.performerStats)
     payload.knownSongs = nil
     payload.customSongs = nil
     payload.customSongManifest = customSongManifest
-    payload.customSongPayload = "manifest"
+    payload.customSongPayload = bardcraftNetworkPolicy.allowPlayerSongUpload and "manifest" or "local-only"
+    payload.preserveLocalCustomSongs = not bardcraftNetworkPolicy.allowPlayerSongUpload
     payload.chunked = true
     payload.token = nextBootstrapToken(characterId)
     payload.knownSongCount = directKnownSongCount(knownSongs)
@@ -3443,7 +3255,7 @@ end
 local function persistSubmittedState(guid, characterId, data)
     local changed = false
     local customSongRecordUpserted = false
-    if type(data.customSongRecord) == "table" then
+    if type(data.customSongRecord) == "table" and bardcraftNetworkPolicy.allowPlayerSongUpload then
         customSongRecordUpserted = upsertCustomSongRecord(characterId, data.customSongRecord)
         if not customSongRecordUpserted then
             mp.log(string.format(
@@ -3453,10 +3265,18 @@ local function persistSubmittedState(guid, characterId, data)
                 tostring(data.customSongRecord.id)))
         end
         changed = customSongRecordUpserted or changed
+    elseif type(data.customSongRecord) == "table" then
+        mp.log(string.format(
+            "[bardcraft] custom song upload rejected guid=%s characterId=%s reason=disabled",
+            tostring(guid),
+            tostring(characterId)))
     end
 
     for _, key in ipairs(STORAGE_KEYS) do
         local value = data[key]
+        if key == "customSongs" and not bardcraftNetworkPolicy.allowPlayerSongUpload then
+            value = nil
+        end
         if key == "knownSongs" and value == nil then
             value = knownSongsFromState(data)
         elseif key == "performerStats" then
@@ -3521,16 +3341,21 @@ end
 
 M.eventHandlers = {
     OnServerInit = function(_)
+        pendingJoinRequests = {}
         activePerformanceSessions = {}
         activeBandsByLeaderGuid = {}
         bandLeaderByMemberGuid = {}
         disbandedBandLeadersByGuid = {}
         pendingBandInvitesByMemberGuid = {}
         pendingScheduledBandStartsByLeaderGuid = {}
-        clearActivePerformanceSessionSnapshot()
-        clearActiveBandSnapshot()
-        clearPendingScheduledBandStartSnapshot()
-        clearDisbandedBandSnapshot()
+        mp.log(string.format(
+            "[bardcraft] network policy localHash=%s communityMode=%s hostedDownloads=%s playerUpload=%s importedRelayFallback=%s packUrl=%s",
+            tostring(bardcraftNetworkPolicy.requireLocalSongHash),
+            tostring(bardcraftNetworkPolicy.communitySongSharingMode),
+            tostring(bardcraftNetworkPolicy.allowServerHostedMidiDownloads),
+            tostring(bardcraftNetworkPolicy.allowPlayerSongUpload),
+            tostring(bardcraftNetworkPolicy.allowImportedMidiLiveRelayFallback),
+            bardcraftNetworkPolicy.communitySongPackUrl ~= "" and bardcraftNetworkPolicy.communitySongPackUrl or "-"))
     end,
 
     OnPlayerDisconnect = function(data)
@@ -3567,6 +3392,16 @@ M.eventHandlers = {
         end
         moveActivePerformanceSessionsForGuid(guid, oldCell, newCell)
         sendActivePerformanceSessions(guid, newCell)
+    end,
+
+    OnPlayerSendMessage = function(data)
+        local player = data and data.guid and mp.getPlayer(data.guid) or nil
+        if not player then
+            return nil
+        end
+        return handleChat(player, data, {
+            commandPrefix = config.COMMAND_PREFIX or "/",
+        })
     end,
 
     BC_RequestBardcraftPersistence = function(data)
@@ -3620,11 +3455,30 @@ M.eventHandlers = {
             return
         end
 
+        if not bardcraftNetworkPolicy.allowPlayerSongUpload then
+            mp.send(guid, "BC_BardcraftCustomSongRecordsEnd", {
+                token = data and data.token or "",
+                sent = 0,
+                skipped = tableCount(data and data.ids),
+                disabled = true,
+            })
+            return
+        end
+
         sendCustomSongRecords(guid, characterId, data and data.token or "", data and data.ids or {})
     end,
 
     BC_RequestBardcraftPerformanceSongRecord = function(data)
         local guid = senderGuid(data)
+        if guid and not bardcraftNetworkPolicy.allowPlayerSongUpload then
+            mp.send(guid, "BC_BardcraftCustomSongRecordsEnd", {
+                token = data and data.token or "",
+                sent = 0,
+                skipped = data and data.songId and 1 or 0,
+                disabled = true,
+            })
+            return
+        end
         local sessionKey = data and data.sessionKey
         local session = sessionKey and activePerformanceSessions[tostring(sessionKey)] or nil
         local sourceCharacterId, fallbackFromCharacterId = findPerformanceSongSourceCharacterId(session,
@@ -3801,6 +3655,27 @@ M.eventHandlers = {
             return
         end
 
+        local sessionPayload = currentSessionPayload(session, serverUptime()) or {}
+        local expectedHash = trim(sessionPayload.songHash)
+        local actualHash = trim(data and data.songHash)
+        if bardcraftNetworkPolicy.requireLocalSongHash
+            and (expectedHash == "" or actualHash == "" or expectedHash ~= actualHash)
+        then
+            pendingJoinRequests[tostring(joinRequestKey)] = nil
+            local reason = expectedHash == "" and "session-missing-song-hash"
+                or actualHash == "" and "local-song-hash-missing"
+                or "local-song-hash-mismatch"
+            sendSongUnavailable(guid, reason, sessionPayload.songTitle, expectedHash, actualHash)
+            mp.log(string.format(
+                "[bardcraft] join ready rejected guid=%s session=%s reason=%s expectedHash=%s actualHash=%s",
+                tostring(guid),
+                tostring(session.key),
+                reason,
+                expectedHash ~= "" and expectedHash or "-",
+                actualHash ~= "" and actualHash or "-"))
+            return
+        end
+
         local now = serverUptime()
         local start = computeFutureJoinStart(session, now)
 
@@ -3890,7 +3765,6 @@ M.eventHandlers = {
             payload = copyRelayValue(childRelayPayload, 0),
             acked = {},
         }
-        writeActivePerformanceSessionSnapshot()
         mp.log(string.format(
             "[bardcraft] join child session registered key=%s sourceGuid=%s sourceChar=%s parent=%s",
             tostring(childRelayPayload.sessionKey),
@@ -3906,18 +3780,8 @@ M.eventHandlers = {
 
         mp.send(tonumber(guid), "BC_BardcraftJoinStart", payload)
 
-        local legacyStartPayload = copyRelayValue(payload, 0)
-        legacyStartPayload.isJoinStart = true
-        mp.send(tonumber(guid), "BC_BardcraftJoinPerformance", legacyStartPayload)
-
         mp.log(string.format(
             "[bardcraft] join start sent guid=%s session=%s joinRequestKey=%s",
-            tostring(guid),
-            tostring(session.key),
-            tostring(joinRequestKey)))
-
-        mp.log(string.format(
-            "[bardcraft] join start legacy sent guid=%s session=%s joinRequestKey=%s",
             tostring(guid),
             tostring(session.key),
             tostring(joinRequestKey)))

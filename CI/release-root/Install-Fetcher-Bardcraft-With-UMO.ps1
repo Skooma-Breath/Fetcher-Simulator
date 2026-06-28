@@ -12,9 +12,9 @@ param(
     [bool] $RequireMorrowindData = $true,
     [bool] $ApplyBardcraftMultiplayerPatch = $true,
     [bool] $ApplyPublicTestConfig = $true,
-    [string] $BardcraftPatchAssetName = "fetcher-bardcraft-mp-patch-v1.zip",
-    [string] $BardcraftPatchUrl = "https://github.com/Skooma-Breath/Fetcher-Simulator/releases/download/fetcher-bardcraft-mp-patch-v1/fetcher-bardcraft-mp-patch-v1.zip",
-    [string] $BardcraftPatchSha256 = "93763186d59d425afadbe0e18f3e95265b4202e4b392b3d2dda304063ddc7e70"
+    [string] $BardcraftPatchAssetName = "fetcher-bardcraft-mp-patch-v2.zip",
+    [string] $BardcraftPatchUrl = "https://github.com/Skooma-Breath/Fetcher-Simulator/releases/download/fetcher-bardcraft-mp-patch-v2/fetcher-bardcraft-mp-patch-v2.zip",
+    [string] $BardcraftPatchSha256 = "ced402accb7a1c09b57433f78500cb222a0a5703335b297ed02cfad422490128"
 )
 
 $ErrorActionPreference = "Stop"

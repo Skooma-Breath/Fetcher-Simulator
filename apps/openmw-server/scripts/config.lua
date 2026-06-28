@@ -25,6 +25,10 @@ Config.TIME_SCALE = 30.0
 Config.LUA_TICK_RATE = 60
 Config.LUA_TICK_DIAGNOSTICS_INTERVAL = 5
 Config.LUA_SLOW_TICK_MS = 8
+-- LuaJIT has shown native stack corruption under repeated concurrent script
+-- events on the AArch64 dedicated server. The interpreter has ample headroom
+-- for the measured server workload and avoids process-level JIT failures.
+Config.LUA_JIT_ENABLED = false
 -- Immediate intent evaluation wakes the Lua thread on demand and waits
 -- briefly for a decision instead of waiting for the next periodic tick.
 Config.IMMEDIATE_INTENT_TIMEOUT_MS = 50
@@ -122,6 +126,24 @@ Config.LOG_CHAT = false
 -- 0 disables speech rate limiting. Set above 0 to rate-limit repeated /s commands.
 Config.SPEECH_COOLDOWN_SECONDS = 0
 Config.SPEECH_COOLDOWN_NOTICE_SECONDS = 1.5
+
+------------------------------------------------------------------------
+-- Bardcraft
+------------------------------------------------------------------------
+
+-- Safe public-server defaults: clients must already have matching songs locally.
+Config.Bardcraft = {
+    requireLocalSongHash = true,
+    communitySongSharingMode = false,
+    allowServerHostedMidiDownloads = false,
+    allowPlayerSongUpload = false,
+    allowImportedMidiLiveRelayFallback = false,
+    -- Optional external Discord/Drive/community-pack URL shown for missing songs.
+    communitySongPackUrl = "",
+}
+
+-- Only enable community song sharing if the server has permission to distribute
+-- the MIDI files, or the operator accepts responsibility for user-supplied/community sharing.
 
 ------------------------------------------------------------------------
 -- Moderation

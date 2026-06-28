@@ -140,6 +140,22 @@ settings.cfg files:
    use additional anim sources = true
    weapon sheathing = true
 
+Community songs
+---------------
+
+The public server does not distribute custom MIDI files through Bardcraft by
+default. Each player must install the same local song pack. Bardcraft matches
+the local song content hash when synchronizing multiplayer playback, so a file
+with the same title but different notes will not be substituted.
+
+If Bardcraft reports a missing local song, obtain the pack from the server
+community and install its loose .mid/.midi files under:
+
+   midi\Bardcraft\custom
+
+OpenMW cannot discover songs that remain inside a ZIP/7Z archive. Do not rename
+another MIDI file to match; Bardcraft validates the actual song content hash.
+
 Troubleshooting
 ---------------
 

@@ -9,6 +9,10 @@
 
 #include <sol/sol.hpp>
 
+#ifndef NO_LUAJIT
+#include <luajit.h>
+#endif
+
 #include <components/debug/debuglog.hpp>
 #include <components/lua/serialization.hpp>
 #include <components/lua/utilpackage.hpp>
@@ -1597,6 +1601,16 @@ void LuaServerContext::initLua()
             mLua->addCommonPackage("config", *config);
         else
             mLua->addCommonPackage("config", view.newTable());
+
+#ifndef NO_LUAJIT
+        const bool luaJitEnabled = config && config->get_or("LUA_JIT_ENABLED", false);
+        if (!luaJitEnabled)
+        {
+            if (luaJIT_setmode(view.sol().lua_state(), 0, LUAJIT_MODE_ENGINE | LUAJIT_MODE_OFF) == 0)
+                throw std::runtime_error("Failed to disable LuaJIT for the dedicated server runtime");
+            Log(Debug::Info) << "[LuaServerContext] LuaJIT disabled by config";
+        }
+#endif
 
         mLua->addCommonPackage("openmw.util", LuaUtil::initUtilPackage(view.sol().lua_state()));
         mLua->addCommonPackage("openmw.storage", LuaUtil::LuaStorage::initGlobalPackage(view, &mGlobalStorage));
