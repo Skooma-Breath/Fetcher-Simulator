@@ -335,6 +335,43 @@ function Invoke-Checked {
     }
 }
 
+function Test-UmoNxmHandler {
+    param([Parameter(Mandatory = $true)][string] $UmoExecutable)
+
+    $commandKey = "Registry::HKEY_CURRENT_USER\Software\Classes\nxm\shell\open\command"
+    try {
+        $command = [string] (Get-Item -LiteralPath $commandKey -ErrorAction Stop).GetValue("")
+    }
+    catch {
+        return $false
+    }
+
+    if ([string]::IsNullOrWhiteSpace($command)) {
+        return $false
+    }
+
+    $resolvedUmo = (Resolve-Path -LiteralPath $UmoExecutable).Path
+    return $command.IndexOf($resolvedUmo, [System.StringComparison]::OrdinalIgnoreCase) -ge 0
+}
+
+function Initialize-UmoProtocolHandler {
+    param([Parameter(Mandatory = $true)][string] $UmoExecutable)
+
+    if (Test-UmoNxmHandler -UmoExecutable $UmoExecutable) {
+        return
+    }
+
+    Write-Host ""
+    Write-Host "Registering this portable UMO as the Nexus download handler..."
+    Invoke-Checked -Description "umo setup" -Command {
+        "y" | & $UmoExecutable setup
+    }
+
+    if (-not (Test-UmoNxmHandler -UmoExecutable $UmoExecutable)) {
+        throw "UMO setup completed, but Windows did not register this copy of umo.exe for nxm:// links."
+    }
+}
+
 function Test-MorrowindDataConfigured {
     $cfgPath = Join-Path $root "openmw.cfg"
     if (-not (Test-Path -LiteralPath $cfgPath -PathType Leaf)) {
@@ -510,6 +547,7 @@ Invoke-Checked -Description "umo check" -Command {
         $firstRunAnswers | & $umo check
     }
 }
+Initialize-UmoProtocolHandler -UmoExecutable $umo
 
 Write-Host ""
 Write-Host "Registering UMO modlist..."

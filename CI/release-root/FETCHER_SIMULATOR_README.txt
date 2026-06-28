@@ -64,8 +64,10 @@ The helper tells UMO to install the mods inside this package under:
    Data Files\fetcher-bardcraft
 
 On first run, UMO may open a Nexus login page in your browser. Finish that login
-and return to the console. After UMO finishes, the helper rewrites openmw.cfg
-with the needed data= and content= lines.
+and return to the console. The helper also registers its portable umo.exe as the
+current user's nxm:// handler so Nexus "Slow Download" buttons can return files
+to the waiting installer. After UMO finishes, the helper rewrites openmw.cfg with
+the needed data= and content= lines.
 
 Large Nexus downloads can take several minutes and the console may look quiet
 while UMO is still downloading. Leave the window open until it reports that the
