@@ -9,6 +9,9 @@ param(
     [string] $Tes3cmdPath = "",
     [string] $Tes3cmdUrl = "https://gitlab.com/modding-openmw/tes3cmd/-/jobs/artifacts/master/raw/tes3cmd.0.40-PRE-RELEASE-2-win.zip?job=build_win",
     [bool] $DownloadTes3cmdIfMissing = $true,
+    [string] $SevenZipPath = "",
+    [string] $SevenZipReleaseApiUrl = "https://api.github.com/repos/ip7z/7zip/releases/latest",
+    [bool] $DownloadSevenZipIfMissing = $true,
     [bool] $RequireMorrowindData = $true,
     [bool] $ApplyBardcraftMultiplayerPatch = $true,
     [bool] $ApplyPublicTestConfig = $true,
@@ -218,6 +221,106 @@ function Install-Tes3cmdIfMissing {
     return (Resolve-Path -LiteralPath $targetPath).Path
 }
 
+function Resolve-SevenZipDirectory {
+    param([string] $Candidate)
+
+    $candidates = New-Object System.Collections.Generic.List[string]
+    if (-not [string]::IsNullOrWhiteSpace($Candidate)) {
+        $candidates.Add($Candidate)
+    }
+    $candidates.Add((Join-Path $root "_fetcher_umo\7zip\7z.exe"))
+    $candidates.Add((Join-Path $root "7z.exe"))
+    if (-not [string]::IsNullOrWhiteSpace($env:ProgramFiles)) {
+        $candidates.Add((Join-Path $env:ProgramFiles "7-Zip\7z.exe"))
+    }
+    if (-not [string]::IsNullOrWhiteSpace(${env:ProgramFiles(x86)})) {
+        $candidates.Add((Join-Path ${env:ProgramFiles(x86)} "7-Zip\7z.exe"))
+    }
+
+    foreach ($path in $candidates) {
+        if (Test-Path -LiteralPath $path -PathType Leaf) {
+            return (Split-Path -Parent (Resolve-Path -LiteralPath $path).Path)
+        }
+    }
+
+    $command = Get-Command "7z.exe" -ErrorAction SilentlyContinue
+    if ($command) {
+        return (Split-Path -Parent $command.Source)
+    }
+
+    if ($DownloadSevenZipIfMissing) {
+        return Install-SevenZipIfMissing
+    }
+
+    throw "Could not find the full 7z.exe. Install 7-Zip, put 7z.exe on PATH, or run with -SevenZipPath C:\path\to\7z.exe."
+}
+
+function Assert-GitHubAssetChecksum {
+    param(
+        [Parameter(Mandatory = $true)] $Asset,
+        [Parameter(Mandatory = $true)][string] $FilePath
+    )
+
+    $digest = [string] $Asset.digest
+    if ([string]::IsNullOrWhiteSpace($digest) -or $digest -notmatch "^sha256:([0-9a-fA-F]{64})$") {
+        Write-Warning "GitHub did not provide a SHA-256 digest for $($Asset.name); continuing after HTTPS download."
+        return
+    }
+
+    $expectedHash = $Matches[1].ToLowerInvariant()
+    $actualHash = (Get-FileHash -LiteralPath $FilePath -Algorithm SHA256).Hash.ToLowerInvariant()
+    if ($actualHash -ne $expectedHash) {
+        throw "Downloaded $($Asset.name) checksum mismatch. Expected $expectedHash but got $actualHash."
+    }
+}
+
+function Install-SevenZipIfMissing {
+    $downloadRoot = Join-Path $root "_fetcher_umo\7zip-bootstrap"
+    $targetRoot = Join-Path $root "_fetcher_umo\7zip"
+    $targetPath = Join-Path $targetRoot "7z.exe"
+    $targetDll = Join-Path $targetRoot "7z.dll"
+    if ((Test-Path -LiteralPath $targetPath -PathType Leaf) -and
+        (Test-Path -LiteralPath $targetDll -PathType Leaf)) {
+        return (Resolve-Path -LiteralPath $targetRoot).Path
+    }
+
+    New-Item -ItemType Directory -Force -Path $downloadRoot | Out-Null
+    New-Item -ItemType Directory -Force -Path $targetRoot | Out-Null
+
+    Write-Host "7-Zip with RAR support was not found. Downloading a portable copy..."
+    Write-Host "  $SevenZipReleaseApiUrl"
+    $headers = @{ "User-Agent" = "Fetcher-Simulator-Installer" }
+    $release = Invoke-RestMethod -Uri $SevenZipReleaseApiUrl -Headers $headers
+    $bootstrapAsset = @($release.assets) |
+        Where-Object { $_.name -eq "7zr.exe" } |
+        Select-Object -First 1
+    $installerAsset = @($release.assets) |
+        Where-Object { $_.name -match "^7z[0-9]+-x64\.exe$" } |
+        Select-Object -First 1
+    if (-not $bootstrapAsset -or -not $installerAsset) {
+        throw "The latest official 7-Zip release does not contain the expected 7zr.exe and x64 installer assets."
+    }
+
+    $bootstrapPath = Join-Path $downloadRoot "7zr.exe"
+    $installerPath = Join-Path $downloadRoot ([string] $installerAsset.name)
+    Invoke-WebRequest -UseBasicParsing -Uri $bootstrapAsset.browser_download_url -Headers $headers -OutFile $bootstrapPath
+    Invoke-WebRequest -UseBasicParsing -Uri $installerAsset.browser_download_url -Headers $headers -OutFile $installerPath
+    Assert-GitHubAssetChecksum -Asset $bootstrapAsset -FilePath $bootstrapPath
+    Assert-GitHubAssetChecksum -Asset $installerAsset -FilePath $installerPath
+
+    & $bootstrapPath x $installerPath "-o$targetRoot" -y -aoa | Out-Host
+    if ($LASTEXITCODE -ne 0) {
+        throw "Portable 7-Zip extraction failed with exit code $LASTEXITCODE."
+    }
+    if (-not (Test-Path -LiteralPath $targetPath -PathType Leaf) -or
+        -not (Test-Path -LiteralPath $targetDll -PathType Leaf)) {
+        throw "7-Zip extraction completed, but 7z.exe or 7z.dll was not found under $targetRoot."
+    }
+
+    Write-Host "Portable 7-Zip installed to: $targetRoot"
+    return (Resolve-Path -LiteralPath $targetRoot).Path
+}
+
 function Invoke-Checked {
     param(
         [Parameter(Mandatory = $true)]
@@ -340,6 +443,7 @@ if ($RequireMorrowindData -and -not (Test-MorrowindDataConfigured)) {
 
 $umo = Resolve-UmoPath $UmoPath
 $tes3cmd = Resolve-Tes3cmdPath $Tes3cmdPath
+$sevenZipDirectory = Resolve-SevenZipDirectory $SevenZipPath
 $umoWorkRoot = Join-Path $root "_fetcher_umo"
 $umoConfigDir = Join-Path $umoWorkRoot "config"
 $umoCacheDir = Join-Path $umoWorkRoot "cache"
@@ -349,8 +453,9 @@ New-Item -ItemType Directory -Force -Path $umoCacheDir | Out-Null
 
 Write-Host "Using UMO: $umo"
 Write-Host "Using tes3cmd: $tes3cmd"
+Write-Host "Using 7-Zip: $sevenZipDirectory"
 Write-Host "UMO mod install root: $UmoBasePath"
-$env:PATH = "$root;$env:PATH"
+$env:PATH = "$sevenZipDirectory;$root;$env:PATH"
 $env:UMO_BASEPATH = $UmoBasePath
 $env:UMO_CACHE_DIR = $umoCacheDir
 $env:UMO_CONF_DIR = $umoConfigDir

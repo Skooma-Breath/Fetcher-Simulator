@@ -47,10 +47,11 @@ Fast path:
 
    powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Install-Fetcher-Bardcraft-With-UMO.ps1
 
-The helper downloads umo.exe and tes3cmd.exe into this folder if they are not
-already present, then uses the included fetcher-bardcraft-umo.json modlist. If
-that file is missing, the helper tries to download it from the Fetcher Simulator
-GitHub prerelease.
+The helper downloads umo.exe and tes3cmd.exe if they are not already present.
+It also downloads a portable copy of the official 7-Zip command-line tools when
+7-Zip is unavailable. Nothing is installed system-wide. The helper then uses the
+included fetcher-bardcraft-umo.json modlist. If that file is missing, it tries to
+download it from the Fetcher Simulator GitHub prerelease.
 
 After UMO installs the Nexus version of Bardcraft, the helper downloads the
 small Fetcher Bardcraft multiplayer compatibility patch from its own GitHub
