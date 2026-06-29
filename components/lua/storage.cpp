@@ -1,11 +1,28 @@
 #include "storage.hpp"
 
+#include <atomic>
+#include <cstdint>
 #include <filesystem>
 #include <fstream>
+#include <system_error>
+
+#ifndef _WIN32
+#include <unistd.h>
+#endif
 
 #include <components/debug/debuglog.hpp>
 
 #include "luastate.hpp"
+
+#ifdef _WIN32
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#endif
 
 namespace sol
 {
@@ -17,6 +34,37 @@ namespace sol
 
 namespace LuaUtil
 {
+    namespace
+    {
+        std::filesystem::path makeTemporaryStoragePath(const std::filesystem::path& path)
+        {
+            static std::atomic<std::uint64_t> sequence{ 0 };
+#ifdef _WIN32
+            const auto processId = static_cast<std::uint64_t>(GetCurrentProcessId());
+#else
+            const auto processId = static_cast<std::uint64_t>(getpid());
+#endif
+            return path.parent_path()
+                / (path.filename().string() + ".tmp-" + std::to_string(processId) + "-"
+                    + std::to_string(sequence.fetch_add(1, std::memory_order_relaxed)));
+        }
+
+        void replaceStorageFile(
+            const std::filesystem::path& temporaryPath, const std::filesystem::path& destinationPath)
+        {
+#ifdef _WIN32
+            if (!MoveFileExW(temporaryPath.c_str(), destinationPath.c_str(),
+                    MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH))
+            {
+                throw std::system_error(
+                    static_cast<int>(GetLastError()), std::system_category(), "Unable to replace Lua storage file");
+            }
+#else
+            std::filesystem::rename(temporaryPath, destinationPath);
+#endif
+        }
+    }
+
     LuaStorage::Value LuaStorage::Section::sEmpty;
 
     void LuaStorage::registerLifeTime(LuaUtil::LuaView& view, sol::table& res)
@@ -278,6 +326,52 @@ namespace LuaUtil
         }
     }
 
+    bool LuaStorage::replaceFromFile(lua_State* state, const std::filesystem::path& path, std::string& error)
+    {
+        error.clear();
+        std::vector<std::pair<std::string, sol::table>> loadedSections;
+        try
+        {
+            if (std::filesystem::exists(path))
+            {
+                const std::uintmax_t fileSize = std::filesystem::file_size(path);
+                Log(Debug::Info) << "Loading Lua storage \"" << path << "\" (" << fileSize << " bytes)";
+                if (fileSize == 0)
+                    throw std::runtime_error("Storage file has zero length");
+
+                std::ifstream fin(path, std::fstream::binary);
+                if (!fin)
+                    throw std::runtime_error("Unable to open storage file");
+                std::string serializedData((std::istreambuf_iterator<char>(fin)), std::istreambuf_iterator<char>());
+                sol::table data = deserialize(state, serializedData);
+                for (const auto& [sectionName, sectionTable] : data)
+                {
+                    loadedSections.emplace_back(
+                        cast<std::string>(sectionName), cast<sol::table>(sectionTable));
+                }
+            }
+
+            std::set<std::string, std::less<>> loadedNames;
+            for (const auto& [sectionName, _] : loadedSections)
+                loadedNames.insert(sectionName);
+
+            for (const auto& [sectionName, section] : mData)
+            {
+                if (!loadedNames.contains(sectionName))
+                    section->setAll(sol::nullopt);
+            }
+            for (const auto& [sectionName, values] : loadedSections)
+                getSection(sectionName)->setAll(values);
+            return true;
+        }
+        catch (const std::exception& e)
+        {
+            error = e.what();
+            Log(Debug::Error) << "Cannot replace Lua storage from \"" << path << "\": " << error;
+            return false;
+        }
+    }
+
     void LuaStorage::save(lua_State* state, const std::filesystem::path& path) const
     {
         sol::table data(state, sol::create);
@@ -288,9 +382,24 @@ namespace LuaUtil
         }
         std::string serializedData = serialize(data);
         Log(Debug::Info) << "Saving Lua storage \"" << path << "\" (" << serializedData.size() << " bytes)";
-        std::ofstream fout(path, std::fstream::binary);
-        fout.write(serializedData.data(), serializedData.size());
-        fout.close();
+        if (!path.parent_path().empty())
+            std::filesystem::create_directories(path.parent_path());
+        const std::filesystem::path temporaryPath = makeTemporaryStoragePath(path);
+        try
+        {
+            std::ofstream fout(temporaryPath, std::fstream::binary | std::fstream::trunc);
+            fout.exceptions(std::ios::badbit | std::ios::failbit);
+            fout.write(serializedData.data(), serializedData.size());
+            fout.flush();
+            fout.close();
+            replaceStorageFile(temporaryPath, path);
+        }
+        catch (...)
+        {
+            std::error_code ec;
+            std::filesystem::remove(temporaryPath, ec);
+            throw;
+        }
     }
 
     std::vector<LuaStorage::SerializedValue> LuaStorage::getSerializedValues() const

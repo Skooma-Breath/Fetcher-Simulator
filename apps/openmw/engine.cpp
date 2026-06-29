@@ -1059,7 +1059,13 @@ void OMW::Engine::prepareEngine()
     mDialogueManager = std::make_unique<MWDialogue::DialogueManager>(mExtensions, mTranslationDataStorage);
     mEnvironment.setDialogueManager(*mDialogueManager);
 
-    mLuaManager->loadPermanentStorage(mCfgMgr.getUserConfigPath());
+    mLuaManager->loadPermanentStorage(mCfgMgr.getUserConfigPath(),
+#ifdef BUILD_MULTIPLAYER
+        mMPEnabled && !mMPProfileIsolation, mMPProfileIsolation
+#else
+        false, false
+#endif
+    );
     mLuaManager->initPreLoad();
 
     Loading::Listener* listener = MWBase::Environment::get().getWindowManager()->getLoadingScreen();

@@ -1,4 +1,5 @@
 #include <filesystem>
+#include <fstream>
 #include <gmock/gmock.h>
 #include <gtest/gtest.h>
 
@@ -122,6 +123,63 @@ namespace
             EXPECT_EQ(get<int>(lua, "permanent:get('x')"), 1);
             EXPECT_TRUE(get<bool>(lua, "permanent:get('z') == nil"));
             EXPECT_TRUE(get<bool>(lua, "temporary:get('y') == nil"));
+        });
+    }
+
+    TEST(LuaUtilStorageTest, ReplacePreservesSectionViewsAndRejectsCorruptFiles)
+    {
+        LuaUtil::LuaState luaState{ nullptr, nullptr };
+        luaState.protectedCall([](LuaUtil::LuaView& view) {
+            LuaUtil::LuaStorage::initLuaBindings(view);
+            auto& lua = view.sol();
+
+            LuaUtil::LuaStorage source;
+            source.setActive(true);
+            lua["sourceKept"] = source.getMutableSection(lua, "kept");
+            lua["sourceAdded"] = source.getMutableSection(lua, "added");
+            lua.safe_script("sourceKept:set('value', 42); sourceAdded:set('value', 7)");
+
+            const auto tmpDir = std::filesystem::temp_directory_path() / "openmw-storage-replace-test";
+            const auto storageFile = tmpDir / "player_storage.bin";
+            source.save(lua, storageFile);
+
+            LuaUtil::LuaStorage target;
+            target.setActive(true);
+            sol::table callbackHiddenData(lua, sol::create);
+            callbackHiddenData[LuaUtil::ScriptsContainer::sScriptIdKey] = LuaUtil::ScriptId{};
+            LuaUtil::getAsyncPackageInitializer(
+                lua.lua_state(), []() { return 0.0; }, []() { return 0.0; })(callbackHiddenData);
+            lua["async"] = LuaUtil::AsyncPackageId{ nullptr, 0, callbackHiddenData };
+            lua["kept"] = target.getMutableSection(lua, "kept");
+            lua["removed"] = target.getMutableSection(lua, "removed");
+            lua.safe_script(R"(
+                replacementCallbacks = 0
+                kept:subscribe(async:callback(function()
+                    replacementCallbacks = replacementCallbacks + 1
+                end))
+                kept:set('value', 1)
+                removed:set('value', 2)
+                replacementCallbacks = 0
+            )");
+
+            std::string error;
+            EXPECT_TRUE(target.replaceFromFile(lua, storageFile, error)) << error;
+            EXPECT_EQ(get<int>(lua, "kept:get('value')"), 42);
+            EXPECT_TRUE(get<bool>(lua, "removed:get('value') == nil"));
+            EXPECT_EQ(get<int>(lua, "replacementCallbacks"), 1);
+            lua["added"] = target.getMutableSection(lua, "added");
+            EXPECT_EQ(get<int>(lua, "added:get('value')"), 7);
+
+            const auto corruptFile = tmpDir / "corrupt.bin";
+            {
+                std::ofstream out(corruptFile, std::ios::binary | std::ios::trunc);
+                out << "not serialized Lua storage";
+            }
+            EXPECT_FALSE(target.replaceFromFile(lua, corruptFile, error));
+            EXPECT_EQ(get<int>(lua, "kept:get('value')"), 42);
+
+            std::error_code ec;
+            std::filesystem::remove_all(tmpDir, ec);
         });
     }
 

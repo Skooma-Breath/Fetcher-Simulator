@@ -3,7 +3,9 @@
 
 #include <filesystem>
 #include <map>
+#include <memory>
 #include <mutex>
+#include <optional>
 #include <set>
 #include <vector>
 
@@ -30,6 +32,8 @@
 
 namespace MWLua
 {
+    class PlayerStorageLock;
+
     // \brief LuaManager is the central interface through which the engine invokes lua scripts.
     //
     // This class implements the interface defined in MWBase::LuaManager.
@@ -48,8 +52,12 @@ namespace MWLua
         void contentFilesLoaded() override;
         void initPostLoad();
 
-        void loadPermanentStorage(const std::filesystem::path& userConfigPath);
+        void loadPermanentStorage(const std::filesystem::path& userConfigPath,
+            bool deferMultiplayerPlayerStorage, bool isolatedMultiplayerProfile);
         void savePermanentStorage(const std::filesystem::path& userConfigPath) override;
+        void prepareMultiplayerPlayerStorage() override;
+        bool bindMultiplayerPlayerStorage(std::string_view storageNamespace,
+            std::string_view characterKey, std::string_view characterName, std::string& error) override;
 
         // \brief Executes lua handlers. Defaults to running in parallel with OSG Cull.
         //
@@ -259,6 +267,12 @@ namespace MWLua
         LuaUtil::LuaStorage mGlobalStorage;
         LuaUtil::LuaStorage mPlayerStorage;
         bool mGlobalStorageMirroredFromServer = false;
+        std::filesystem::path mDefaultPlayerStoragePath;
+        std::optional<std::filesystem::path> mLoadedPlayerStoragePath;
+        std::optional<std::filesystem::path> mBoundPlayerStoragePath;
+        std::unique_ptr<PlayerStorageLock> mPlayerStorageLock;
+        bool mMultiplayerPlayerStorage = false;
+        bool mIsolatedMultiplayerProfile = false;
 
         LuaUtil::InputAction::Registry mInputActions;
         LuaUtil::InputTrigger::Registry mInputTriggers;

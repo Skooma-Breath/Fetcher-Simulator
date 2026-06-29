@@ -183,6 +183,7 @@ namespace OMW
         std::string  mMPCharacterName;
         bool         mMPAutoEnter      = false;
         bool         mMPEnabled        = false;
+        bool         mMPProfileIsolation = false;
 #endif
         Debug::Level mMaxRecastLogLevel = Debug::Error;
 
@@ -292,6 +293,8 @@ namespace OMW
             mMPAutoEnter     = autoEnter;
             mMPEnabled       = !address.empty();
         }
+
+        void setMultiplayerProfileIsolation(bool enabled) { mMPProfileIsolation = enabled; }
 #endif
     };
 }

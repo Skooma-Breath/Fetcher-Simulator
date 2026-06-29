@@ -4215,6 +4215,7 @@ void MPServer::handleCharacterSelect(ConnectedClient& c, const uint8_t* data, si
             mLua.setPlayerMarks(c.guid, mDefaultPlayerMarks);
     }
 
+    cdPkt.characterId = c.dbCharacterId;
     sendTo(c.conn, cdPkt.encode());
     c.charSelectComplete = true;
 

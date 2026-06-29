@@ -4,6 +4,7 @@
 #include <filesystem>
 #include <map>
 #include <string>
+#include <string_view>
 #include <variant>
 #include <vector>
 
@@ -98,6 +99,9 @@ namespace MWBase
         // `arg` is either forwarded from MWGui::pushGuiMode or empty
         virtual void uiModeChanged(const MWWorld::Ptr& arg) = 0;
         virtual void savePermanentStorage(const std::filesystem::path& userConfigPath) = 0;
+        virtual void prepareMultiplayerPlayerStorage() = 0;
+        virtual bool bindMultiplayerPlayerStorage(std::string_view storageNamespace,
+            std::string_view characterKey, std::string_view characterName, std::string& error) = 0;
 
         // TODO: notify LuaManager about other events
         // virtual void objectOnHit(const MWWorld::Ptr &ptr, float damage, bool ishealth, const MWWorld::Ptr &object,

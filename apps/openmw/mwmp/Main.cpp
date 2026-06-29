@@ -1,6 +1,7 @@
 #include "Main.hpp"
 #include "Identity.hpp"
 #include "MpNetworkBridge.hpp"
+#include "sha256.hpp"
 #include <algorithm>
 #include <cctype>
 #include <cstring>
@@ -65,6 +66,7 @@
 
 #include <components/openmw-mp/Packets/Player/PacketPlayerCharGen.hpp>
 #include "../mwbase/environment.hpp"
+#include "../mwbase/luamanager.hpp"
 #include "../mwbase/statemanager.hpp"
 #include "../mwbase/mechanicsmanager.hpp"
 #include "../mwbase/windowmanager.hpp"
@@ -166,6 +168,7 @@ bool Main::init(const std::string& host, uint16_t port,
         sInstance->mHost           = host;
         sInstance->mPort           = port;
         sInstance->mPlayerSync->localPlayer().name = playerName;
+        MWBase::Environment::get().getLuaManager()->prepareMultiplayerPlayerStorage();
 
         // Attempt connection
         sInstance->mClient->setStateChangeCallback(
@@ -470,6 +473,7 @@ void Main::onDisconnected()
         mUnexpectedDisconnect = true;
     mWorldReady         = false;
     mCharacterDataReady = false;
+    mCharacterId        = 0;
     mCharSelectError.clear();
     mCharacterName.clear();
     mCharacterList.clear();
@@ -524,6 +528,7 @@ void Main::sendCharacterSelect(const std::string& charName, bool isNew)
 
     mCharSelectError.clear();
     mCharacterDataReady = false;
+    mCharacterId = 0;
 
     PacketCharacterSelect pkt;
     pkt.charName = charName;
@@ -560,7 +565,6 @@ void Main::tryAutoSelectCharacter()
 bool Main::enterSelectedCharacterWorld(bool allowNewCharacterUi)
 {
     MWBase::WindowManager* windowManager = MWBase::Environment::get().getWindowManager();
-    windowManager->removeGuiMode(MWGui::GM_MainMenu);
 
     const bool isNew = isNewCharacter();
     const std::string spawnCell = getSpawnCell();
@@ -574,6 +578,27 @@ bool Main::enterSelectedCharacterWorld(bool allowNewCharacterUi)
         disconnect("Auto-enter refused incomplete character");
         return false;
     }
+
+    const auto normalizedIdentityPart = [](std::string value) {
+        std::transform(value.begin(), value.end(), value.begin(),
+            [](const unsigned char c) { return static_cast<char>(std::tolower(c)); });
+        return value;
+    };
+    const std::string storageNamespace = crypto::sha256hex(
+        normalizedIdentityPart(mHost) + ":" + std::to_string(mPort) + "\n" + normalizedIdentityPart(mPlayerName));
+    const std::string characterKey = mCharacterId > 0
+        ? "id-" + std::to_string(mCharacterId)
+        : "name-" + crypto::sha256hex(normalizedIdentityPart(worldName));
+    std::string storageError;
+    if (!MWBase::Environment::get().getLuaManager()->bindMultiplayerPlayerStorage(
+            storageNamespace, characterKey, worldName, storageError))
+    {
+        Log(Debug::Error) << "[MP] " << storageError;
+        windowManager->messageBox(storageError);
+        return false;
+    }
+
+    windowManager->removeGuiMode(MWGui::GM_MainMenu);
 
     if (isNew)
     {
@@ -830,6 +855,7 @@ void Main::registerProtocolHandlers()
             if (!cd.decode(data, size)) return;
 
             mIsNewCharacter = cd.isNewCharacter;
+            mCharacterId    = cd.characterId;
             mCharacterName  = cd.characterName;
             // Update the sync layer name to the character slot name so
             // PacketPlayerBaseInfo (sent by forceFullSync in CharacterSelectDialog
@@ -886,6 +912,7 @@ void Main::registerProtocolHandlers()
 
             Log(Debug::Info) << "[MP] CharacterData received: newChar="
                              << (mIsNewCharacter ? "yes" : "no")
+                             << " charId=" << mCharacterId
                              << " charName=" << mCharacterName
                              << " cell=" << mSpawnCell
                              << " pos=(" << mSpawnPos[0] << "," << mSpawnPos[1] << "," << mSpawnPos[2] << ")"

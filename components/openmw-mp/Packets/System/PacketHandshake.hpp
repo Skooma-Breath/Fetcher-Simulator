@@ -239,6 +239,7 @@ namespace mwmp
     {
     public:
         bool        isNewCharacter  = true;
+        int64_t     characterId     = 0;
         std::string spawnCell;
         float spawnX = 0.f, spawnY = 0.f, spawnZ = 0.f;
         float spawnRotX = 0.f, spawnRotY = 0.f, spawnRotZ = 0.f;
@@ -307,6 +308,7 @@ namespace mwmp
         void pack(WriteStream& ws) override
         {
             ws.write(isNewCharacter);
+            ws.write(characterId);
             ws.writeString(spawnCell);
             ws.write(spawnX);    ws.write(spawnY);    ws.write(spawnZ);
             ws.write(spawnRotX); ws.write(spawnRotY); ws.write(spawnRotZ);
@@ -334,6 +336,7 @@ namespace mwmp
         void unpack(ReadStream& rs) override
         {
             rs.read(isNewCharacter);
+            rs.read(characterId);
             spawnCell  = rs.readString();
             rs.read(spawnX);    rs.read(spawnY);    rs.read(spawnZ);
             rs.read(spawnRotX); rs.read(spawnRotY); rs.read(spawnRotZ);

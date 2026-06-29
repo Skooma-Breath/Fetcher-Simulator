@@ -1,6 +1,25 @@
+#ifdef _WIN32
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#endif
+
 #include "luamanagerimp.hpp"
 
+#include <cerrno>
+#include <chrono>
 #include <filesystem>
+#include <system_error>
+#include <thread>
+
+#ifndef _WIN32
+#include <fcntl.h>
+#include <sys/file.h>
+#include <unistd.h>
+#endif
 
 #include <MyGUI_InputManager.h>
 #include <osg/Stats>
@@ -46,8 +65,96 @@
 #include "types/types.hpp"
 #include "userdataserializer.hpp"
 
+#ifdef _WIN32
+#include <windows.h>
+#ifdef near
+#undef near
+#endif
+#ifdef far
+#undef far
+#endif
+#endif
+
 namespace MWLua
 {
+    class PlayerStorageLock
+    {
+    public:
+        PlayerStorageLock() = default;
+        PlayerStorageLock(const PlayerStorageLock&) = delete;
+        PlayerStorageLock& operator=(const PlayerStorageLock&) = delete;
+
+        ~PlayerStorageLock()
+        {
+#ifdef _WIN32
+            if (mHandle != INVALID_HANDLE_VALUE)
+                CloseHandle(mHandle);
+#else
+            if (mFd >= 0)
+            {
+                flock(mFd, LOCK_UN);
+                close(mFd);
+            }
+#endif
+        }
+
+        bool acquire(const std::filesystem::path& path, std::string& error, bool waitForOwner = false)
+        {
+            try
+            {
+                std::filesystem::create_directories(path.parent_path());
+                const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+                while (true)
+                {
+#ifdef _WIN32
+                    mHandle = CreateFileW(path.c_str(), GENERIC_READ | GENERIC_WRITE, 0, nullptr, OPEN_ALWAYS,
+                        FILE_ATTRIBUTE_NORMAL, nullptr);
+                    if (mHandle != INVALID_HANDLE_VALUE)
+                        return true;
+                    const DWORD lockError = GetLastError();
+                    if (!waitForOwner || (lockError != ERROR_SHARING_VIOLATION && lockError != ERROR_LOCK_VIOLATION)
+                        || std::chrono::steady_clock::now() >= deadline)
+                    {
+                        error = std::system_error(static_cast<int>(lockError), std::system_category()).what();
+                        return false;
+                    }
+#else
+                    mFd = open(path.c_str(), O_RDWR | O_CREAT, 0600);
+                    if (mFd < 0)
+                    {
+                        error = std::error_code(errno, std::generic_category()).message();
+                        return false;
+                    }
+                    if (flock(mFd, LOCK_EX | LOCK_NB) == 0)
+                        return true;
+                    const int lockError = errno;
+                    close(mFd);
+                    mFd = -1;
+                    if (!waitForOwner || (lockError != EWOULDBLOCK && lockError != EAGAIN)
+                        || std::chrono::steady_clock::now() >= deadline)
+                    {
+                        error = std::error_code(lockError, std::generic_category()).message();
+                        return false;
+                    }
+#endif
+                    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+                }
+            }
+            catch (const std::exception& e)
+            {
+                error = e.what();
+                return false;
+            }
+        }
+
+    private:
+#ifdef _WIN32
+        HANDLE mHandle = INVALID_HANDLE_VALUE;
+#else
+        int mFd = -1;
+#endif
+    };
+
     namespace
     {
 #ifdef BUILD_MULTIPLAYER
@@ -310,19 +417,25 @@ namespace MWLua
         });
     }
 
-    void LuaManager::loadPermanentStorage(const std::filesystem::path& userConfigPath)
+    void LuaManager::loadPermanentStorage(const std::filesystem::path& userConfigPath,
+        bool deferMultiplayerPlayerStorage, bool isolatedMultiplayerProfile)
     {
         mGlobalStorageMirroredFromServer = false;
         mPlayerStorage.setActive(true);
         mGlobalStorage.setActive(true);
         const auto globalPath = userConfigPath / "global_storage.bin";
-        const auto playerPath = userConfigPath / "player_storage.bin";
+        mDefaultPlayerStoragePath = userConfigPath / "player_storage.bin";
+        mMultiplayerPlayerStorage = deferMultiplayerPlayerStorage || isolatedMultiplayerProfile;
+        mIsolatedMultiplayerProfile = isolatedMultiplayerProfile;
 
         mLua.protectedCall([&](LuaUtil::LuaView& view) {
             if (std::filesystem::exists(globalPath))
                 mGlobalStorage.load(view.sol(), globalPath);
-            if (std::filesystem::exists(playerPath))
-                mPlayerStorage.load(view.sol(), playerPath);
+            if (!deferMultiplayerPlayerStorage && std::filesystem::exists(mDefaultPlayerStoragePath))
+            {
+                mPlayerStorage.load(view.sol(), mDefaultPlayerStoragePath);
+                mLoadedPlayerStoragePath = mDefaultPlayerStoragePath;
+            }
         });
     }
 
@@ -333,8 +446,118 @@ namespace MWLua
                 mGlobalStorage.save(view.sol(), userConfigPath / "global_storage.bin");
             else if (mGlobalScriptsStarted)
                 Log(Debug::Info) << "Skipping Lua global storage save because it is mirrored from the multiplayer server";
-            mPlayerStorage.save(view.sol(), userConfigPath / "player_storage.bin");
+
+            if (mMultiplayerPlayerStorage)
+            {
+                if (mBoundPlayerStoragePath)
+                    mPlayerStorage.save(view.sol(), *mBoundPlayerStoragePath);
+                else
+                    Log(Debug::Verbose) << "Skipping unbound multiplayer player Lua storage save";
+            }
+            else
+                mPlayerStorage.save(view.sol(), userConfigPath / "player_storage.bin");
         });
+    }
+
+    void LuaManager::prepareMultiplayerPlayerStorage()
+    {
+        mMultiplayerPlayerStorage = true;
+    }
+
+    bool LuaManager::bindMultiplayerPlayerStorage(std::string_view storageNamespace,
+        std::string_view characterKey, std::string_view characterName, std::string& error)
+    {
+        const auto isSafePathComponent = [](std::string_view value) {
+            return !value.empty()
+                && value.find_first_not_of("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_")
+                    == std::string_view::npos;
+        };
+        if (!isSafePathComponent(storageNamespace) || !isSafePathComponent(characterKey))
+        {
+            error = "Invalid multiplayer player storage identity";
+            return false;
+        }
+
+        prepareMultiplayerPlayerStorage();
+        const std::filesystem::path storagePath = mIsolatedMultiplayerProfile
+            ? mDefaultPlayerStoragePath
+            : mDefaultPlayerStoragePath.parent_path() / "multiplayer-characters"
+                / std::string(storageNamespace) / std::string(characterKey) / "player_storage.bin";
+
+        if (mBoundPlayerStoragePath && *mBoundPlayerStoragePath == storagePath && mPlayerStorageLock)
+            return true;
+
+        auto nextLock = std::make_unique<PlayerStorageLock>();
+        if (!nextLock->acquire(storagePath.parent_path() / "player_storage.lock", error))
+        {
+            error = "Character '" + std::string(characterName)
+                + "' is already open in another client, or its storage lock is unavailable: " + error;
+            return false;
+        }
+
+        try
+        {
+            if (!mIsolatedMultiplayerProfile && !std::filesystem::exists(storagePath)
+                && std::filesystem::exists(mDefaultPlayerStoragePath))
+            {
+                PlayerStorageLock migrationLock;
+                std::string migrationError;
+                if (!migrationLock.acquire(
+                        mDefaultPlayerStoragePath.parent_path() / "player_storage.migration.lock",
+                        migrationError, true))
+                {
+                    throw std::runtime_error("Unable to acquire shared player storage migration lock: " + migrationError);
+                }
+
+                if (!std::filesystem::exists(storagePath) && std::filesystem::exists(mDefaultPlayerStoragePath))
+                {
+                    if (mLoadedPlayerStoragePath && *mLoadedPlayerStoragePath == mDefaultPlayerStoragePath)
+                    {
+                        mLua.protectedCall([&](LuaUtil::LuaView& view) {
+                            mPlayerStorage.save(view.sol(), mDefaultPlayerStoragePath);
+                        });
+                    }
+                    std::filesystem::create_directories(storagePath.parent_path());
+                    std::filesystem::rename(mDefaultPlayerStoragePath, storagePath);
+                    Log(Debug::Info) << "[MP] Migrated shared player Lua storage to character-bound path: "
+                                     << storagePath;
+                }
+            }
+
+            if (mBoundPlayerStoragePath && *mBoundPlayerStoragePath != storagePath)
+            {
+                mLua.protectedCall(
+                    [&](LuaUtil::LuaView& view) { mPlayerStorage.save(view.sol(), *mBoundPlayerStoragePath); });
+            }
+
+            if (!mLoadedPlayerStoragePath || *mLoadedPlayerStoragePath != storagePath)
+            {
+                bool loaded = false;
+                std::string loadError;
+                mLua.protectedCall([&](LuaUtil::LuaView& view) {
+                    loaded = mPlayerStorage.replaceFromFile(view.sol(), storagePath, loadError);
+                });
+                if (!loaded)
+                {
+                    error = "Could not load player storage for character '" + std::string(characterName)
+                        + "': " + loadError;
+                    return false;
+                }
+            }
+        }
+        catch (const std::exception& e)
+        {
+            error = "Could not bind player storage for character '" + std::string(characterName) + "': " + e.what();
+            return false;
+        }
+
+        mLoadedPlayerStoragePath = storagePath;
+        mBoundPlayerStoragePath = storagePath;
+        mPlayerStorageLock = std::move(nextLock);
+        Log(Debug::Info) << "[MP] Bound character player Lua storage"
+                         << " character=" << characterName
+                         << " path=" << storagePath;
+        return true;
     }
 
     void LuaManager::sendLocalEvent(

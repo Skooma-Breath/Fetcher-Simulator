@@ -202,6 +202,7 @@ bool parseOptions(int argc, char** argv, OMW::Engine& engine, Files::Configurati
 
 #ifdef BUILD_MULTIPLAYER
     const auto multiplayerProfile = applyMultiplayerProfile(variables);
+    engine.setMultiplayerProfileIsolation(multiplayerProfile.has_value());
 #endif
 
     cfgMgr.readConfiguration(variables, desc);
