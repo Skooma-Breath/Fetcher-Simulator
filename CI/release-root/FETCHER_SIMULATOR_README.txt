@@ -27,6 +27,26 @@ First-time setup
 The Bardcraft installer stops before downloading mods if Morrowind.esm is not
 registered in this portable install's openmw.cfg.
 
+Updating an existing install
+----------------------------
+
+Close OpenMW and double-click:
+
+   Update-Fetcher-Simulator.bat
+
+The updater checks the Fetcher-Simulator Git commit and GitHub release digest.
+It downloads the full client only when the packaged client changed. It checks
+the Bardcraft multiplayer patch separately, so script-only fixes do not require
+another full client download.
+
+Client files are staged, hash-verified, and installed with rollback. The updater
+does not overwrite openmw.cfg, settings.cfg, userdata, saves, screenshots, logs,
+mp-keys, UMO downloads/configuration, databases, custom server MIDI files, or
+other files that are not owned by the Fetcher release inventory.
+
+Do not move only the updater BAT into another OpenMW install. Run it from the
+root of the Fetcher Simulator release beside openmw.exe.
+
 UMO install path
 ----------------
 
@@ -55,9 +75,10 @@ download it from the Fetcher Simulator GitHub prerelease.
 
 After UMO installs the Nexus version of Bardcraft, the helper downloads the
 small Fetcher Bardcraft multiplayer compatibility patch from its own GitHub
-prerelease. It verifies the patch checksum and the installed Bardcraft scripts
-before applying anything. Unsupported or locally modified Bardcraft versions
-are left unchanged and reported as an error.
+prerelease. It reads the current asset checksum from GitHub, then verifies the
+download and the installed Bardcraft scripts before applying anything.
+Unsupported or locally modified Bardcraft versions are left unchanged and
+reported as an error.
 
 The helper tells UMO to install the mods inside this package under:
 

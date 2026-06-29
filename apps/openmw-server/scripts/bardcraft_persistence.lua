@@ -232,6 +232,25 @@ local function copyRelayValue(value, depth)
     return copy
 end
 
+local function sessionAckResolvesHighChurn(sessionPayload, status)
+    if type(status) ~= "table" then
+        return false
+    end
+    if status.ok == true or status.reason == "missing-remote-actor" then
+        return true
+    end
+
+    local importedSong = sessionPayload.songIsImportedMidi == true
+        or sessionPayload.songIsMpCustom == true
+        or sessionPayload.songIsServerCustom == true
+        or sessionPayload.songServerHosted == true
+    if importedSong then
+        return not bardcraftNetworkPolicy.allowImportedMidiLiveRelayFallback
+    end
+    return bardcraftNetworkPolicy.requireLocalSongHash
+        and (status.reason == "missing-song" or status.reason == "missing-part-notes")
+end
+
 local function shouldDropHighChurnRelayBeforeCopy(guid, sourceCell, session, eventType)
     if not highChurnPerformanceEvents[eventType] then
         return false
@@ -261,16 +280,38 @@ local function shouldDropHighChurnRelayBeforeCopy(guid, sourceCell, session, eve
 
     local receiverCount = 0
     local ackedCount = 0
+    local waiting = {}
     for _, target in ipairs(mp.getPlayers()) do
         local targetGuid = tonumber(target.guid)
         if targetGuid and targetGuid ~= tonumber(guid) and playerCellKey(target) == sourceCell then
             receiverCount = receiverCount + 1
-            if session.acked and session.acked[targetGuid] then
-                ackedCount = ackedCount + 1
+            local status = session.ackStatus and session.ackStatus[targetGuid] or nil
+            if sessionAckResolvesHighChurn(sessionPayload, status) then
+                if status.ok == true then
+                    ackedCount = ackedCount + 1
+                end
             else
-                return false
+                table.insert(waiting, status and string.format(
+                    "%s:nack(%s)",
+                    tostring(targetGuid),
+                    tostring(status.reason)) or tostring(targetGuid))
             end
         end
+    end
+
+    if #waiting > 0 then
+        local waitSeconds = serverUptime() - (tonumber(session.serverStartTime) or serverUptime())
+        if waitSeconds >= 2 and not session.ackWaitLogged then
+            session.ackWaitLogged = true
+            mp.log(string.format(
+                "[bardcraft] performance session waiting for receiver ack session=%s song=%s wait=%.3f receivers=%d waiting=%s",
+                tostring(session.key),
+                tostring(sessionPayload.songTitle),
+                waitSeconds,
+                receiverCount,
+                table.concat(waiting, ",")))
+        end
+        return false
     end
 
     session.suppressedHighChurn = (tonumber(session.suppressedHighChurn) or 0) + receiverCount
@@ -280,7 +321,7 @@ local function shouldDropHighChurnRelayBeforeCopy(guid, sourceCell, session, eve
             "[bardcraft] performance session fast-dropping high churn session=%s event=%s reason=%s receivers=%d acked=%d",
             tostring(session.key),
             tostring(eventType),
-            receiverCount == 0 and "no-receivers" or "receivers-already-session-acked",
+            receiverCount == 0 and "no-receivers" or "receivers-session-resolved",
             receiverCount,
             ackedCount))
     end
@@ -480,6 +521,8 @@ local function updateActivePerformanceSession(guid, source, actorId, payload, re
         sessionSequence = performanceSessionSequence,
         payload = copyRelayValue(payload, 0),
         acked = {},
+        ackStatus = {},
+        sourceStartAckSent = false,
     }
     return activePerformanceSessions[key]
 end
@@ -755,6 +798,51 @@ local function stopChildPerformanceSessions(parentSessionKey, reason)
     end
 
     return removed
+end
+
+local function relaySongIdentity(song)
+    if type(song) ~= "table" then
+        return nil
+    end
+    if trim(song.contentHash) ~= "" then
+        return "hash:" .. tostring(song.contentHash)
+    end
+    if bardcraftNetworkPolicy.requireLocalSongHash then
+        return nil
+    end
+    if song.id ~= nil then
+        return "id:" .. tostring(song.id)
+    end
+    if song.sourceFile ~= nil then
+        return "file:" .. tostring(song.sourceFile)
+    end
+    if song.title ~= nil then
+        return "title:" .. tostring(song.title)
+    end
+    return nil
+end
+
+local function sameOptionalValue(left, right)
+    return tostring(left or "") == tostring(right or "")
+end
+
+local function isEquivalentActivePerformanceStart(session, sourceCell, event)
+    if type(session) ~= "table" or type(session.payload) ~= "table" or type(event) ~= "table" then
+        return false
+    end
+    if session.cell ~= sourceCell then
+        return false
+    end
+
+    local song = type(event.song) == "table" and event.song or {}
+    local part = type(event.part) == "table" and event.part or {}
+    return sessionSongIdentity(session.payload) == relaySongIdentity(song)
+        and sameOptionalValue(session.parentSessionKey, event.joinedSessionKey)
+        and sameOptionalValue(session.bandSessionId, event.bandSessionId)
+        and sameOptionalValue(session.payload.partIndex, part.index)
+        and sameOptionalValue(session.payload.instrument, event.instrument)
+        and sameOptionalValue(session.payload.item, event.item)
+        and sameOptionalValue(session.payload.perfType, event.perfType)
 end
 
 local function stopBandSessionPerformanceSessions(bandSessionId, sourceSessionKey, reason)
@@ -2188,6 +2276,32 @@ local function relayBardcraftPerformanceEvent(guid, data)
     local sourceCell = playerCellKey(source)
     local sessionKey = performanceSessionKey(guid, data.actorId)
     local session = activePerformanceSessions[sessionKey]
+    if eventType == "PerformStart" and isEquivalentActivePerformanceStart(session, sourceCell, data.event) then
+        session.duplicateStartCount = (tonumber(session.duplicateStartCount) or 0) + 1
+        if session.duplicateStartCount == 1 then
+            mp.log(string.format(
+                "[bardcraft] duplicate performance start suppressed guid=%s name=%s session=%s song=%s",
+                tostring(guid),
+                tostring(source.name),
+                tostring(sessionKey),
+                tostring(session.payload.songTitle)))
+        end
+        if not session.sourceStartAckSent then
+            session.sourceStartAckSent = true
+            mp.send(tonumber(guid), "BC_BardcraftPerformanceRelayAck", {
+                eventType = eventType,
+                sent = 0,
+                suppressed = 0,
+                suppressHighChurn = session.payload.songIsImportedMidi == true
+                    and not bardcraftNetworkPolicy.allowImportedMidiLiveRelayFallback,
+                duplicate = true,
+                song = session.payload.songTitle,
+                sessionKey = sessionKey,
+                actorId = tostring(data.actorId),
+            })
+        end
+        return
+    end
     if shouldDropHighChurnRelayBeforeCopy(guid, sourceCell, session, eventType) then
         return
     end
@@ -2274,7 +2388,9 @@ local function relayBardcraftPerformanceEvent(guid, data)
     for _, target in ipairs(mp.getPlayers()) do
         local targetGuid = tonumber(target.guid)
         if targetGuid and targetGuid ~= tonumber(guid) and playerCellKey(target) == sourceCell then
-            if session and highChurnPerformanceEvents[eventType] and session.acked[targetGuid] then
+            if session and highChurnPerformanceEvents[eventType]
+                and sessionAckResolvesHighChurn(session.payload or {}, session.ackStatus and session.ackStatus[targetGuid])
+            then
                 suppressed = suppressed + 1
                 session.suppressedHighChurn = (tonumber(session.suppressedHighChurn) or 0) + 1
             else
@@ -2333,6 +2449,9 @@ local function relayBardcraftPerformanceEvent(guid, data)
             sessionKey = sessionKey,
             actorId = tostring(data.actorId),
         })
+        if eventType == "PerformStart" and session then
+            session.sourceStartAckSent = true
+        end
     end
 end
 
@@ -3764,6 +3883,8 @@ M.eventHandlers = {
             sessionSequence = performanceSessionSequence,
             payload = copyRelayValue(childRelayPayload, 0),
             acked = {},
+            ackStatus = {},
+            sourceStartAckSent = false,
         }
         mp.log(string.format(
             "[bardcraft] join child session registered key=%s sourceGuid=%s sourceChar=%s parent=%s",
@@ -3797,7 +3918,14 @@ M.eventHandlers = {
             return
         end
 
-        session.acked[tonumber(guid)] = data.ok == true
+        local targetGuid = tonumber(guid)
+        session.acked[targetGuid] = data.ok == true
+        session.ackStatus = session.ackStatus or {}
+        session.ackStatus[targetGuid] = {
+            ok = data.ok == true,
+            reason = data.reason,
+            receivedAt = serverUptime(),
+        }
         mp.log(string.format(
             "[bardcraft] performance session ack guid=%s session=%s ok=%s reason=%s",
             tostring(guid),

@@ -322,6 +322,14 @@ jobs:
         if [ -d pdb ]; then cp install/CI-ID.txt pdb/CI-ID.txt; fi
         if [ -d SymStore ]; then cp install/CI-ID.txt SymStore/CI-ID.txt; fi
 
+    - name: Generate Fetcher client update inventory
+      if: ${{ inputs.package && inputs.release && inputs.release-tag == 'Fetcher-Simulator' }}
+      shell: pwsh
+      run: |
+        ${{ github.workspace }}\CI\Build-FetcherClientInventory.ps1 `
+          -InstallDir "${{ github.workspace }}\portable-install" `
+          -ClientCommit "${{ github.sha }}"
+
     - name: Store OpenMW archived pdb files
       if: ${{ inputs.package }}
       uses: actions/upload-artifact@v4
@@ -452,6 +460,9 @@ jobs:
         }
         $zip = Join-Path $assets $zipName
         Compress-Archive -Path "$portableRoot\*" -DestinationPath $zip -CompressionLevel Optimal -Force
+        if ("${{ inputs.release-tag }}" -eq "Fetcher-Simulator") {
+          Copy-Item -LiteralPath (Join-Path $portableRoot "fetcher-bardcraft-umo.json") -Destination $assets -Force
+        }
 
     - name: Create OpenMW client prerelease
       if: ${{ inputs.release }}

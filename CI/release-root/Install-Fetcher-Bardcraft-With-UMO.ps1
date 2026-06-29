@@ -17,7 +17,8 @@ param(
     [bool] $ApplyPublicTestConfig = $true,
     [string] $BardcraftPatchAssetName = "fetcher-bardcraft-mp-patch-v2.zip",
     [string] $BardcraftPatchUrl = "https://github.com/Skooma-Breath/Fetcher-Simulator/releases/download/fetcher-bardcraft-mp-patch-v2/fetcher-bardcraft-mp-patch-v2.zip",
-    [string] $BardcraftPatchSha256 = "ced402accb7a1c09b57433f78500cb222a0a5703335b297ed02cfad422490128"
+    [string] $BardcraftPatchReleaseApiUrl = "https://api.github.com/repos/Skooma-Breath/Fetcher-Simulator/releases/tags/fetcher-bardcraft-mp-patch-v2",
+    [string] $BardcraftPatchSha256 = ""
 )
 
 $ErrorActionPreference = "Stop"
@@ -448,8 +449,26 @@ function Resolve-BardcraftDataRoot {
 function Install-BardcraftMultiplayerPatch {
     param([Parameter(Mandatory = $true)][string] $BardcraftDataRoot)
 
-    if ([string]::IsNullOrWhiteSpace($BardcraftPatchSha256)) {
-        throw "BardcraftPatchSha256 must be set when the multiplayer patch is enabled."
+    $expectedHash = ([string]$BardcraftPatchSha256).Trim().ToLowerInvariant()
+    if ([string]::IsNullOrWhiteSpace($expectedHash)) {
+        Write-Host "Reading current Bardcraft multiplayer patch checksum from GitHub..."
+        $release = Invoke-RestMethod -UseBasicParsing -Uri $BardcraftPatchReleaseApiUrl `
+            -Headers @{ "User-Agent" = "Fetcher-Simulator-Installer" }
+        if ($release -is [string]) {
+            $release = $release | ConvertFrom-Json
+        }
+        $assets = @($release.assets | Where-Object { [string]$_.name -eq $BardcraftPatchAssetName })
+        if ($assets.Count -ne 1) {
+            throw "Expected one GitHub release asset named $BardcraftPatchAssetName, found $($assets.Count)."
+        }
+        $digest = [string]$assets[0].digest
+        if ($digest -notmatch "^sha256:([0-9a-fA-F]{64})$") {
+            throw "GitHub did not provide a SHA-256 digest for $BardcraftPatchAssetName."
+        }
+        $expectedHash = $Matches[1].ToLowerInvariant()
+    }
+    elseif ($expectedHash -notmatch "^[0-9a-f]{64}$") {
+        throw "BardcraftPatchSha256 must be a 64-character SHA-256 hash."
     }
 
     $patchRoot = Join-Path $umoWorkRoot "bardcraft-mp-patch"
@@ -457,7 +476,6 @@ function Install-BardcraftMultiplayerPatch {
     $zipPath = Join-Path $patchRoot $BardcraftPatchAssetName
     New-Item -ItemType Directory -Force -Path $patchRoot | Out-Null
 
-    $expectedHash = $BardcraftPatchSha256.ToLowerInvariant()
     $downloadRequired = $true
     if (Test-Path -LiteralPath $zipPath -PathType Leaf) {
         $downloadRequired = (Get-FileHash -LiteralPath $zipPath -Algorithm SHA256).Hash.ToLowerInvariant() -ne $expectedHash

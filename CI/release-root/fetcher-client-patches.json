@@ -1,0 +1,16 @@
+{
+  "schemaVersion": 1,
+  "patches": [
+    {
+      "id": "bardcraft-mp-v2",
+      "name": "Fetcher Bardcraft multiplayer compatibility",
+      "releaseTag": "fetcher-bardcraft-mp-patch-v2",
+      "assetName": "fetcher-bardcraft-mp-patch-v2.zip",
+      "targetPlugin": "Bardcraft.ESP",
+      "requiredSubdirectory": "scripts/Bardcraft",
+      "applierPattern": "Apply-Fetcher-Bardcraft-MPPatch.ps1",
+      "targetParameter": "BardcraftDataRoot",
+      "markerFile": "fetcher-bardcraft-mp-patch.json"
+    }
+  ]
+}

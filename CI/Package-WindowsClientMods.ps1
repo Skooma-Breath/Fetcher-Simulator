@@ -220,6 +220,7 @@ Set-Content -LiteralPath $readmePath -Encoding ASCII -Value @(
     "Writable config, logs, saves, screenshots, and generated user files are stored under .\userdata.",
     "Load order and content entries are stored directly in .\openmw.cfg so the package works without per-user OpenMW config.",
     "Portable graphics defaults are seeded in settings.cfg and .\userdata\settings.cfg. Launcher changes are saved to .\userdata\settings.cfg.",
+    "For later releases, close OpenMW and run .\Update-Fetcher-Simulator.bat. It preserves portable config and player data.",
     "",
     "Bundled mod files live under .\Data Files unless the package manifest declares additional data directories."
 )
