@@ -351,7 +351,23 @@ function Test-UmoNxmHandler {
     }
 
     $resolvedUmo = (Resolve-Path -LiteralPath $UmoExecutable).Path
-    return $command.IndexOf($resolvedUmo, [System.StringComparison]::OrdinalIgnoreCase) -ge 0
+    $expectedCommand = '"' + $resolvedUmo + '" "%1"'
+    return $command.Equals($expectedCommand, [System.StringComparison]::OrdinalIgnoreCase)
+}
+
+function Set-UmoUrlHandler {
+    param(
+        [Parameter(Mandatory = $true)][string] $Scheme,
+        [Parameter(Mandatory = $true)][string] $UmoExecutable
+    )
+
+    $resolvedUmo = (Resolve-Path -LiteralPath $UmoExecutable).Path
+    $schemeKey = "Registry::HKEY_CURRENT_USER\Software\Classes\$Scheme"
+    $commandKey = Join-Path $schemeKey "shell\open\command"
+    New-Item -Path $commandKey -Force | Out-Null
+    Set-Item -LiteralPath $schemeKey -Value "URL:$Scheme Protocol"
+    New-ItemProperty -LiteralPath $schemeKey -Name "URL Protocol" -Value "" -PropertyType String -Force | Out-Null
+    Set-Item -LiteralPath $commandKey -Value ('"' + $resolvedUmo + '" "%1"')
 }
 
 function Initialize-UmoProtocolHandler {
@@ -363,12 +379,11 @@ function Initialize-UmoProtocolHandler {
 
     Write-Host ""
     Write-Host "Registering this portable UMO as the Nexus download handler..."
-    Invoke-Checked -Description "umo setup" -Command {
-        "y" | & $UmoExecutable setup
-    }
+    Set-UmoUrlHandler -Scheme "nxm" -UmoExecutable $UmoExecutable
+    Set-UmoUrlHandler -Scheme "momw" -UmoExecutable $UmoExecutable
 
     if (-not (Test-UmoNxmHandler -UmoExecutable $UmoExecutable)) {
-        throw "UMO setup completed, but Windows did not register this copy of umo.exe for nxm:// links."
+        throw "Windows did not register this copy of umo.exe for nxm:// links."
     }
 }
 
