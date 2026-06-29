@@ -5,7 +5,7 @@ import base64
 import difflib
 import hashlib
 import json
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 
 def sha256(data: bytes) -> str:
@@ -64,6 +64,14 @@ def main() -> None:
         type=Path,
         help="Manifest whose verified outputs may be upgraded in place.",
     )
+    parser.add_argument(
+        "--extra-file",
+        action="append",
+        default=[],
+        nargs=3,
+        metavar=("TARGET_PATH", "VANILLA_FILE", "FETCHER_FILE"),
+        help="Hash-gated file relative to the Bardcraft data root.",
+    )
     args = parser.parse_args()
 
     vanilla_root = args.vanilla_root.resolve()
@@ -113,8 +121,53 @@ def main() -> None:
             record["priorOutputSha256"] = prior_output_hashes
         records.append(record)
 
+    existing_record_paths = {record["path"] for record in records}
+    for target_path, vanilla_path, fetcher_path in args.extra_file:
+        normalized_target = PurePosixPath(target_path.replace("\\", "/"))
+        if ":" in target_path or normalized_target.is_absolute() or not normalized_target.parts or any(
+            part in {"", ".", ".."} for part in normalized_target.parts
+        ):
+            raise RuntimeError(f"Invalid extra-file target path: {target_path}")
+        relative_path = normalized_target.as_posix()
+        if relative_path in existing_record_paths:
+            raise RuntimeError(f"Duplicate patch record path: {relative_path}")
+
+        vanilla_file = Path(vanilla_path).resolve()
+        fetcher_file = Path(fetcher_path).resolve()
+        if not vanilla_file.is_file():
+            raise RuntimeError(f"Extra-file upstream source is missing: {vanilla_file}")
+        if not fetcher_file.is_file():
+            raise RuntimeError(f"Extra-file Fetcher source is missing: {fetcher_file}")
+
+        source = vanilla_file.read_bytes()
+        output = fetcher_file.read_bytes()
+        if source == output:
+            continue
+        source_hash = sha256(source)
+        output_hash = sha256(output)
+        prior_output_hashes = sorted(
+            value
+            for value in previous_outputs.get(relative_path, set())
+            if value not in {source_hash, output_hash}
+        )
+        record = {
+            "path": relative_path,
+            "targetBase": "data",
+            "sourceSha256": source_hash,
+            "sourceSize": len(source),
+            "outputSha256": output_hash,
+            "outputSize": len(output),
+            "operations": make_operations(source, output),
+        }
+        if prior_output_hashes:
+            record["priorOutputSha256"] = prior_output_hashes
+        records.append(record)
+        existing_record_paths.add(relative_path)
+
+    records.sort(key=lambda record: (record.get("targetBase", "scripts"), record["path"]))
+
     manifest = {
-        "formatVersion": 1,
+        "formatVersion": 2,
         "patchVersion": args.version,
         "targetSubdirectory": "scripts/Bardcraft",
         "upstream": {

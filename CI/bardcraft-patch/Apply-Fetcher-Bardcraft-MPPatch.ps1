@@ -12,6 +12,45 @@ function Get-Sha256 {
     return (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash.ToLowerInvariant()
 }
 
+function ConvertTo-SafeRelativePath {
+    param([Parameter(Mandatory = $true)][string] $Path)
+
+    $normalized = $Path.Replace("/", "\").TrimStart("\")
+    if ([string]::IsNullOrWhiteSpace($normalized) -or [IO.Path]::IsPathRooted($normalized) -or $normalized.Contains(":")) {
+        throw "Patch contains an invalid target path: $Path"
+    }
+    $segments = @($normalized.Split("\", [StringSplitOptions]::RemoveEmptyEntries))
+    if ($segments.Count -eq 0 -or @($segments | Where-Object { $_ -eq "." -or $_ -eq ".." }).Count -gt 0) {
+        throw "Patch target path escapes the Bardcraft data root: $Path"
+    }
+    return ($segments -join "\")
+}
+
+function Resolve-PatchRecordLocation {
+    param(
+        [Parameter(Mandatory = $true)] $Record,
+        [Parameter(Mandatory = $true)][string] $DataRoot,
+        [Parameter(Mandatory = $true)][string] $ScriptRoot
+    )
+
+    $relativePath = ConvertTo-SafeRelativePath -Path ([string]$Record.path)
+    $properties = @($Record.PSObject.Properties.Name)
+    $targetBase = if ($properties -contains "targetBase") { [string]$Record.targetBase } else { "scripts" }
+    if ($targetBase -eq "scripts") {
+        return [pscustomobject]@{
+            TargetPath = Join-Path $ScriptRoot $relativePath
+            BackupRelativePath = $relativePath
+        }
+    }
+    if ($targetBase -eq "data") {
+        return [pscustomobject]@{
+            TargetPath = Join-Path $DataRoot $relativePath
+            BackupRelativePath = Join-Path "__data" $relativePath
+        }
+    }
+    throw "Patch contains an unknown target base for $($Record.path): $targetBase"
+}
+
 function Find-VerifiedSourceBackup {
     param(
         [Parameter(Mandatory = $true)][string] $DataRoot,
@@ -78,7 +117,7 @@ if (-not (Test-Path -LiteralPath $manifestPath -PathType Leaf)) {
 }
 
 $manifest = Get-Content -Raw -LiteralPath $manifestPath | ConvertFrom-Json
-if ([int]$manifest.formatVersion -ne 1) {
+if ([int]$manifest.formatVersion -notin @(1, 2)) {
     throw "Unsupported Fetcher Bardcraft patch format: $($manifest.formatVersion)"
 }
 
@@ -98,8 +137,9 @@ try {
     New-Item -ItemType Directory -Force -Path $stageRoot | Out-Null
 
     foreach ($record in $manifest.files) {
-        $relativePath = ([string]$record.path).Replace("/", "\")
-        $targetPath = Join-Path $targetRoot $relativePath
+        $location = Resolve-PatchRecordLocation -Record $record -DataRoot $dataRoot -ScriptRoot $targetRoot
+        $relativePath = $location.BackupRelativePath
+        $targetPath = $location.TargetPath
         $outputHash = ([string]$record.outputSha256).ToLowerInvariant()
         $sourceHash = if ($null -eq $record.sourceSha256) { $null } else { ([string]$record.sourceSha256).ToLowerInvariant() }
         $recordProperties = @($record.PSObject.Properties.Name)
@@ -154,6 +194,7 @@ try {
             TargetPath = $targetPath
             StagedPath = $stagedPath
             Existed = Test-Path -LiteralPath $targetPath -PathType Leaf
+            Record = $record
         })
     }
 
@@ -173,14 +214,15 @@ try {
                 New-Item -ItemType Directory -Force -Path (Split-Path -Parent $item.TargetPath) | Out-Null
                 $applied.Add($item)
                 Copy-Item -LiteralPath $item.StagedPath -Destination $item.TargetPath -Force
-                $record = $manifest.files | Where-Object { ([string]$_.path).Replace("/", "\") -eq $item.RelativePath } | Select-Object -First 1
+                $record = $item.Record
                 if ((Get-Sha256 -Path $item.TargetPath) -ne ([string]$record.outputSha256).ToLowerInvariant()) {
                     throw "Installed output failed verification for $($record.path)."
                 }
             }
 
             foreach ($record in $manifest.files) {
-                $targetPath = Join-Path $targetRoot ([string]$record.path).Replace("/", "\")
+                $location = Resolve-PatchRecordLocation -Record $record -DataRoot $dataRoot -ScriptRoot $targetRoot
+                $targetPath = $location.TargetPath
                 if (-not (Test-Path -LiteralPath $targetPath -PathType Leaf) -or
                     (Get-Sha256 -Path $targetPath) -ne ([string]$record.outputSha256).ToLowerInvariant()) {
                     throw "Final verification failed for $($record.path)."

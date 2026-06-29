@@ -16,7 +16,7 @@ set "TEMP_SCRIPT=%TEMP%\Fetcher-Simulator-Updater-%RANDOM%-%RANDOM%.ps1"
 copy /y "%SCRIPT%" "%TEMP_SCRIPT%" >nul
 if errorlevel 1 goto copy_failed
 
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%TEMP_SCRIPT%" -InstallRoot "%ROOT%" %*
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%TEMP_SCRIPT%" -InstallRoot "%ROOT%." %*
 set "RESULT=%ERRORLEVEL%"
 del /q "%TEMP_SCRIPT%" >nul 2>&1
 echo.
