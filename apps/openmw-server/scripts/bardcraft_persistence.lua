@@ -1,4 +1,5 @@
 local mp = require("mp")
+local networkPolicy = require("bardcraft_network_policy")
 local config = require("config")
 
 local M = {}
@@ -108,42 +109,9 @@ local function trim(value)
     return tostring(value or ""):gsub("^%s+", ""):gsub("%s+$", "")
 end
 
-local rawBardcraftConfig = type(config.Bardcraft) == "table" and config.Bardcraft or {}
-local bardcraftNetworkPolicy = {
-    requireLocalSongHash = rawBardcraftConfig.requireLocalSongHash ~= false,
-    communitySongSharingMode = rawBardcraftConfig.communitySongSharingMode == true,
-    communitySongPackUrl = trim(rawBardcraftConfig.communitySongPackUrl),
-}
-bardcraftNetworkPolicy.allowServerHostedMidiDownloads = bardcraftNetworkPolicy.communitySongSharingMode
-    and rawBardcraftConfig.allowServerHostedMidiDownloads == true
-bardcraftNetworkPolicy.allowPlayerSongUpload = bardcraftNetworkPolicy.communitySongSharingMode
-    and rawBardcraftConfig.allowPlayerSongUpload == true
-bardcraftNetworkPolicy.allowImportedMidiLiveRelayFallback = bardcraftNetworkPolicy.communitySongSharingMode
-    and rawBardcraftConfig.allowImportedMidiLiveRelayFallback == true
-
-local function copyNetworkPolicy()
-    return {
-        requireLocalSongHash = bardcraftNetworkPolicy.requireLocalSongHash,
-        communitySongSharingMode = bardcraftNetworkPolicy.communitySongSharingMode,
-        allowServerHostedMidiDownloads = bardcraftNetworkPolicy.allowServerHostedMidiDownloads,
-        allowPlayerSongUpload = bardcraftNetworkPolicy.allowPlayerSongUpload,
-        allowImportedMidiLiveRelayFallback = bardcraftNetworkPolicy.allowImportedMidiLiveRelayFallback,
-        communitySongPackUrl = bardcraftNetworkPolicy.communitySongPackUrl,
-    }
-end
-
-local function applyNetworkPolicyFields(payload)
-    if type(payload) ~= "table" then
-        return payload
-    end
-    payload.bardcraftRequireLocalSongHash = bardcraftNetworkPolicy.requireLocalSongHash
-    payload.bardcraftCommunitySongSharingMode = bardcraftNetworkPolicy.communitySongSharingMode
-    payload.bardcraftAllowServerHostedMidiDownloads = bardcraftNetworkPolicy.allowServerHostedMidiDownloads
-    payload.bardcraftAllowPlayerSongUpload = bardcraftNetworkPolicy.allowPlayerSongUpload
-    payload.bardcraftAllowImportedMidiLiveRelayFallback = bardcraftNetworkPolicy.allowImportedMidiLiveRelayFallback
-    payload.bardcraftCommunitySongPackUrl = bardcraftNetworkPolicy.communitySongPackUrl
-    return payload
-end
+local bardcraftNetworkPolicy = networkPolicy.get()
+local copyNetworkPolicy = networkPolicy.copy
+local applyNetworkPolicyFields = networkPolicy.applyFields
 
 local function sendSongUnavailable(guid, reason, songTitle, expectedHash, actualHash)
     if not guid then
@@ -3460,6 +3428,7 @@ end
 
 M.eventHandlers = {
     OnServerInit = function(_)
+        networkPolicy.reset()
         pendingJoinRequests = {}
         activePerformanceSessions = {}
         activeBandsByLeaderGuid = {}

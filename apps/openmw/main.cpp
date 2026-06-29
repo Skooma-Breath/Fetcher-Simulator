@@ -12,6 +12,7 @@
 #include "engine.hpp"
 #include "options.hpp"
 #ifdef BUILD_MULTIPLAYER
+#include "mwmp/Identity.hpp"
 #include "mwmp/Main.hpp"
 #include "mwmp/sha256.hpp"
 #endif
@@ -26,12 +27,142 @@
 extern "C" __declspec(dllexport) DWORD AmdPowerXpressRequestHighPerformance = 0x00000001;
 #endif
 
+#include <algorithm>
 #include <chrono>
+#include <cctype>
 #include <filesystem>
+#include <iterator>
 #include <mutex>
+#include <optional>
+#include <string_view>
 
 #if (defined(__APPLE__) || defined(__linux) || defined(__unix) || defined(__posix))
 #include <unistd.h>
+#endif
+
+#ifdef BUILD_MULTIPLAYER
+namespace
+{
+    namespace bpo = boost::program_options;
+
+    struct MultiplayerProfilePaths
+    {
+        std::filesystem::path mConfig;
+        std::filesystem::path mUserData;
+        std::filesystem::path mLogs;
+        std::filesystem::path mKeys;
+    };
+
+    Files::MaybeQuotedPath makeMaybeQuotedPath(const std::filesystem::path& value)
+    {
+        Files::MaybeQuotedPath result;
+        static_cast<std::filesystem::path&>(result) = value;
+        return result;
+    }
+
+    std::string profilePathComponent(std::string_view value)
+    {
+        std::string slug;
+        slug.reserve(value.size());
+        bool replaced = false;
+        bool previousUnderscore = false;
+        for (const unsigned char c : value)
+        {
+            const bool allowed
+                = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '-'
+                || c == '_' || c == '.';
+            const char output = allowed ? static_cast<char>(c) : '_';
+            replaced = replaced || !allowed;
+            if (output == '_' && previousUnderscore)
+                continue;
+            slug.push_back(output);
+            previousUnderscore = output == '_';
+        }
+
+        while (!slug.empty() && (slug.back() == '.' || slug.back() == ' '))
+        {
+            slug.pop_back();
+            replaced = true;
+        }
+        if (slug.empty())
+        {
+            slug = "profile";
+            replaced = true;
+        }
+
+        static constexpr std::string_view reservedNames[] = {
+            "con", "prn", "aux", "nul", "com1", "com2", "com3", "com4", "com5", "com6", "com7", "com8",
+            "com9", "lpt1", "lpt2", "lpt3", "lpt4", "lpt5", "lpt6", "lpt7", "lpt8", "lpt9"
+        };
+        if (slug.size() > 80)
+        {
+            slug.resize(80);
+            replaced = true;
+        }
+
+        std::string lower = slug;
+        std::transform(lower.begin(), lower.end(), lower.begin(),
+            [](const unsigned char c) { return static_cast<char>(std::tolower(c)); });
+        const auto extension = lower.find('.');
+        const std::string_view reservedCandidate
+            = extension == std::string::npos ? std::string_view(lower) : std::string_view(lower).substr(0, extension);
+        if (std::find(std::begin(reservedNames), std::end(reservedNames), reservedCandidate)
+            != std::end(reservedNames))
+        {
+            slug.insert(slug.begin(), '_');
+            replaced = true;
+        }
+
+        if (replaced)
+            slug += "-" + mwmp::crypto::sha256hex(std::string(value)).substr(0, 12);
+        return slug;
+    }
+
+    std::optional<MultiplayerProfilePaths> applyMultiplayerProfile(bpo::variables_map& variables)
+    {
+        const auto profileRootValue = variables["mp-profile-root"].as<Files::MaybeQuotedPath>();
+        const std::filesystem::path profileRoot = profileRootValue;
+        if (profileRoot.empty())
+            return std::nullopt;
+
+        const std::string connect = variables["connect"].as<std::string>();
+        std::string account = variables["mp-account"].as<std::string>();
+        if (account.empty())
+            account = variables["mp-name"].as<std::string>();
+        const std::string character = variables["mp-character"].as<std::string>();
+        if (connect.empty() || account.empty() || character.empty())
+            throw bpo::error("--mp-profile-root requires --connect, --mp-account, and --mp-character");
+
+        const std::filesystem::path accountRoot
+            = profileRoot / profilePathComponent(connect) / profilePathComponent(account);
+        const std::filesystem::path characterRoot
+            = accountRoot / "characters" / profilePathComponent(character);
+        MultiplayerProfilePaths paths{
+            characterRoot / "config", characterRoot / "userdata", characterRoot / "logs", accountRoot / "mp-keys"
+        };
+
+        std::error_code ec;
+        for (const auto& path : { paths.mConfig, paths.mUserData, paths.mLogs, paths.mKeys })
+        {
+            std::filesystem::create_directories(path, ec);
+            if (ec)
+                throw bpo::error("could not create multiplayer profile directory " + path.string() + ": " + ec.message());
+        }
+
+        auto configPaths = variables["config"].as<Files::MaybeQuotedPathContainer>();
+        configPaths.push_back(makeMaybeQuotedPath(paths.mConfig));
+        variables.at("config") = bpo::variable_value(configPaths, false);
+        variables.at("user-data") = bpo::variable_value(makeMaybeQuotedPath(paths.mUserData), false);
+        variables.at("log-dir") = bpo::variable_value(makeMaybeQuotedPath(paths.mLogs), false);
+
+        const auto explicitKeysDir = variables["mp-keys-dir"].as<Files::MaybeQuotedPath>();
+        if (explicitKeysDir.empty())
+            variables.at("mp-keys-dir") = bpo::variable_value(makeMaybeQuotedPath(paths.mKeys), false);
+        else
+            paths.mKeys = explicitKeysDir;
+        return paths;
+    }
+}
 #endif
 
 /**
@@ -69,6 +200,10 @@ bool parseOptions(int argc, char** argv, OMW::Engine& engine, Files::Configurati
 
     cfgMgr.processPaths(variables, std::filesystem::current_path());
 
+#ifdef BUILD_MULTIPLAYER
+    const auto multiplayerProfile = applyMultiplayerProfile(variables);
+#endif
+
     cfgMgr.readConfiguration(variables, desc);
 
     {
@@ -80,6 +215,11 @@ bool parseOptions(int argc, char** argv, OMW::Engine& engine, Files::Configurati
         Debug::setupLogging(logPath, "OpenMW");
     }
     Log(Debug::Info) << Version::getOpenmwVersionDescription();
+
+#ifdef BUILD_MULTIPLAYER
+    if (multiplayerProfile)
+        Log(Debug::Info) << "Multiplayer profile config: " << multiplayerProfile->mConfig;
+#endif
 
     Settings::Manager::load(cfgMgr);
 
@@ -199,7 +339,14 @@ bool parseOptions(int argc, char** argv, OMW::Engine& engine, Files::Configurati
             // The GUI character-select path initialises Identity before attempting
             // keypair auth. Do the same for CLI --connect launches so linked
             // accounts can authenticate without --mp-password.
-            mwmp::Main::setStaticKeysDir(std::filesystem::current_path() / "mp-keys");
+            const auto keysDirValue = variables["mp-keys-dir"].as<Files::MaybeQuotedPath>();
+            const std::filesystem::path keysDir = keysDirValue.empty()
+                ? std::filesystem::current_path() / "mp-keys"
+                : static_cast<const std::filesystem::path&>(keysDirValue);
+            mwmp::Main::setStaticKeysDir(keysDir);
+            if (keysDir != std::filesystem::current_path() / "mp-keys")
+                mwmp::Identity::importLegacyKeypair(
+                    host, port, std::filesystem::current_path() / "mp-keys", playerName);
 
             engine.setMultiplayer(host, port, playerName, passwordHash, characterName, autoEnter);
         }

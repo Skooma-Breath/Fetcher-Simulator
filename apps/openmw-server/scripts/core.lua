@@ -1,5 +1,6 @@
 local mp = require("mp")
 local adminUiService = require("admin_ui_service")
+local bardcraftNetworkPolicy = require("bardcraft_network_policy")
 local commandRegistry = require("command_registry")
 local Config = require("config")
 local types = require("openmw.types")
@@ -214,6 +215,56 @@ local function playerList()
         table.insert(names, p.name)
     end
     return table.concat(names, ", ")
+end
+
+local function sendBardcraftCommunityStatus(player)
+    local policy = bardcraftNetworkPolicy.get()
+    player:sendMessage(string.format(
+        "[Bardcraft] Community mode=%s, server MIDI downloads=%s, player uploads=%s, live relay fallback=%s.",
+        policy.communitySongSharingMode and "on" or "off",
+        policy.allowServerHostedMidiDownloads and "on" or "off",
+        policy.allowPlayerSongUpload and "on" or "off",
+        policy.allowImportedMidiLiveRelayFallback and "on" or "off"))
+end
+
+local function broadcastBardcraftNetworkPolicy(player)
+    local sent = 0
+    for _, target in ipairs(mp.getPlayers()) do
+        local guid = tonumber(target and target.guid)
+        if guid then
+            mp.send(guid, "BC_BardcraftNetworkPolicy", bardcraftNetworkPolicy.applyFields({
+                networkPolicy = bardcraftNetworkPolicy.copy(),
+                reason = "runtime-community-mode",
+                changedBy = tostring(player.name),
+            }))
+            sent = sent + 1
+        end
+    end
+    return sent
+end
+
+local function handleBardcraftCommunityCommand(player, action)
+    if not requireAdmin(player) then
+        return
+    end
+
+    if action == "on" or action == "off" then
+        local policy = bardcraftNetworkPolicy.setRuntimeCommunityMode(action == "on")
+        local sent = broadcastBardcraftNetworkPolicy(player)
+        mp.log(string.format(
+            "[bardcraft] runtime community mode enabled=%s hostedDownloads=%s playerUpload=%s importedRelayFallback=%s changedBy=%s notified=%d",
+            tostring(policy.communitySongSharingMode),
+            tostring(policy.allowServerHostedMidiDownloads),
+            tostring(policy.allowPlayerSongUpload),
+            tostring(policy.allowImportedMidiLiveRelayFallback),
+            tostring(player.name),
+            sent))
+        sendBardcraftCommunityStatus(player)
+    elseif action == "" or action == "status" then
+        sendBardcraftCommunityStatus(player)
+    else
+        player:sendMessage("Usage: " .. COMMAND_PREFIX .. "bccommunity on|off|status")
+    end
 end
 
 local function playerListWithPids()
@@ -766,6 +817,16 @@ local function handleChat(player, data)
             player:sendMessage("Wrong password.")
             mp.log("[core] Failed admin login attempt: " .. player.name)
         end
+        return false
+    end
+
+    local bardcraftCommunityCommand = COMMAND_PREFIX .. "bccommunity"
+    if msg == bardcraftCommunityCommand
+        or msg:sub(1, #bardcraftCommunityCommand + 1) == bardcraftCommunityCommand .. " "
+    then
+        local action = msg == bardcraftCommunityCommand and "status"
+            or lower(msg:sub(#bardcraftCommunityCommand + 2))
+        handleBardcraftCommunityCommand(player, action)
         return false
     end
 
@@ -1570,6 +1631,7 @@ return {
     },
     eventHandlers = {
         OnServerInit = function(_)
+            admins = {}
             markRecallCommands.onServerInit()
             recordStore.onServerInit()
             recordDynamicTest.onServerInit()

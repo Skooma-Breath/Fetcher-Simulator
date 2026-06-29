@@ -23,6 +23,9 @@ namespace mwmp
         /// Set the directory where keypair files are stored.
         /// Call once at startup before any other Identity method.
         static void setKeysDir(const std::filesystem::path& dir);
+        static bool hasKeysDir();
+        static bool importLegacyKeypair(const std::string& host, uint16_t port,
+            const std::filesystem::path& legacyDir, const std::string& expectedUsername);
 
         /// Returns true if a keypair file already exists for this server.
         static bool hasKeypair(const std::string& host, uint16_t port);

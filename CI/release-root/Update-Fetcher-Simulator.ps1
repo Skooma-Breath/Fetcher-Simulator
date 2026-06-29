@@ -87,6 +87,7 @@ function Test-FetcherMutablePath {
         "bardcraft/",
         "logs/",
         "mp-keys/",
+        "profiles/",
         "saves/",
         "screenshots/",
         "userdata/"

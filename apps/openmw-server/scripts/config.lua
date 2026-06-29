@@ -144,6 +144,9 @@ Config.Bardcraft = {
 
 -- Only enable community song sharing if the server has permission to distribute
 -- the MIDI files, or the operator accepts responsibility for user-supplied/community sharing.
+-- An authenticated admin can temporarily enable server-hosted MIDI downloads
+-- with /bccommunity on. Player uploads and live relay fallback remain controlled
+-- by the explicit flags above.
 
 ------------------------------------------------------------------------
 -- Moderation

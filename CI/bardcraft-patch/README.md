@@ -17,7 +17,7 @@ python .\CI\bardcraft-patch\build_patch.py `
   --vanilla-root C:\path\to\vanilla\scripts\Bardcraft `
   --fetcher-root C:\path\to\fetcher\scripts\Bardcraft `
   --output-dir C:\path\to\patch-output `
-  --version 2.0.2 `
+  --version 2.0.3 `
   --applier .\CI\bardcraft-patch\Apply-Fetcher-Bardcraft-MPPatch.ps1 `
   --previous-manifest C:\path\to\previous\fetcher-bardcraft-mp-patch.json `
   --extra-file Bardcraft.omwscripts `

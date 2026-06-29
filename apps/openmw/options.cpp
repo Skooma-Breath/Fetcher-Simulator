@@ -111,6 +111,12 @@ namespace OpenMW
         addOption("mp-auto-enter",
             bpo::value<bool>()->implicit_value(true)->default_value(false),
             "auto-select --mp-character, bypass startup menu/videos, and enter the world after login");
+        addOption("mp-profile-root",
+            bpo::value<Files::MaybeQuotedPath>()->default_value(Files::MaybeQuotedPath(), ""),
+            "isolate mutable multiplayer data under server/account/character directories");
+        addOption("mp-keys-dir",
+            bpo::value<Files::MaybeQuotedPath>()->default_value(Files::MaybeQuotedPath(), ""),
+            "override the multiplayer account key directory");
         addOption("mp-password",
             bpo::value<std::string>()->default_value(""),
             "multiplayer server password (leave empty for open servers)");

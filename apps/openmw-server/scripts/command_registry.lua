@@ -97,6 +97,13 @@ local COMMANDS = {
         summary = "Show current Bardcraft band status.",
     },
     {
+        id = "bccommunity",
+        category = "Bardcraft",
+        usage = "/bccommunity on|off|status",
+        summary = "Toggle server-hosted Bardcraft MIDI delivery for this server session.",
+        adminOnly = true,
+    },
+    {
         id = "login",
         category = "General",
         usage = "/login <password>",

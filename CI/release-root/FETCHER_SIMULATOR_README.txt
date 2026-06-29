@@ -47,6 +47,20 @@ other files that are not owned by the Fetcher release inventory.
 Do not move only the updater BAT into another OpenMW install. Run it from the
 root of the Fetcher Simulator release beside openmw.exe.
 
+Character-isolated multiplayer launch
+-------------------------------------
+
+To keep settings, Lua storage, logs, and saves separate for each multiplayer
+character, double-click:
+
+   Launch-Fetcher-Character.bat
+
+Enter the linked account and character names when prompted. Mutable files are
+stored under profiles\<server>\<account>\characters\<character>. Account keys
+are shared only by characters on the same account and server. This allows
+multiple clients from one install when each process uses a different character.
+The updater preserves the entire profiles directory.
+
 UMO install path
 ----------------
 

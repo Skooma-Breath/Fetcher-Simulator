@@ -84,6 +84,47 @@ void Identity::setKeysDir(const std::filesystem::path& dir)
         Log(Debug::Warning) << "[Identity] Could not create keys dir: " << ec.message();
 }
 
+bool Identity::hasKeysDir()
+{
+    return !sKeysDir.empty();
+}
+
+bool Identity::importLegacyKeypair(const std::string& host, uint16_t port,
+    const std::filesystem::path& legacyDir, const std::string& expectedUsername)
+{
+    const auto destination = keyPath(host, port);
+    if (std::filesystem::exists(destination))
+        return true;
+
+    const auto source = legacyDir / destination.filename();
+    if (!std::filesystem::exists(source))
+        return false;
+
+    std::ifstream input(source);
+    std::string privateKey;
+    std::string publicKey;
+    std::string username;
+    std::getline(input, privateKey);
+    std::getline(input, publicKey);
+    std::getline(input, username);
+    if (privateKey.empty() || publicKey.empty() || username != expectedUsername)
+    {
+        Log(Debug::Warning) << "[Identity] Refusing legacy key import for " << host << ":" << port
+                            << " because the stored username does not match " << expectedUsername;
+        return false;
+    }
+
+    std::error_code ec;
+    std::filesystem::copy_file(source, destination, std::filesystem::copy_options::none, ec);
+    if (ec)
+    {
+        Log(Debug::Warning) << "[Identity] Could not import legacy key: " << ec.message();
+        return false;
+    }
+    Log(Debug::Info) << "[Identity] Imported matching legacy account key for " << host << ":" << port;
+    return true;
+}
+
 std::filesystem::path Identity::keyPath(const std::string& host, uint16_t port)
 {
     // Sanitise host: replace characters that are unsafe in filenames.

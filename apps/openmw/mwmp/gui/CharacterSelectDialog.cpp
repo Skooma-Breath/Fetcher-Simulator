@@ -72,9 +72,10 @@ void CharacterSelectDialog::setServer(const std::string& host, uint16_t port)
 {
     mHost = host;
     mPort = port;
-    // setKeysDir in Main so Identity knows where to store keys.
-    // Use a relative "mp-keys" directory next to the executable for now.
-    Main::setStaticKeysDir(std::filesystem::current_path() / "mp-keys");
+    // Automated launches may select an account-specific key directory before
+    // this dialog opens. Preserve it; interactive launches keep the legacy path.
+    if (!Identity::hasKeysDir())
+        Main::setStaticKeysDir(std::filesystem::current_path() / "mp-keys");
 }
 
 void CharacterSelectDialog::onOpen()
