@@ -36,7 +36,7 @@ namespace LuaUtil
 
         void clearTemporaryAndRemoveCallbacks();
         void load(lua_State* state, const std::filesystem::path& path);
-        bool replaceFromFile(lua_State* state, const std::filesystem::path& path, std::string& error);
+        bool replaceFromFile(lua_State* state, const std::filesystem::path& path, std::string& error, bool clearMissingSections = true);
         void save(lua_State* state, const std::filesystem::path& path) const;
         std::vector<SerializedValue> getSerializedValues() const;
 

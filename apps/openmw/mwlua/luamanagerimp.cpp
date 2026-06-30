@@ -534,8 +534,9 @@ namespace MWLua
             {
                 bool loaded = false;
                 std::string loadError;
+                const bool clearMissingSections = mLoadedPlayerStoragePath.has_value();
                 mLua.protectedCall([&](LuaUtil::LuaView& view) {
-                    loaded = mPlayerStorage.replaceFromFile(view.sol(), storagePath, loadError);
+                    loaded = mPlayerStorage.replaceFromFile(view.sol(), storagePath, loadError, clearMissingSections);
                 });
                 if (!loaded)
                 {

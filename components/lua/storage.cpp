@@ -326,7 +326,7 @@ namespace LuaUtil
         }
     }
 
-    bool LuaStorage::replaceFromFile(lua_State* state, const std::filesystem::path& path, std::string& error)
+    bool LuaStorage::replaceFromFile(lua_State* state, const std::filesystem::path& path, std::string& error, bool clearMissingSections)
     {
         error.clear();
         std::vector<std::pair<std::string, sol::table>> loadedSections;
@@ -355,10 +355,13 @@ namespace LuaUtil
             for (const auto& [sectionName, _] : loadedSections)
                 loadedNames.insert(sectionName);
 
-            for (const auto& [sectionName, section] : mData)
+            if (clearMissingSections)
             {
-                if (!loadedNames.contains(sectionName))
-                    section->setAll(sol::nullopt);
+                for (const auto& [sectionName, section] : mData)
+                {
+                    if (!loadedNames.contains(sectionName))
+                        section->setAll(sol::nullopt);
+                }
             }
             for (const auto& [sectionName, values] : loadedSections)
                 getSection(sectionName)->setAll(values);
