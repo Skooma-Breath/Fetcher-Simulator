@@ -17,7 +17,7 @@ python .\CI\bardcraft-patch\build_patch.py `
   --vanilla-root C:\path\to\vanilla\scripts\Bardcraft `
   --fetcher-root C:\path\to\fetcher\scripts\Bardcraft `
   --output-dir C:\path\to\patch-output `
-  --version 2.0.3 `
+  --version 2.0.4 `
   --applier .\CI\bardcraft-patch\Apply-Fetcher-Bardcraft-MPPatch.ps1 `
   --previous-manifest C:\path\to\previous\fetcher-bardcraft-mp-patch.json `
   --extra-file Bardcraft.omwscripts `
@@ -26,8 +26,12 @@ python .\CI\bardcraft-patch\build_patch.py `
 ```
 
 `priorOutputSha256` records allow known previous patch outputs to upgrade. The
-applier reconstructs modified upstream files from hash-verified pristine
-backups and refuses unknown or locally modified script hashes.
+builder carries that ancestry forward transitively, so users can skip patch
+releases without being rejected as locally modified. When repairing ancestry
+from an older non-transitive manifest, pass every affected released manifest
+with repeated `--previous-manifest` arguments. The applier reconstructs
+modified upstream files from hash-verified pristine backups and refuses
+unknown or locally modified script hashes.
 
 Normal records target `scripts/Bardcraft`. `--extra-file` creates an explicit
 `targetBase: data` record for files such as `Bardcraft.omwscripts`; target paths

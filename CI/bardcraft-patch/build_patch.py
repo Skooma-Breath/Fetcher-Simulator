@@ -20,6 +20,16 @@ def file_map(root: Path) -> dict[str, Path]:
     }
 
 
+def load_previous_outputs(manifest_paths: list[Path]) -> dict[str, set[str]]:
+    previous_outputs: dict[str, set[str]] = {}
+    for manifest_path in manifest_paths:
+        manifest = json.loads(manifest_path.resolve().read_text(encoding="utf-8-sig"))
+        for record in manifest["files"]:
+            hashes = [record["outputSha256"], *record.get("priorOutputSha256", [])]
+            previous_outputs.setdefault(record["path"], set()).update(value.lower() for value in hashes)
+    return previous_outputs
+
+
 def line_offsets(lines: list[bytes]) -> list[int]:
     offsets = [0]
     for line in lines:
@@ -81,11 +91,7 @@ def main() -> None:
 
     vanilla_files = file_map(vanilla_root)
     fetcher_files = file_map(fetcher_root)
-    previous_outputs: dict[str, set[str]] = {}
-    for manifest_path in args.previous_manifest:
-        manifest = json.loads(manifest_path.resolve().read_text(encoding="utf-8-sig"))
-        for record in manifest["files"]:
-            previous_outputs.setdefault(record["path"], set()).add(record["outputSha256"].lower())
+    previous_outputs = load_previous_outputs(args.previous_manifest)
     changed_paths = sorted(
         path
         for path in vanilla_files.keys() | fetcher_files.keys()
