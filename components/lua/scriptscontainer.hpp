@@ -233,14 +233,7 @@ namespace LuaUtil
                     const auto start = std::chrono::steady_clock::now();
                     LuaUtil::call({ this, handler.mScriptId }, handler.mFn, args...);
                     const double elapsed = scriptPerfElapsedMs(start, std::chrono::steady_clock::now());
-                    if (elapsed >= scriptHandlerPerfThresholdMs)
-                    {
-                        Log(Debug::Info) << "[Perf] Lua handler spike"
-                                         << " container=" << mNamePrefix
-                                         << " script=" << scriptPath(handler.mScriptId)
-                                         << " handler=" << handlers.mName
-                                         << " ms=" << elapsed;
-                    }
+                    logHandlerSpike(handler.mScriptId, handlers.mName, elapsed);
                 }
                 catch (std::exception& e)
                 {
@@ -297,6 +290,7 @@ namespace LuaUtil
         Script& getScript(int scriptId);
 
         void printError(int scriptId, std::string_view msg, const std::exception& e) const;
+        void logHandlerSpike(int scriptId, std::string_view handlerName, double elapsedMs);
 
         const VFS::Path::Normalized& scriptPath(int scriptId) const
         {
@@ -341,6 +335,14 @@ namespace LuaUtil
         std::map<std::string_view, EngineHandlerList*> mEngineHandlers;
         std::variant<UnloadedData, LoadedData> mData;
         int64_t mTemporaryCallbackCounter = 0;
+
+        struct HandlerPerfLogState
+        {
+            std::chrono::steady_clock::time_point mLastLog;
+            unsigned mSuppressed = 0;
+            double mMaxSuppressedMs = 0.0;
+        };
+        std::map<std::pair<int, std::string>, HandlerPerfLogState> mHandlerPerfLogStates;
 
         std::map<int, int64_t> mRemovedScriptsMemoryUsage;
         using WeakPtr = std::shared_ptr<ScriptsContainer*>;

@@ -4,6 +4,7 @@
 
 #include <components/esm/luascripts.hpp>
 
+#include <algorithm>
 #include <chrono>
 
 namespace
@@ -234,6 +235,13 @@ namespace LuaUtil
             removeInterface(scriptId, script);
         mRemovedScriptsMemoryUsage[scriptId] = script.mStats.mMemoryUsage;
         data.mScripts.erase(scriptIter);
+        for (auto it = mHandlerPerfLogStates.begin(); it != mHandlerPerfLogStates.end();)
+        {
+            if (it->first.first == scriptId)
+                it = mHandlerPerfLogStates.erase(it);
+            else
+                ++it;
+        }
         for (auto& [_, handlers] : mEngineHandlers)
             removeHandler(handlers->mList, scriptId);
         for (auto& [_, handlers] : data.mEventHandlers)
@@ -376,13 +384,7 @@ namespace LuaUtil
                     sol::object res = LuaUtil::call({ this, h.mScriptId }, h.mFn, object);
                     const double elapsed = scriptPerfElapsedMs(start, std::chrono::steady_clock::now());
                     if (elapsed >= scriptHandlerPerfThresholdMs)
-                    {
-                        Log(Debug::Info) << "[Perf] Lua handler spike"
-                                         << " container=" << mNamePrefix
-                                         << " script=" << scriptPath(h.mScriptId)
-                                         << " handler=event:" << eventName
-                                         << " ms=" << elapsed;
-                    }
+                        logHandlerSpike(h.mScriptId, "event:" + std::string(eventName), elapsed);
                     if (res.is<bool>() && !res.as<bool>())
                         break; // Skip other handlers if 'false' was returned.
                 }
@@ -399,6 +401,35 @@ namespace LuaUtil
     {
         for (EngineHandlerList* h : handlers)
             mEngineHandlers[h->mName] = h;
+    }
+
+    void ScriptsContainer::logHandlerSpike(int scriptId, std::string_view handlerName, double elapsedMs)
+    {
+        if (elapsedMs < scriptHandlerPerfThresholdMs)
+            return;
+
+        const auto now = std::chrono::steady_clock::now();
+        HandlerPerfLogState& state = mHandlerPerfLogStates[{ scriptId, std::string(handlerName) }];
+        if (state.mLastLog != std::chrono::steady_clock::time_point{}
+            && now - state.mLastLog < std::chrono::seconds(1))
+        {
+            ++state.mSuppressed;
+            state.mMaxSuppressedMs = std::max(state.mMaxSuppressedMs, elapsedMs);
+            return;
+        }
+
+        Log log(Debug::Info);
+        log << "[Perf] Lua handler spike"
+            << " container=" << mNamePrefix
+            << " script=" << scriptPath(scriptId)
+            << " handler=" << handlerName
+            << " ms=" << elapsedMs;
+        if (state.mSuppressed > 0)
+            log << " suppressed=" << state.mSuppressed << " maxSuppressedMs=" << state.mMaxSuppressedMs;
+
+        state.mLastLog = now;
+        state.mSuppressed = 0;
+        state.mMaxSuppressedMs = 0.0;
     }
 
     void ScriptsContainer::callOnInit(LuaView& view, int scriptId, const sol::function& onInit, std::string_view data)
@@ -639,6 +670,7 @@ namespace LuaUtil
         UnloadedData& out = mData.emplace<UnloadedData>(std::move(data));
         for (auto& [_, handlers] : mEngineHandlers)
             handlers->mList.clear();
+        mHandlerPerfLogStates.clear();
         mRequiredLoading = false;
         return out;
     }
@@ -673,6 +705,7 @@ namespace LuaUtil
                     variant.mSimulationTimersQueue.clear();
                     variant.mGameTimersQueue.clear();
                     variant.mPublicInterfaces.clear();
+                    mHandlerPerfLogStates.clear();
                 }
             },
             mData);
@@ -743,27 +776,14 @@ namespace LuaUtil
                 LuaUtil::call({ this, t.mScriptId }, it->second, t.mArg);
                 const double elapsed = scriptPerfElapsedMs(start, std::chrono::steady_clock::now());
                 if (elapsed >= scriptHandlerPerfThresholdMs)
-                {
-                    Log(Debug::Info) << "[Perf] Lua handler spike"
-                                     << " container=" << mNamePrefix
-                                     << " script=" << scriptPath(t.mScriptId)
-                                     << " handler=timer:" << callbackName
-                                     << " ms=" << elapsed;
-                }
+                    logHandlerSpike(t.mScriptId, "timer:" + callbackName, elapsed);
             }
             else
             {
                 int64_t id = std::get<int64_t>(t.mCallback);
                 LuaUtil::call({ this, t.mScriptId }, script.mTemporaryCallbacks.at(id));
                 const double elapsed = scriptPerfElapsedMs(start, std::chrono::steady_clock::now());
-                if (elapsed >= scriptHandlerPerfThresholdMs)
-                {
-                    Log(Debug::Info) << "[Perf] Lua handler spike"
-                                     << " container=" << mNamePrefix
-                                     << " script=" << scriptPath(t.mScriptId)
-                                     << " handler=timer:temporary"
-                                     << " ms=" << elapsed;
-                }
+                logHandlerSpike(t.mScriptId, "timer:temporary", elapsed);
                 script.mTemporaryCallbacks.erase(id);
             }
         }
