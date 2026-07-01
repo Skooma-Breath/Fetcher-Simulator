@@ -4638,6 +4638,7 @@ void MPServer::handlePlayerLoadedCells(ConnectedClient& c, const uint8_t* data, 
                         << " added=" << addedCells.size()
                         << " removed=" << removedCells.size()
                         << " seq=" << pkt.sequence;
+    syncLuaSnapshot();
 }
 
 // ---------------------------------------------------------------------------
@@ -8496,6 +8497,9 @@ void MPServer::syncLuaSnapshot()
         snapshot.dbCharacterId = client.dbCharacterId;
         snapshot.name = client.name;
         snapshot.cell = makeCellKey(client.player.cell);
+        const std::unordered_set<std::string> loadedActorCells = actorInterestCellsForClient(client);
+        snapshot.loadedActorCells.assign(loadedActorCells.begin(), loadedActorCells.end());
+        std::sort(snapshot.loadedActorCells.begin(), snapshot.loadedActorCells.end());
         snapshot.nickname = client.nickname;
         snapshot.race = client.player.race;
         snapshot.isMale = client.player.isMale;
@@ -8746,6 +8750,63 @@ AdminHttpServer::Response MPServer::handleAdminHttpRequest(
     {
         response.status = 503;
         response.body = makeJsonErrorBody("lua_service_unavailable");
+        return response;
+    }
+
+    if (action == "bardcraft_command")
+    {
+        const auto guidIt = query.find("guid");
+        const auto messageIt = query.find("message");
+        if (guidIt == query.end() || messageIt == query.end() || messageIt->second.empty())
+        {
+            response.status = 400;
+            response.body = makeJsonErrorBody("guid_and_message_required");
+            return response;
+        }
+
+        uint32_t guid = 0;
+        const std::string& guidText = guidIt->second;
+        const auto [end, error] = std::from_chars(guidText.data(), guidText.data() + guidText.size(), guid);
+        if (error != std::errc() || end != guidText.data() + guidText.size() || guid == 0)
+        {
+            response.status = 400;
+            response.body = makeJsonErrorBody("invalid_guid");
+            return response;
+        }
+
+        const auto player = mLua.getPlayer(guid);
+        if (!player)
+        {
+            response.status = 404;
+            response.body = makeJsonErrorBody("player_not_found");
+            return response;
+        }
+
+        LuaWireTable payload;
+        payload.emplace_back("guid", static_cast<double>(guid));
+        payload.emplace_back("message", messageIt->second);
+        std::string errorMessage;
+        const auto resultData = mLua.callSynchronousInterface(
+            "BardcraftAdmin", "handleCommand", serializeLuaWireTable(payload), mAdminHttpTimeoutMs, &errorMessage);
+        if (!resultData)
+        {
+            response.status = errorMessage == "timeout" ? 504 : 500;
+            response.body = makeJsonErrorBody(
+                errorMessage.empty() ? "bardcraft_command_failed" : errorMessage);
+            return response;
+        }
+
+        const LuaWireTable result = parseLuaWireTable(*resultData);
+        if (!getLuaBoolField(result, "ok"))
+        {
+            response.status = 400;
+            response.body = makeJsonErrorBody(getLuaStringField(result, "error", "command_not_handled"));
+            return response;
+        }
+
+        Log(Debug::Info) << "[Server] Admin HTTP processed Bardcraft command guid=" << guid
+                         << " name=" << player->name;
+        response.body = "{\"ok\":true,\"status\":\"processed\"}";
         return response;
     }
 

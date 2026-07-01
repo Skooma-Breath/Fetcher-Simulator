@@ -8,6 +8,7 @@
 #include <components/lua/utilpackage.hpp>
 #include <components/misc/convert.hpp>
 #include <components/misc/mathutil.hpp>
+#include <components/sceneutil/positionattitudetransform.hpp>
 
 #include "../mwworld/cellstore.hpp"
 #include "../mwworld/class.hpp"
@@ -290,6 +291,17 @@ namespace MWLua
             objectT["isValid"] = [](const ObjectT& o) { return !o.ptrOrEmpty().isEmpty(); };
             objectT["recordId"] = sol::readonly_property(
                 [](const ObjectT& o) -> std::string { return o.ptr().getCellRef().getRefId().serializeText(); });
+            objectT["multiplayerActorId"] = sol::readonly_property([](const ObjectT& o) -> sol::optional<uint32_t> {
+                const MWWorld::Ptr ptr = o.ptrOrEmpty();
+                if (ptr.isEmpty())
+                    return sol::nullopt;
+
+                const auto* baseNode = ptr.getRefData().getBaseNode();
+                int mpNum = 0;
+                if (baseNode != nullptr && baseNode->getUserValue("mp_actor_mpnum", mpNum) && mpNum > 0)
+                    return static_cast<uint32_t>(mpNum);
+                return sol::nullopt;
+            });
             objectT["globalVariable"] = sol::readonly_property([](const ObjectT& o) -> sol::optional<std::string> {
                 std::string_view globalVariable = o.ptr().getCellRef().getGlobalVariable();
                 if (globalVariable.empty())

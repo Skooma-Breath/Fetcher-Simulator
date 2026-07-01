@@ -22,6 +22,10 @@ local bootstrapSequence = 0
 local performanceSessionSequence = 0
 local joinRequestSequence = 0
 local bandStartSequence = 0
+local npcBandMemberSpawnSequence = 0
+local npcBandMemberSpawnSlotsByOwnerGuid = {}
+local pendingNpcBandMemberSpawns = {}
+local npcBandMembersByOwnerGuid = {}
 local pendingJoinRequests = {}
 local activePerformanceSessions = {}
 local activeBandsByLeaderGuid = {}
@@ -38,6 +42,16 @@ local highChurnPerformanceEvents = {
     NoteEndEvent = true,
     TempoEvent = true,
     NewBar = true,
+}
+local bardcraftNpcRecords = {
+    r_bc_n_camilla = true,
+    r_bc_n_elara = true,
+    r_bc_n_lucian = true,
+    r_bc_n_rajira = true,
+    r_bc_n_reeds = true,
+    r_bc_n_rels = true,
+    r_bc_n_sargon = true,
+    r_bc_n_strumak = true,
 }
 
 local function senderGuid(data)
@@ -57,6 +71,34 @@ local function playerCellKey(player)
     return tostring(player.cell)
 end
 
+local function playerHasActorCellLoaded(player, cell)
+    cell = cell and tostring(cell) or nil
+    if not player or not cell then
+        return false
+    end
+    if playerCellKey(player) == cell then
+        return true
+    end
+    for _, loadedCell in ipairs(player.loadedActorCells or {}) do
+        if tostring(loadedCell) == cell then
+            return true
+        end
+    end
+    return false
+end
+
+local function playerActorInterestCells(player)
+    local cells = {}
+    for _, cell in ipairs((player and player.loadedActorCells) or {}) do
+        cells[tostring(cell)] = true
+    end
+    local currentCell = playerCellKey(player)
+    if currentCell then
+        cells[currentCell] = true
+    end
+    return cells
+end
+
 local function serverUptime()
     if type(mp.getUptime) == "function" then
         return tonumber(mp.getUptime()) or 0
@@ -64,8 +106,16 @@ local function serverUptime()
     return 0
 end
 
-local function performanceSessionKey(guid, actorId)
-    return tostring(guid) .. ":" .. tostring(actorId or "")
+local function performanceActorKey(data)
+    local actorMpNum = data and tonumber(data.actorMpNum) or nil
+    if actorMpNum and actorMpNum > 0 then
+        return "mp:" .. tostring(actorMpNum)
+    end
+    return "ref:" .. tostring(data and data.actorId or "")
+end
+
+local function performanceSessionKey(guid, actorData)
+    return tostring(guid) .. ":" .. performanceActorKey(actorData)
 end
 
 local function tableCount(value)
@@ -251,7 +301,7 @@ local function shouldDropHighChurnRelayBeforeCopy(guid, sourceCell, session, eve
     local waiting = {}
     for _, target in ipairs(mp.getPlayers()) do
         local targetGuid = tonumber(target.guid)
-        if targetGuid and targetGuid ~= tonumber(guid) and playerCellKey(target) == sourceCell then
+        if targetGuid and targetGuid ~= tonumber(guid) and playerHasActorCellLoaded(target, sourceCell) then
             receiverCount = receiverCount + 1
             local status = session.ackStatus and session.ackStatus[targetGuid] or nil
             if sessionAckResolvesHighChurn(sessionPayload, status) then
@@ -419,6 +469,10 @@ local function flattenBardcraftPerformancePayload(guid, source, data, event)
         instrument = relayField(event, "instrument"),
         item = relayField(event, "item"),
         actorId = data and data.actorId,
+        actorMpNum = data and tonumber(data.actorMpNum),
+        actorRecordId = data and data.actorRecordId,
+        actorCell = data and data.actorCell,
+        actorIsPlayer = data and data.actorIsPlayer == true,
         sessionKey = relayField(event, "sessionKey"),
         sessionPlayback = relayField(event, "sessionPlayback"),
         serverTime = relayField(event, "serverTime"),
@@ -457,13 +511,13 @@ local function flattenBardcraftPerformancePayload(guid, source, data, event)
     })
 end
 
-local function updateActivePerformanceSession(guid, source, actorId, payload, relayEvent, sourceCharacterId)
+local function updateActivePerformanceSession(guid, source, actorData, payload, relayEvent, sourceCharacterId, performerCell)
     if type(payload) ~= "table" or type(relayEvent) ~= "table" then
         return nil
     end
 
     local now = serverUptime()
-    local key = performanceSessionKey(guid, actorId)
+    local key = performanceSessionKey(guid, actorData)
     performanceSessionSequence = performanceSessionSequence + 1
 
     payload.sessionKey = key
@@ -471,15 +525,22 @@ local function updateActivePerformanceSession(guid, source, actorId, payload, re
     payload.serverTime = now
     payload.serverStartTime = now
     payload.sessionSequence = performanceSessionSequence
-    payload.actorId = actorId
+    payload.actorId = actorData and actorData.actorId
+    payload.actorMpNum = actorData and tonumber(actorData.actorMpNum)
+    payload.actorRecordId = actorData and actorData.actorRecordId
+    payload.actorCell = performerCell
+    payload.actorIsPlayer = actorData and actorData.actorIsPlayer == true
 
     activePerformanceSessions[key] = {
         key = key,
         sourceGuid = tonumber(guid),
         sourceCharacterId = tonumber(sourceCharacterId),
         sourceName = source and source.name or nil,
-        actorId = actorId,
-        cell = playerCellKey(source),
+        actorId = actorData and actorData.actorId,
+        actorMpNum = actorData and tonumber(actorData.actorMpNum),
+        actorRecordId = actorData and actorData.actorRecordId,
+        actorIsPlayer = actorData and actorData.actorIsPlayer == true,
+        cell = performerCell,
         parentSessionKey = payload.joinedSessionKey and tostring(payload.joinedSessionKey) or nil,
         bandSessionId = payload.bandSessionId and tostring(payload.bandSessionId) or nil,
         bandRole = payload.bandRole,
@@ -511,6 +572,10 @@ local function currentSessionPayload(session, now)
     payload.sourceGuid = session.sourceGuid
     payload.sourceName = session.sourceName
     payload.actorId = session.actorId
+    payload.actorMpNum = session.actorMpNum
+    payload.actorRecordId = session.actorRecordId
+    payload.actorCell = session.cell
+    payload.actorIsPlayer = session.actorIsPlayer == true
     payload.joinedSessionKey = session.parentSessionKey
     payload.bandSessionId = session.bandSessionId or payload.bandSessionId
     payload.bandRole = session.bandRole or payload.bandRole
@@ -620,9 +685,9 @@ end
 local function activeSessionsForPlayer(player)
     local sessions = {}
     local playerGuid = player and tonumber(player.guid) or nil
-    local targetCell = playerCellKey(player)
+    local targetCells = playerActorInterestCells(player)
     for _, session in pairs(activePerformanceSessionSource()) do
-        if tonumber(session.sourceGuid) ~= playerGuid and session.cell == targetCell and not session.parentSessionKey then
+        if tonumber(session.sourceGuid) ~= playerGuid and targetCells[session.cell] and not session.parentSessionKey then
             table.insert(sessions, session)
         end
     end
@@ -643,11 +708,14 @@ local function sendActivePerformanceSessions(guid, targetCellOverride)
         return
     end
 
-    local targetCell = targetCellOverride and tostring(targetCellOverride) or playerCellKey(target)
+    local targetCells = playerActorInterestCells(target)
+    if targetCellOverride then
+        targetCells[tostring(targetCellOverride)] = true
+    end
     local now = serverUptime()
     local sessions = {}
     for _, session in pairs(activePerformanceSessions) do
-        if tonumber(session.sourceGuid) ~= tonumber(guid) and session.cell == targetCell then
+        if tonumber(session.sourceGuid) ~= tonumber(guid) and targetCells[session.cell] then
             local payload = currentSessionPayload(session, now)
             if payload then
                 table.insert(sessions, payload)
@@ -658,7 +726,7 @@ local function sendActivePerformanceSessions(guid, targetCellOverride)
     if #sessions > 0 then
         mp.send(tonumber(guid), "BC_BardcraftPerformanceSessions", {
             serverTime = now,
-            cell = targetCell,
+            cell = playerCellKey(target),
             sessions = sessions,
         })
     end
@@ -666,7 +734,7 @@ local function sendActivePerformanceSessions(guid, targetCellOverride)
     mp.log(string.format(
         "[bardcraft] active performance sessions guid=%s cell=%s sent=%d",
         tostring(guid),
-        tostring(targetCell),
+        tostring(playerCellKey(target)),
         #sessions))
 end
 
@@ -678,7 +746,7 @@ local function sendPerformanceSessionPayloadToCell(payload, cell, excludeGuid)
     local sent = 0
     for _, target in ipairs(mp.getPlayers()) do
         local targetGuid = tonumber(target.guid)
-        if targetGuid and targetGuid ~= tonumber(excludeGuid) and playerCellKey(target) == cell then
+        if targetGuid and targetGuid ~= tonumber(excludeGuid) and playerHasActorCellLoaded(target, cell) then
             mp.send(targetGuid, "BCPerfRelay", payload)
             sent = sent + 1
         end
@@ -695,6 +763,10 @@ local function makePerformanceSessionStopPayload(session, reason)
         sourceGuid = session.sourceGuid,
         sourceName = session.sourceName,
         actorId = session.actorId,
+        actorMpNum = session.actorMpNum,
+        actorRecordId = session.actorRecordId,
+        actorCell = session.cell,
+        actorIsPlayer = session.actorIsPlayer == true,
         sessionKey = session.key,
         sessionPlayback = true,
         sessionSequence = session.sessionSequence,
@@ -716,17 +788,22 @@ local function stopPerformanceSessionByKey(sessionKey, reason, notifySource)
 
     local sourceGuid = tonumber(session.sourceGuid)
     local sourceNotified = 0
+    local stopPayload = makePerformanceSessionStopPayload(session, reason)
     if notifySource and sourceGuid and mp.getPlayer(sourceGuid) then
-        mp.send(sourceGuid, "BC_BardcraftStopLocalPerformance", {
-            reason = reason,
-            sessionKey = session.key,
-            parentSessionKey = session.parentSessionKey,
-        })
+        if session.actorIsPlayer == false then
+            mp.send(sourceGuid, "BCPerfRelay", stopPayload)
+        else
+            mp.send(sourceGuid, "BC_BardcraftStopLocalPerformance", {
+                reason = reason,
+                sessionKey = session.key,
+                parentSessionKey = session.parentSessionKey,
+            })
+        end
         sourceNotified = 1
     end
 
     local sent = sendPerformanceSessionPayloadToCell(
-        makePerformanceSessionStopPayload(session, reason),
+        stopPayload,
         session.cell,
         sourceGuid)
     activePerformanceSessions[tostring(sessionKey)] = nil
@@ -1021,6 +1098,60 @@ local function stopActivePerformanceSessionsForGuid(guid, reason)
     return removed
 end
 
+local function moveActivePerformanceSession(session, newCell, reason)
+    if type(session) ~= "table" or not newCell or session.cell == newCell then
+        return false
+    end
+
+    local previousCell = session.cell
+    local sourceGuid = tonumber(session.sourceGuid)
+    local stopPayload = makePerformanceSessionStopPayload(session, reason or "performer-cell-change")
+
+    session.cell = newCell
+    session.payload.actorCell = newCell
+    session.acked = session.acked or {}
+    session.ackStatus = session.ackStatus or {}
+    session.suppressionLogged = nil
+    session.suppressedHighChurn = 0
+
+    local startPayload = currentSessionPayload(session, serverUptime())
+    local stopSent = 0
+    local startSent = 0
+    local continued = 0
+    for _, target in ipairs(mp.getPlayers()) do
+        local targetGuid = tonumber(target.guid)
+        if targetGuid and targetGuid ~= sourceGuid then
+            local hadPreviousCell = previousCell and playerHasActorCellLoaded(target, previousCell) or false
+            local hasNewCell = playerHasActorCellLoaded(target, newCell)
+            if hadPreviousCell and not hasNewCell then
+                mp.send(targetGuid, "BCPerfRelay", stopPayload)
+                session.acked[targetGuid] = nil
+                session.ackStatus[targetGuid] = nil
+                stopSent = stopSent + 1
+            elseif hasNewCell and not hadPreviousCell then
+                mp.send(targetGuid, "BCPerfRelay", startPayload)
+                session.acked[targetGuid] = nil
+                session.ackStatus[targetGuid] = nil
+                startSent = startSent + 1
+            elseif hadPreviousCell and hasNewCell then
+                continued = continued + 1
+            end
+        end
+    end
+    mp.log(string.format(
+        "[bardcraft] performance session moved guid=%s session=%s actorMpNum=%s oldCell=%s newCell=%s stopSent=%d startSent=%d continued=%d song=%s",
+        tostring(sourceGuid),
+        tostring(session.key),
+        tostring(session.actorMpNum),
+        tostring(previousCell),
+        tostring(newCell),
+        stopSent,
+        startSent,
+        continued,
+        tostring(startPayload and startPayload.songTitle)))
+    return true
+end
+
 local function moveActivePerformanceSessionsForGuid(guid, oldCell, newCell)
     guid = tonumber(guid)
     if not guid or not newCell then
@@ -1029,35 +1160,9 @@ local function moveActivePerformanceSessionsForGuid(guid, oldCell, newCell)
 
     local moved = 0
     for _, session in pairs(activePerformanceSessions) do
-        if tonumber(session.sourceGuid) == guid then
-            local previousCell = session.cell or oldCell
-            if previousCell ~= newCell then
-                local stopSent = 0
-                if previousCell then
-                    stopSent = sendPerformanceSessionPayloadToCell(
-                        makePerformanceSessionStopPayload(session, "source-cell-change"),
-                        previousCell,
-                        guid)
-                end
-
-                session.cell = newCell
-                session.acked = {}
-                session.suppressionLogged = nil
-                session.suppressedHighChurn = 0
-
-                local startPayload = currentSessionPayload(session, serverUptime())
-                local startSent = sendPerformanceSessionPayloadToCell(startPayload, newCell, guid)
+        if tonumber(session.sourceGuid) == guid and session.actorIsPlayer ~= false then
+            if moveActivePerformanceSession(session, newCell, "source-cell-change") then
                 moved = moved + 1
-
-                mp.log(string.format(
-                    "[bardcraft] performance session moved guid=%s session=%s oldCell=%s newCell=%s stopSent=%d startSent=%d song=%s",
-                    tostring(guid),
-                    tostring(session.key),
-                    tostring(previousCell),
-                    tostring(newCell),
-                    stopSent,
-                    startSent,
-                    tostring(startPayload and startPayload.songTitle)))
             end
         end
     end
@@ -1706,7 +1811,7 @@ local function autoJoinBandMembersForSession(session)
 
     for index, memberGuid in ipairs(memberEntries) do
         local member = mp.getPlayer(tonumber(memberGuid))
-        if member and playerCellKey(member) == session.cell then
+        if member and playerHasActorCellLoaded(member, session.cell) then
             local requestedPart = firstAvailableSuggestedPart(occupied, leaderPart + index)
             occupied[requestedPart] = true
             member:sendMessage("[Bardcraft] Band leader started a performance; joining.")
@@ -1764,7 +1869,7 @@ local function sameCellBandMembers(leader, band)
     local leaderCell = playerCellKey(leader)
     for memberGuid, _ in pairs(band and band.members or {}) do
         local member = mp.getPlayer(tonumber(memberGuid))
-        if member and playerCellKey(member) == leaderCell then
+        if member and playerHasActorCellLoaded(member, leaderCell) then
             table.insert(members, {
                 guid = tonumber(memberGuid),
                 player = member,
@@ -1786,7 +1891,8 @@ local function sameCellBandMembers(leader, band)
     return members
 end
 
-local function sendScheduledBandLocalPlay(target, selector, requestedPart, occupied, startServerTime, now, leader, bandSessionId, role, perfType)
+local function sendScheduledBandLocalPlay(target, selector, requestedPart, occupied, startServerTime, now, leader,
+    bandSessionId, role, perfType, npcPartSlotOffset, npcPartSlotStride)
     local delaySeconds = math.max(0, (tonumber(startServerTime) or now) - now)
     mp.send(tonumber(target.guid), "BC_BardcraftStartLocalPerformance", {
         selector = selector,
@@ -1801,6 +1907,9 @@ local function sendScheduledBandLocalPlay(target, selector, requestedPart, occup
         bandScheduledStart = true,
         reason = "band-scheduled-start",
         bandRole = role,
+        includeNpcBandMembers = true,
+        npcPartSlotOffset = npcPartSlotOffset,
+        npcPartSlotStride = npcPartSlotStride,
         perfType = perfType,
     })
 end
@@ -1845,22 +1954,18 @@ local function trySendScheduledBandLocalPlay(player, selector, requestedPart, pe
     }
     local occupied = {}
     local leaderPart = normalizedPartIndex(requestedPart) or 1
-
-    sendScheduledBandLocalPlay(
-        player,
-        selector,
-        requestedPart or leaderPart,
-        occupied,
-        startServerTime,
-        now,
-        player,
-        bandSessionId,
-        "leader",
-        perfType)
     occupied[leaderPart] = true
+    local participants = {
+        {
+            player = player,
+            part = requestedPart or leaderPart,
+            role = "leader",
+        },
+    }
 
     for index, member in ipairs(members) do
         local memberPart = firstAvailableSuggestedPart(occupied, leaderPart + index)
+        occupied[memberPart] = true
         pendingScheduledBandStartsByLeaderGuid[tonumber(member.guid)] = {
             bandSessionId = bandSessionId,
             startServerTime = startServerTime,
@@ -1870,21 +1975,31 @@ local function trySendScheduledBandLocalPlay(player, selector, requestedPart, pe
             leaderGuid = leaderGuid,
             perfType = perfType,
         }
+        table.insert(participants, {
+            player = member.player,
+            part = memberPart,
+            role = "member",
+        })
+        member.player:sendMessage(string.format(
+            "[Bardcraft] Band performance scheduled by %s.",
+            playerDisplayName(player)))
+    end
+
+    local participantCount = #participants
+    for index, participant in ipairs(participants) do
         sendScheduledBandLocalPlay(
-            member.player,
+            participant.player,
             selector,
-            memberPart,
+            participant.part,
             occupied,
             startServerTime,
             now,
             player,
             bandSessionId,
-            "member",
-            perfType)
-        occupied[memberPart] = true
-        member.player:sendMessage(string.format(
-            "[Bardcraft] Band performance scheduled by %s.",
-            playerDisplayName(player)))
+            participant.role,
+            perfType,
+            index,
+            participantCount)
     end
     player:sendMessage(string.format(
         "[Bardcraft] Band performance scheduled in %.1fs for %d member(s): %s",
@@ -1919,6 +2034,7 @@ local function sendBardcraftLocalPlay(player, selector, requestedPart)
     mp.send(tonumber(player.guid), "BC_BardcraftStartLocalPerformance", {
         selector = selector,
         requestedPartIndex = requestedPart,
+        includeNpcBandMembers = true,
     })
     player:sendMessage("[Bardcraft] Starting local performance: " .. selector)
     mp.log(string.format(
@@ -1990,7 +2106,296 @@ end
 
 local function sendBandUsage(player)
     player:sendMessage(
-        "Usage: /bc invite <player|pid> | /bc accept <leader|pid> | /bc decline <leader|pid> | /bc kick <player|pid> | /bc disband | /bc leave | /bc status")
+        "Usage: /bc invite <player|pid> | /bc accept <leader|pid> | /bc decline <leader|pid> | /bc kick <player|pid> | /bc disband | /bc leave | /bc status | /bc npc [recordId|clear]")
+end
+
+local function spawnNpcBandMember(player, requestedRecordId)
+    local recordId = normalizeLookup(requestedRecordId)
+    if recordId == "" then
+        recordId = "r_bc_n_camilla"
+    end
+    if not bardcraftNpcRecords[recordId] then
+        player:sendMessage("[Bardcraft] Unknown bard NPC record: " .. tostring(recordId))
+        return false
+    end
+
+    local cell = playerCellKey(player)
+    local position = player and player.position or nil
+    if not cell or type(position) ~= "table" then
+        player:sendMessage("[Bardcraft] Your current position is not available.")
+        return false
+    end
+
+    local ownerGuid = tonumber(player.guid) or 0
+    local spawnSlot = npcBandMemberSpawnSlotsByOwnerGuid[ownerGuid] or 0
+    npcBandMemberSpawnSlotsByOwnerGuid[ownerGuid] = spawnSlot + 1
+    local slotsPerRing = 8
+    local ring = math.floor(spawnSlot / slotsPerRing)
+    local slotInRing = spawnSlot % slotsPerRing
+    local spawnDistance = 180 + ring * 96
+    local rotation = (tonumber(position.rz) or 0) + slotInRing * (math.pi * 2 / slotsPerRing)
+    local spawnPosition = {
+        x = (tonumber(position.x) or 0) + math.sin(-rotation) * spawnDistance,
+        y = (tonumber(position.y) or 0) + math.cos(-rotation) * spawnDistance,
+        z = tonumber(position.z) or 0,
+        rx = 0,
+        ry = 0,
+        rz = rotation + math.pi,
+    }
+    if string.sub(cell, 1, 4) == "EXT:" then
+        cell = string.format(
+            "EXT:%d,%d",
+            math.floor(spawnPosition.x / 8192),
+            math.floor(spawnPosition.y / 8192))
+    end
+
+    npcBandMemberSpawnSequence = npcBandMemberSpawnSequence + 1
+    local requestId = string.format("%s:%d:%d", tostring(player.guid), npcBandMemberSpawnSequence,
+        math.floor(serverUptime() * 1000))
+    if not mp.spawnActor(recordId, 0, 0, cell, spawnPosition, { persistent = false }) then
+        player:sendMessage("[Bardcraft] Failed to queue bard NPC spawn.")
+        return false
+    end
+    pendingNpcBandMemberSpawns[requestId] = {
+        ownerGuid = ownerGuid,
+        ownerName = playerDisplayName(player),
+        recordId = recordId,
+        cell = cell,
+        position = spawnPosition,
+        createdAt = serverUptime(),
+    }
+
+    local provisionRecipients = 0
+    for _, target in ipairs(mp.getPlayers()) do
+        if playerHasActorCellLoaded(target, cell) then
+            mp.send(tonumber(target.guid), "BC_BardcraftProvisionNpcBandMember", {
+                requestId = requestId,
+                recordId = recordId,
+                cell = cell,
+                position = spawnPosition,
+                ownerGuid = tonumber(player.guid),
+                ownerName = playerDisplayName(player),
+                isOwner = tonumber(target.guid) == tonumber(player.guid),
+            })
+            provisionRecipients = provisionRecipients + 1
+        end
+    end
+    player:sendMessage("[Bardcraft] Spawning and recruiting " .. recordId .. ".")
+    mp.log(string.format(
+        "[bardcraft] npc band member spawn queued guid=%s name=%s request=%s record=%s cell=%s slot=%d ring=%d recipients=%d",
+        tostring(player.guid),
+        tostring(player.name),
+        requestId,
+        recordId,
+        cell,
+        spawnSlot,
+        ring,
+        provisionRecipients))
+    return true
+end
+
+local function recordNpcBandMemberProvision(guid, data)
+    if type(data) ~= "table" or data.ok ~= true then
+        return
+    end
+
+    local actorMpNum = tonumber(data.actorMpNum)
+    if not actorMpNum or actorMpNum <= 0 then
+        return
+    end
+
+    local requestId = data.requestId and tostring(data.requestId) or nil
+    local pending = requestId and pendingNpcBandMemberSpawns[requestId] or nil
+    local ownerGuid = tonumber(data.ownerGuid) or tonumber(pending and pending.ownerGuid) or tonumber(guid)
+    if not ownerGuid then
+        return
+    end
+
+    npcBandMembersByOwnerGuid[ownerGuid] = npcBandMembersByOwnerGuid[ownerGuid] or {}
+    local record = npcBandMembersByOwnerGuid[ownerGuid][actorMpNum] or {}
+    record.ownerGuid = ownerGuid
+    record.actorMpNum = actorMpNum
+    record.recordId = data.recordId and tostring(data.recordId) or record.recordId or (pending and pending.recordId) or nil
+    record.cell = record.cell or (pending and pending.cell) or nil
+    record.requestId = requestId or record.requestId
+    record.provisionGuid = tonumber(guid)
+    record.provisionedAt = serverUptime()
+    record.actorIdsByGuid = record.actorIdsByGuid or {}
+    if data.actorId ~= nil and guid then
+        record.actorIdsByGuid[tonumber(guid)] = tostring(data.actorId)
+        if data.isOwner == true or record.actorId == nil then
+            record.actorId = tostring(data.actorId)
+        end
+    end
+    npcBandMembersByOwnerGuid[ownerGuid][actorMpNum] = record
+    if requestId then
+        pendingNpcBandMemberSpawns[requestId] = nil
+    end
+end
+
+local function updateNpcBandMemberCell(guid, data)
+    local player = guid and mp.getPlayer(guid) or nil
+    local actorMpNum = data and tonumber(data.actorMpNum) or nil
+    local actorCell = trim(data and data.actorCell)
+    if not player or not actorMpNum or actorMpNum <= 0 or actorCell == "" then
+        return
+    end
+    if not playerHasActorCellLoaded(player, actorCell) then
+        return
+    end
+
+    for ownerGuid, records in pairs(npcBandMembersByOwnerGuid) do
+        local record = records[actorMpNum]
+        if record then
+            if record.cell ~= actorCell then
+                local previousCell = record.cell
+                record.cell = actorCell
+                record.cellReporterGuid = tonumber(guid)
+                record.cellUpdatedAt = serverUptime()
+                mp.log(string.format(
+                    "[bardcraft] npc band member cell updated owner=%s actorMpNum=%s from=%s to=%s reporter=%s",
+                    tostring(ownerGuid),
+                    tostring(actorMpNum),
+                    tostring(previousCell),
+                    tostring(actorCell),
+                    tostring(guid)))
+            end
+            return
+        end
+    end
+end
+
+local function stopNpcBandMemberSessions(ownerGuid, actorMpNum, reason)
+    local keys = {}
+    for key, session in pairs(activePerformanceSessions) do
+        if tonumber(session.sourceGuid) == tonumber(ownerGuid)
+            and session.actorIsPlayer == false
+            and tonumber(session.actorMpNum) == tonumber(actorMpNum)
+        then
+            table.insert(keys, key)
+        end
+    end
+
+    local removed = 0
+    local sent = 0
+    local sourceNotified = 0
+    for _, key in ipairs(keys) do
+        local childRemoved, childSent, childSourceNotified = stopPerformanceSessionByKey(key, reason, true)
+        removed = removed + childRemoved
+        sent = sent + childSent
+        sourceNotified = sourceNotified + childSourceNotified
+    end
+    return removed, sent, sourceNotified
+end
+
+local function npcBandMemberRemovalCells(player, record, actorMpNum)
+    local cells = {}
+    local seen = {}
+    local function addCell(cell)
+        cell = trim(cell)
+        if cell ~= "" and not seen[cell] then
+            seen[cell] = true
+            table.insert(cells, cell)
+        end
+    end
+
+    addCell(record and record.cell)
+    for _, session in pairs(activePerformanceSessions) do
+        if tonumber(session.actorMpNum) == tonumber(actorMpNum) then
+            addCell(session.cell)
+        end
+    end
+    if #cells == 0 then
+        for cell, _ in pairs(playerActorInterestCells(player)) do
+            addCell(cell)
+        end
+    end
+    return cells
+end
+
+local function sendNpcBandMembersDespawned(ownerGuid, records, reason)
+    local actorMpNums = {}
+    local actorIds = {}
+    local recordIds = {}
+    for actorMpNum, record in pairs(records or {}) do
+        table.insert(actorMpNums, tonumber(actorMpNum))
+        if record.actorId then
+            table.insert(actorIds, record.actorId)
+        end
+        if record.recordId then
+            table.insert(recordIds, record.recordId)
+        end
+    end
+    table.sort(actorMpNums)
+
+    local payload = {
+        ownerGuid = tonumber(ownerGuid),
+        actorMpNums = actorMpNums,
+        actorIds = actorIds,
+        recordIds = recordIds,
+        reason = reason,
+    }
+    local sent = 0
+    for _, target in ipairs(mp.getPlayers()) do
+        local targetGuid = tonumber(target.guid)
+        if targetGuid then
+            mp.send(targetGuid, "BC_BardcraftNpcBandMembersDespawned", payload)
+            sent = sent + 1
+        end
+    end
+    return sent
+end
+
+local function despawnNpcBandMembers(player)
+    local ownerGuid = tonumber(player and player.guid)
+    if not ownerGuid then
+        return false
+    end
+
+    local records = npcBandMembersByOwnerGuid[ownerGuid] or {}
+    if next(records) == nil then
+        player:sendMessage("[Bardcraft] You do not have any spawned NPC band members to clear.")
+        return false
+    end
+
+    local removedSessions = 0
+    local stopSent = 0
+    local sourceNotified = 0
+    local removals = {}
+    for actorMpNum, record in pairs(records) do
+        removals[actorMpNum] = npcBandMemberRemovalCells(player, record, actorMpNum)
+        local sessionRemoved, sessionSent, sessionSourceNotified
+            = stopNpcBandMemberSessions(ownerGuid, actorMpNum, "npc-band-despawn")
+        removedSessions = removedSessions + sessionRemoved
+        stopSent = stopSent + sessionSent
+        sourceNotified = sourceNotified + sessionSourceNotified
+    end
+
+    npcBandMembersByOwnerGuid[ownerGuid] = nil
+    local cleanupSent = sendNpcBandMembersDespawned(ownerGuid, records, "npc-band-despawn")
+    local removeQueued = 0
+    for actorMpNum, removalCells in pairs(removals) do
+        for _, cell in ipairs(removalCells) do
+            if mp.removeActor(tonumber(actorMpNum), cell) then
+                removeQueued = removeQueued + 1
+            end
+        end
+    end
+
+    player:sendMessage(string.format(
+        "[Bardcraft] Cleared %d spawned NPC band member%s.",
+        tableCount(records),
+        tableCount(records) == 1 and "" or "s"))
+    mp.log(string.format(
+        "[bardcraft] npc band members despawned owner=%s count=%d sessions=%d stopSent=%d sourceNotified=%d removeQueued=%d cleanupSent=%d",
+        tostring(ownerGuid),
+        tableCount(records),
+        removedSessions,
+        stopSent,
+        sourceNotified,
+        removeQueued,
+        cleanupSent))
+    return true
 end
 
 local function bandMemberGuids(band)
@@ -2126,6 +2531,15 @@ local function handleBandCommand(player, args)
         else
             player:sendMessage("[Bardcraft] You are not in a band.")
         end
+    elseif subcommand == "npc" or subcommand == "spawnnpc" then
+        local npcArg = string.lower(args[2] or "")
+        if npcArg == "clear" or npcArg == "despawn" or npcArg == "despawnall" or npcArg == "remove" then
+            despawnNpcBandMembers(player)
+        else
+            spawnNpcBandMember(player, args[2])
+        end
+    elseif subcommand == "despawnnpc" or subcommand == "despawnnpcs" or subcommand == "clearnpc" or subcommand == "clearnpcs" then
+        despawnNpcBandMembers(player)
     else
         sendBandUsage(player)
     end
@@ -2218,6 +2632,25 @@ local function knownSongsFromState(data)
     return nil
 end
 
+local function resolvePerformerCell(source, data, session)
+    local sourceCell = playerCellKey(source)
+    if type(data) ~= "table" or data.actorIsPlayer == true then
+        return sourceCell
+    end
+
+    local actorCell = trim(data.actorCell)
+    if actorCell == "" then
+        return sourceCell
+    end
+    if playerHasActorCellLoaded(source, actorCell) then
+        return actorCell
+    end
+    if type(session) == "table" and session.actorIsPlayer == false and session.cell == actorCell then
+        return actorCell
+    end
+    return nil
+end
+
 local function relayBardcraftPerformanceEvent(guid, data)
     local source = guid and mp.getPlayer(guid) or nil
     if not source or type(data) ~= "table" or type(data.event) ~= "table" then
@@ -2242,9 +2675,37 @@ local function relayBardcraftPerformanceEvent(guid, data)
     end
 
     local sourceCell = playerCellKey(source)
-    local sessionKey = performanceSessionKey(guid, data.actorId)
+    local sessionKey = performanceSessionKey(guid, data)
     local session = activePerformanceSessions[sessionKey]
-    if eventType == "PerformStart" and isEquivalentActivePerformanceStart(session, sourceCell, data.event) then
+    local performerCell = resolvePerformerCell(source, data, session)
+    if not performerCell then
+        mp.log(string.format(
+            "[bardcraft] performance relay rejected guid=%s name=%s actorId=%s actorMpNum=%s actorCell=%s sourceCell=%s reason=actor-cell-not-loaded",
+            tostring(guid),
+            tostring(source.name),
+            tostring(data.actorId),
+            tostring(data.actorMpNum),
+            tostring(data.actorCell),
+            tostring(sourceCell)))
+        return
+    end
+
+    if session and session.cell ~= performerCell then
+        moveActivePerformanceSession(session, performerCell, "performer-cell-change")
+    end
+    if eventType == "PerformerCell" then
+        if not session then
+            mp.log(string.format(
+                "[bardcraft] performer cell update ignored guid=%s actorId=%s actorMpNum=%s cell=%s reason=missing-session",
+                tostring(guid),
+                tostring(data.actorId),
+                tostring(data.actorMpNum),
+                tostring(performerCell)))
+        end
+        return
+    end
+
+    if eventType == "PerformStart" and isEquivalentActivePerformanceStart(session, performerCell, data.event) then
         session.duplicateStartCount = (tonumber(session.duplicateStartCount) or 0) + 1
         if session.duplicateStartCount == 1 then
             mp.log(string.format(
@@ -2270,7 +2731,7 @@ local function relayBardcraftPerformanceEvent(guid, data)
         end
         return
     end
-    if shouldDropHighChurnRelayBeforeCopy(guid, sourceCell, session, eventType) then
+    if shouldDropHighChurnRelayBeforeCopy(guid, performerCell, session, eventType) then
         return
     end
 
@@ -2303,7 +2764,7 @@ local function relayBardcraftPerformanceEvent(guid, data)
             })
             return
         end
-        if tryConvertBandUiStartToScheduled(source, payload) then
+        if payload.actorIsPlayer == true and tryConvertBandUiStartToScheduled(source, payload) then
             mp.send(tonumber(guid), "BC_BardcraftPerformanceRelayAck", {
                 eventType = eventType,
                 sent = 0,
@@ -2314,17 +2775,13 @@ local function relayBardcraftPerformanceEvent(guid, data)
             })
             return
         end
-        session = updateActivePerformanceSession(guid, source, data.actorId, payload, relayEvent, senderCharacterId(data))
+        session = updateActivePerformanceSession(
+            guid, source, data, payload, relayEvent, senderCharacterId(data), performerCell)
         if session then
             applyPendingScheduledBandStart(guid, session, payload)
         end
     elseif session then
-        if sourceCell and session.cell ~= sourceCell then
-            moveActivePerformanceSessionsForGuid(guid, session.cell, sourceCell)
-            session = activePerformanceSessions[sessionKey]
-        else
-            session.cell = sourceCell
-        end
+        session.cell = performerCell
         if eventType == "PerformStop" then
             payload.sessionKey = session.key
             payload.sessionSequence = session.sessionSequence
@@ -2345,7 +2802,7 @@ local function relayBardcraftPerformanceEvent(guid, data)
             "[bardcraft] performance relay received guid=%s name=%s cell=%s actorId=%s event=%s song=%s",
             tostring(guid),
             tostring(source.name),
-            tostring(sourceCell),
+            tostring(performerCell),
             tostring(data.actorId),
             tostring(eventType),
             tostring(relayEvent.song and relayEvent.song.title)))
@@ -2355,7 +2812,7 @@ local function relayBardcraftPerformanceEvent(guid, data)
     local suppressed = 0
     for _, target in ipairs(mp.getPlayers()) do
         local targetGuid = tonumber(target.guid)
-        if targetGuid and targetGuid ~= tonumber(guid) and playerCellKey(target) == sourceCell then
+        if targetGuid and targetGuid ~= tonumber(guid) and playerHasActorCellLoaded(target, performerCell) then
             if session and highChurnPerformanceEvents[eventType]
                 and sessionAckResolvesHighChurn(session.payload or {}, session.ackStatus and session.ackStatus[targetGuid])
             then
@@ -2399,7 +2856,7 @@ local function relayBardcraftPerformanceEvent(guid, data)
             "[bardcraft] performance relay guid=%s name=%s cell=%s event=%s sent=%d suppressed=%d song=%s session=%s parent=%s",
             tostring(guid),
             tostring(source.name),
-            tostring(sourceCell),
+            tostring(performerCell),
             tostring(eventType),
             sent,
             suppressed,
@@ -3508,6 +3965,37 @@ M.eventHandlers = {
         sendActivePerformanceSessions(guid)
     end,
 
+    BC_BardcraftNpcProvisioned = function(data)
+        local guid = senderGuid(data)
+        local player = guid and mp.getPlayer(guid) or nil
+        if not player then
+            return
+        end
+        recordNpcBandMemberProvision(guid, data)
+        if data and data.ok == true and data.isOwner == true then
+            player:sendMessage(string.format(
+                "[Bardcraft] NPC band member ready (mpNum=%s, instruments=%s).",
+                tostring(data.actorMpNum),
+                tostring(data.instrumentsAdded or 0)))
+        elseif data and data.ok ~= true and data.isOwner == true then
+            player:sendMessage("[Bardcraft] NPC band member spawned but could not be recruited locally.")
+        end
+        mp.log(string.format(
+            "[bardcraft] npc band member provision result guid=%s request=%s ok=%s actorId=%s actorMpNum=%s record=%s instruments=%s reason=%s",
+            tostring(guid),
+            tostring(data and data.requestId),
+            tostring(data and data.ok == true),
+            tostring(data and data.actorId),
+            tostring(data and data.actorMpNum),
+            tostring(data and data.recordId),
+            tostring(data and data.instrumentsAdded),
+            tostring(data and data.reason)))
+    end,
+
+    BC_BardcraftNpcBandMemberCell = function(data)
+        updateNpcBandMemberCell(senderGuid(data), data)
+    end,
+
     BC_RequestBardcraftServerSongs = function(data)
         local guid = senderGuid(data)
         if not guid then
@@ -3913,6 +4401,29 @@ M.eventHandlers = {
     end,
 
 
+}
+
+M.interfaceName = "BardcraftAdmin"
+M.interface = {
+    handleCommand = function(data)
+        local guid = data and tonumber(data.guid) or nil
+        local player = guid and mp.getPlayer(guid) or nil
+        local message = data and tostring(data.message or "") or ""
+        if not player then
+            return { ok = false, error = "player_not_found" }
+        end
+        if message == "" then
+            return { ok = false, error = "message_required" }
+        end
+
+        local result = handleChat(player, { message = message }, {
+            commandPrefix = config.COMMAND_PREFIX or "/",
+        })
+        if result == nil then
+            return { ok = false, error = "command_not_handled" }
+        end
+        return { ok = true }
+    end,
 }
 
 return M

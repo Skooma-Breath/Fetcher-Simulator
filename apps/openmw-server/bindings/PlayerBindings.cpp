@@ -28,6 +28,16 @@ static uint32_t scriptPlayer_getGuid(const ScriptPlayer& p)
     return p.data.guid;
 }
 
+static sol::table scriptPlayer_getLoadedActorCells(const ScriptPlayer& p, sol::this_state ts)
+{
+    sol::state_view lua(ts);
+    sol::table cells = lua.create_table(static_cast<int>(p.data.loadedActorCells.size()), 0);
+    int index = 1;
+    for (const std::string& cell : p.data.loadedActorCells)
+        cells[index++] = cell;
+    return cells;
+}
+
 static sol::table scriptPlayer_getPosition(const ScriptPlayer& p, sol::this_state ts)
 {
     sol::state_view lua(ts);
@@ -107,6 +117,7 @@ void initPlayerBindings(LuaUtil::LuaView& view, sol::table& mp, LuaServerContext
         "name",     sol::property(&scriptPlayer_getName),
         "guid",     sol::property(&scriptPlayer_getGuid),
         "cell",     sol::property(&scriptPlayer_getCell),
+        "loadedActorCells", sol::property(&scriptPlayer_getLoadedActorCells),
         "position", sol::property(&scriptPlayer_getPosition),
         "race",     sol::property(&scriptPlayer_getRace),
         "isMale",   sol::property(&scriptPlayer_getIsMale),

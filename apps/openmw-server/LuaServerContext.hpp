@@ -40,6 +40,7 @@ struct LuaPlayerSnapshot
     int64_t dbCharacterId = 0;
     std::string name;
     std::string cell;
+    std::vector<std::string> loadedActorCells;
     std::string nickname;
     std::string race;
     bool isMale = true;

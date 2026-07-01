@@ -10,6 +10,7 @@
 #include "../mwlua/object.hpp"
 #include "Main.hpp"
 #include "network/Client.hpp"
+#include "sync/ActorSync.hpp"
 #include "sync/WorldObjectSync.hpp"
 
 namespace mwmp
@@ -138,6 +139,11 @@ namespace mwmp
 
         mp.set_function("isServer", []() -> bool {
             return false;
+        });
+
+        mp.set_function("hasActorAuthority", [](const std::string& cellId) -> bool {
+            return Main::isInitialised() && Main::isConnected()
+                && Main::get().getActorSync().hasAuthority(cellId);
         });
 
         mp.set_function("getObjectMpNum", sol::overload(

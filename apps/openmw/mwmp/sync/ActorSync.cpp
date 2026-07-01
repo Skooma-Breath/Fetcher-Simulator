@@ -3425,6 +3425,12 @@ namespace mwmp
         if (!isExteriorActorCellId(newCellId))
             return;
 
+        // Neighboring exterior cells are already part of the active scene and share
+        // the same ActorSync interest window. Hiding their actors while waiting for
+        // another bootstrap creates visible disappearances at ordinary grid borders.
+        if (isExteriorActorCellId(oldCellId))
+            return;
+
         const uint64_t now = currentClientTimeMs();
         constexpr uint64_t kFreshBootstrapReceiveWindowMs = 250;
         MWBase::World* world = MWBase::Environment::get().getWorld();
