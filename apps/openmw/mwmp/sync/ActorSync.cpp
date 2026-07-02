@@ -5617,18 +5617,52 @@ namespace mwmp
                     stateMatchesTarget = exteriorCellIdForPosition(actor.state.position) == targetCellId;
                 }
 
-                if (smoothedMatchesTarget || !stateMatchesTarget)
+                if (smoothedMatchesTarget)
                     movePos = &actor.smoothedPosition;
-                else if (logTrackedActor)
+                else if (stateMatchesTarget)
                 {
-                    Log(Debug::Info) << "[MP] ActorSync: cross-cell move ignored stale smoothed position"
+                    if (logTrackedActor)
+                    {
+                        Log(Debug::Info) << "[MP] ActorSync: cross-cell move ignored stale smoothed position"
+                                         << " targetCell=" << targetCellId
+                                         << " smoothedCell=" << exteriorCellIdForPosition(actor.smoothedPosition)
+                                         << " stateCell=" << exteriorCellIdForPosition(actor.state.position)
+                                         << " refId=" << actor.state.refId
+                                         << " mpNum=" << actor.state.mpNum
+                                         << " runtimeTs=" << actor.lastServerTimestamp;
+                    }
+                }
+                else
+                {
+                    if (logTrackedActor)
+                    {
+                        Log(Debug::Info) << "[MP] ActorSync: deferred cross-cell move until destination transform"
+                                         << " targetCell=" << targetCellId
+                                         << " smoothedCell=" << exteriorCellIdForPosition(actor.smoothedPosition)
+                                         << " stateCell=" << exteriorCellIdForPosition(actor.state.position)
+                                         << " boundCell=" << currentBoundCellId
+                                         << " refId=" << actor.state.refId
+                                         << " mpNum=" << actor.state.mpNum
+                                         << " runtimeTs=" << actor.lastServerTimestamp;
+                    }
+                    return false;
+                }
+            }
+
+            if (isExteriorActorCellId(targetCellId)
+                && exteriorCellIdForPosition(*movePos) != targetCellId)
+            {
+                if (logTrackedActor)
+                {
+                    Log(Debug::Info) << "[MP] ActorSync: deferred cross-cell move with mismatched position cell"
                                      << " targetCell=" << targetCellId
-                                     << " smoothedCell=" << exteriorCellIdForPosition(actor.smoothedPosition)
-                                     << " stateCell=" << exteriorCellIdForPosition(actor.state.position)
+                                     << " positionCell=" << exteriorCellIdForPosition(*movePos)
+                                     << " boundCell=" << currentBoundCellId
                                      << " refId=" << actor.state.refId
                                      << " mpNum=" << actor.state.mpNum
                                      << " runtimeTs=" << actor.lastServerTimestamp;
                 }
+                return false;
             }
 
             if (!actor.hasAuthoritativeTransform)
