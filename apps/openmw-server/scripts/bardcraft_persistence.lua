@@ -33,6 +33,7 @@ local bandLeaderByMemberGuid = {}
 local disbandedBandLeadersByGuid = {}
 local pendingBandInvitesByMemberGuid = {}
 local pendingScheduledBandStartsByLeaderGuid = {}
+local sheathedInstrumentByGuid = {}
 local sendBandStateToGuid
 local sendBandStateForBand
 local BAND_INVITE_TTL_SECONDS = 300
@@ -97,6 +98,56 @@ local function playerActorInterestCells(player)
         cells[currentCell] = true
     end
     return cells
+end
+
+local function sheathedInstrumentRecordId(value)
+    if value == nil or value == false or value == "" then
+        return nil
+    end
+    if type(value) ~= "string" or #value > 128 or value:find("[^%w_%- ]") then
+        return nil
+    end
+    return value
+end
+
+local function sendSheathedInstrumentState(sourceGuid, targetGuid)
+    sourceGuid = tonumber(sourceGuid)
+    targetGuid = tonumber(targetGuid)
+    local source = sourceGuid and mp.getPlayer(sourceGuid) or nil
+    local target = targetGuid and mp.getPlayer(targetGuid) or nil
+    if not source or not target or sourceGuid == targetGuid then
+        return false
+    end
+    local sourceCell = playerCellKey(source)
+    if not sourceCell or not playerHasActorCellLoaded(target, sourceCell) then
+        return false
+    end
+    mp.send(targetGuid, "BC_BardcraftSheathedInstrumentState", {
+        sourceGuid = sourceGuid,
+        sourceName = source.name,
+        recordId = sheathedInstrumentByGuid[sourceGuid],
+    })
+    return true
+end
+
+local function broadcastSheathedInstrumentState(sourceGuid)
+    local sent = 0
+    for _, target in ipairs(mp.getPlayers()) do
+        if sendSheathedInstrumentState(sourceGuid, target.guid) then
+            sent = sent + 1
+        end
+    end
+    return sent
+end
+
+local function sendKnownSheathedInstrumentStates(targetGuid)
+    local sent = 0
+    for sourceGuid, _ in pairs(sheathedInstrumentByGuid) do
+        if sendSheathedInstrumentState(sourceGuid, targetGuid) then
+            sent = sent + 1
+        end
+    end
+    return sent
 end
 
 local function serverUptime()
@@ -3893,6 +3944,7 @@ M.eventHandlers = {
         disbandedBandLeadersByGuid = {}
         pendingBandInvitesByMemberGuid = {}
         pendingScheduledBandStartsByLeaderGuid = {}
+        sheathedInstrumentByGuid = {}
         mp.log(string.format(
             "[bardcraft] network policy localHash=%s communityMode=%s hostedDownloads=%s playerUpload=%s importedRelayFallback=%s packUrl=%s",
             tostring(bardcraftNetworkPolicy.requireLocalSongHash),
@@ -3907,6 +3959,7 @@ M.eventHandlers = {
         local guid = tonumber(data and data.guid)
         stopActivePerformanceSessionsForGuid(guid, "source-disconnect")
         if guid then
+            sheathedInstrumentByGuid[guid] = nil
             if activeBandsByLeaderGuid[guid] then
                 disbandBand(guid, "leader-disconnect", true)
             end
@@ -3937,6 +3990,8 @@ M.eventHandlers = {
         end
         moveActivePerformanceSessionsForGuid(guid, oldCell, newCell)
         sendActivePerformanceSessions(guid, newCell)
+        broadcastSheathedInstrumentState(guid)
+        sendKnownSheathedInstrumentStates(guid)
     end,
 
     OnPlayerSendMessage = function(data)
@@ -3963,6 +4018,32 @@ M.eventHandlers = {
         sendBootstrap(guid, characterId)
         sendBandStateToGuid(guid, "bootstrap")
         sendActivePerformanceSessions(guid)
+        sendKnownSheathedInstrumentStates(guid)
+    end,
+
+    BC_BardcraftSheathedInstrument = function(data)
+        local guid = senderGuid(data)
+        local player = guid and mp.getPlayer(guid) or nil
+        if not player then
+            return
+        end
+        local requested = data and data.recordId or nil
+        local recordId = sheathedInstrumentRecordId(requested)
+        if requested ~= nil and requested ~= false and requested ~= "" and not recordId then
+            mp.log(string.format(
+                "[bardcraft] rejected invalid sheathed instrument guid=%s record=%s",
+                tostring(guid),
+                tostring(requested)))
+            return
+        end
+        sheathedInstrumentByGuid[guid] = recordId
+        local sent = broadcastSheathedInstrumentState(guid)
+        mp.log(string.format(
+            "[bardcraft] sheathed instrument state guid=%s name=%s record=%s sent=%d",
+            tostring(guid),
+            tostring(player.name),
+            tostring(recordId),
+            sent))
     end,
 
     BC_BardcraftNpcProvisioned = function(data)
