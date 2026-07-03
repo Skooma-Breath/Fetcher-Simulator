@@ -294,6 +294,7 @@ namespace mwmp
         std::size_t mActorV2MissingIdentityWindow = 0;
         std::size_t mActorV2StaleWindow = 0;
         std::size_t mActorV2DeadLiveSuppressedWindow = 0;
+        std::size_t mActorV2ProvisionalAuthoritySuppressedWindow = 0;
         std::size_t mActorV2PositionMovingWindow = 0;
         std::size_t mActorV2PositionAttackingWindow = 0;
         std::size_t mActorV2PositionWeaponDrawnWindow = 0;

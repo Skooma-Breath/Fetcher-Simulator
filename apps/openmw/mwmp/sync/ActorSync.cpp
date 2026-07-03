@@ -1689,7 +1689,7 @@ namespace mwmp
             auto existing = cell.actors.find(actorKey);
             if (existing != cell.actors.end())
                 runtime = existing->second;
-            else if (actorState.mpNum != 0)
+            else if (actorState.mpNum != 0 && knownActorNetId == 0)
             {
                 takeServerSpawnedRuntimeFromOtherCell(list.cellId, actorState, list.serverTimestamp, runtime);
                 if (runtime.boundActor.isEmpty())
@@ -1947,6 +1947,7 @@ namespace mwmp
         std::size_t missingIdentity = 0;
         std::size_t stale = 0;
         std::size_t deadLiveSuppressed = 0;
+        std::size_t provisionalAuthoritySuppressed = 0;
         std::size_t positionMoving = 0;
         std::size_t positionAttacking = 0;
         std::size_t positionWeaponDrawn = 0;
@@ -1973,6 +1974,22 @@ namespace mwmp
             }
 
             ActorRuntime& runtime = runtimeIt->second;
+            const bool snapshotIsDead = (snapshot.presentationFlags & ActorPresentationDead) != 0;
+            const uint32_t localGuid = Main::get().getPlayerSync().localPlayer().guid;
+            const std::string boundCellId = !runtime.boundActor.isEmpty()
+                ? cellIdForPtr(runtime.boundActor) : std::string();
+            const bool ownsProvisionalBoundCell = runtime.state.mpNum != 0
+                && !snapshotIsDead
+                && !boundCellId.empty()
+                && boundCellId != runtime.state.cellId
+                && isExteriorActorCellId(boundCellId)
+                && hasAuthority(boundCellId)
+                && list.authorityGuid != localGuid;
+            if (ownsProvisionalBoundCell)
+            {
+                ++provisionalAuthoritySuppressed;
+                continue;
+            }
             if (runtime.lastServerTimestamp != 0
                 && list.serverTimestamp != 0
                 && list.serverTimestamp < runtime.lastServerTimestamp)
@@ -1982,7 +1999,6 @@ namespace mwmp
             }
 
             const bool runtimeIsDead = runtime.state.isDead || runtime.deathAlreadyApplied;
-            const bool snapshotIsDead = (snapshot.presentationFlags & ActorPresentationDead) != 0;
             if (runtimeIsDead && !snapshotIsDead)
             {
                 ++deadLiveSuppressed;
@@ -2033,6 +2049,7 @@ namespace mwmp
         mActorV2MissingIdentityWindow += missingIdentity;
         mActorV2StaleWindow += stale;
         mActorV2DeadLiveSuppressedWindow += deadLiveSuppressed;
+        mActorV2ProvisionalAuthoritySuppressedWindow += provisionalAuthoritySuppressed;
         mActorV2PositionMovingWindow += positionMoving;
         mActorV2PositionAttackingWindow += positionAttacking;
         mActorV2PositionWeaponDrawnWindow += positionWeaponDrawn;
@@ -2055,6 +2072,7 @@ namespace mwmp
                 || mActorV2MissingIdentityWindow != 0
                 || mActorV2StaleWindow != 0
                 || mActorV2DeadLiveSuppressedWindow != 0
+                || mActorV2ProvisionalAuthoritySuppressedWindow != 0
                 || mActorV2IdentityZeroTransformSkippedWindow != 0
                 || mActorV2PresentationInvalidActorIdWindow != 0
                 || mActorV2PresentationMissingIdentityWindow != 0
@@ -2079,6 +2097,8 @@ namespace mwmp
                                  << " noisiestMissingCount=" << noisiestMissingCount
                                  << " stale=" << mActorV2StaleWindow
                                  << " deadLiveSuppressed=" << mActorV2DeadLiveSuppressedWindow
+                                 << " provisionalAuthoritySuppressed="
+                                 << mActorV2ProvisionalAuthoritySuppressedWindow
                                  << " positionMoving=" << mActorV2PositionMovingWindow
                                  << " positionAttacking=" << mActorV2PositionAttackingWindow
                                  << " positionWeaponDrawn=" << mActorV2PositionWeaponDrawnWindow
@@ -2109,6 +2129,7 @@ namespace mwmp
             mActorV2MissingIdentityWindow = 0;
             mActorV2StaleWindow = 0;
             mActorV2DeadLiveSuppressedWindow = 0;
+            mActorV2ProvisionalAuthoritySuppressedWindow = 0;
             mActorV2PositionMovingWindow = 0;
             mActorV2PositionAttackingWindow = 0;
             mActorV2PositionWeaponDrawnWindow = 0;
@@ -2194,6 +2215,23 @@ namespace mwmp
             }
 
             ActorRuntime& runtime = runtimeIt->second;
+            const bool snapshotIsDead = snapshot.isDead
+                || ((snapshot.presentationFlags & ActorPresentationDead) != 0);
+            const uint32_t localGuid = Main::get().getPlayerSync().localPlayer().guid;
+            const std::string boundCellId = !runtime.boundActor.isEmpty()
+                ? cellIdForPtr(runtime.boundActor) : std::string();
+            const bool ownsProvisionalBoundCell = runtime.state.mpNum != 0
+                && !snapshotIsDead
+                && !boundCellId.empty()
+                && boundCellId != runtime.state.cellId
+                && isExteriorActorCellId(boundCellId)
+                && hasAuthority(boundCellId)
+                && list.authorityGuid != localGuid;
+            if (ownsProvisionalBoundCell)
+            {
+                ++mActorV2ProvisionalAuthoritySuppressedWindow;
+                continue;
+            }
             if (runtime.lastPresentationServerTimestamp != 0
                 && list.serverTimestamp != 0
                 && list.serverTimestamp < runtime.lastPresentationServerTimestamp)
@@ -2202,7 +2240,6 @@ namespace mwmp
                 continue;
             }
 
-            const bool snapshotIsDead = snapshot.isDead || ((snapshot.presentationFlags & ActorPresentationDead) != 0);
             const bool runtimeIsDead = runtime.state.isDead || runtime.deathAlreadyApplied;
             if (runtimeIsDead && !snapshotIsDead)
             {
