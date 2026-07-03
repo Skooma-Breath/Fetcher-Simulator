@@ -5014,6 +5014,7 @@ void MPServer::handleActorList(ConnectedClient& c, const uint8_t* data, size_t s
     std::size_t unmanagedSpawnerDropped = 0;
     std::size_t unknownSpawnedDropped = 0;
     std::size_t deadSpawnedSuppressed = 0;
+    std::size_t boundaryActorListSuppressed = 0;
     std::string firstUnmanagedSpawnerRefId;
     uint32_t firstUnmanagedSpawnerRefNum = 0;
     std::string firstUnknownSpawnedRefId;
@@ -5154,6 +5155,21 @@ void MPServer::handleActorList(ConnectedClient& c, const uint8_t* data, size_t s
         auto locationIt = mWorld.actorLocations.find(actorKey);
         if (locationIt != mWorld.actorLocations.end() && locationIt->second != incoming.cellId)
         {
+            if (actor.mpNum != 0
+                && isExteriorCellKey(locationIt->second)
+                && isExteriorCellKey(incoming.cellId))
+            {
+                constexpr float kExteriorCellMigrationHysteresis = 64.f;
+                const std::string positionCellId = exteriorCellIdForPosition(actor.position);
+                const bool committedToIncomingCell = positionCellId == incoming.cellId
+                    && exteriorCellBorderDistance(actor.position) > kExteriorCellMigrationHysteresis;
+                if (!committedToIncomingCell)
+                {
+                    ++boundaryActorListSuppressed;
+                    continue;
+                }
+            }
+
             // If this actor previously belonged to this cell but has since migrated away,
             // this is a stale ActorList from the old cell. Ignore it.
             if (previousCellActorKeys.count(actorKey) != 0)
@@ -5249,6 +5265,14 @@ void MPServer::handleActorList(ConnectedClient& c, const uint8_t* data, size_t s
                             << " firstRefId=" << firstDeadSpawnedRefId
                             << " firstMpNum=" << firstDeadSpawnedMpNum
                             << " firstKnownCell=" << firstDeadSpawnedKnownCell;
+    }
+
+    if (boundaryActorListSuppressed != 0)
+    {
+        Log(Debug::Verbose) << "[Server] ActorList suppressed uncommitted exterior migration"
+                            << " from=" << c.name
+                            << " incomingCell=" << incoming.cellId
+                            << " suppressed=" << boundaryActorListSuppressed;
     }
 
     // Grace period for freshly server-spawned actors: the authority's
@@ -5816,7 +5840,28 @@ void MPServer::handleActorPositionV2(ConnectedClient& c, const uint8_t* data, si
             continue;
         }
 
-        if (cellState->authorityGuid != c.guid)
+        std::string destinationCellId = cellId;
+        if (record->actor.mpNum != 0 && isExteriorCellKey(cellId))
+        {
+            const std::string positionCellId = exteriorCellIdForPosition(snapshot.position);
+            constexpr float kExteriorCellMismatchHysteresis = 64.f;
+            if (!positionCellId.empty()
+                && positionCellId != cellId
+                && exteriorCellBorderDistance(snapshot.position) > kExteriorCellMismatchHysteresis
+                && clientHasActorCellLoaded(c, positionCellId))
+            {
+                destinationCellId = positionCellId;
+            }
+        }
+
+        bool senderHasAuthority = cellState->authorityGuid == c.guid;
+        if (!senderHasAuthority && destinationCellId != cellId)
+        {
+            const auto destinationCellIt = mWorld.actorCells.find(destinationCellId);
+            senderHasAuthority = destinationCellIt != mWorld.actorCells.end()
+                && destinationCellIt->second.authorityGuid == c.guid;
+        }
+        if (!senderHasAuthority)
         {
             ++wrongAuthority;
             continue;
@@ -5866,19 +5911,6 @@ void MPServer::handleActorPositionV2(ConnectedClient& c, const uint8_t* data, si
         }
 
         BaseActor& actor = record->actor;
-        std::string destinationCellId = cellId;
-        if (actor.mpNum != 0 && isExteriorCellKey(cellId))
-        {
-            const std::string positionCellId = exteriorCellIdForPosition(snapshot.position);
-            constexpr float kExteriorCellMismatchHysteresis = 64.f;
-            if (!positionCellId.empty()
-                && positionCellId != cellId
-                && exteriorCellBorderDistance(snapshot.position) > kExteriorCellMismatchHysteresis
-                && clientHasActorCellLoaded(c, positionCellId))
-            {
-                destinationCellId = positionCellId;
-            }
-        }
 
         if (destinationCellId != cellId)
         {
