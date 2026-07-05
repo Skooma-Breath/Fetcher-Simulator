@@ -138,6 +138,8 @@ Config.Bardcraft = {
     allowServerHostedMidiDownloads = false,
     allowPlayerSongUpload = false,
     allowImportedMidiLiveRelayFallback = false,
+    -- Test-only dynamic record, player grants, and NPC equipment.
+    enableTestWaterWalking = false,
     -- Optional external Discord/Drive/community-pack URL shown for missing songs.
     communitySongPackUrl = "",
 }

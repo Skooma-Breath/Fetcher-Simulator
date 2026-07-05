@@ -137,7 +137,7 @@ public:
     void queuePlaceObject(const std::string& refId, int count, const std::string& cellId, const Position& position);
     void queueSpawnActor(
         const std::string& refId, uint32_t refNum, uint32_t mpNum, const std::string& cellId, const Position& position,
-        bool persistent = true);
+        bool persistent = true, uint32_t authorityGuid = 0);
     void queueRemoveActor(uint32_t mpNum, const std::string& cellId);
     void queueRemoveGameObject(uint32_t mpNum, const std::string& cellId);
     void queueResetCellState(const std::string& cellId);
@@ -156,6 +156,7 @@ public:
     void queueBroadcastLuaStorageSection(const std::string& section, std::vector<LuaStorageEntry> entries);
     bool queueIntentOps(const sol::table& ops, std::string* error = nullptr);
     void queueGrantInventoryItem(uint32_t guid, const std::string& refId, int count);
+    void queueEnsureInventoryItem(uint32_t guid, const std::string& refId);
     void queueRemovePlacedObject(uint32_t mpNum, const std::string& cellId);
     void queueUpsertDynamicRecord(const std::string& recordType, const std::string& recordId,
         const LuaUtil::BinaryData& data, const std::string& recordScope, bool persistent);

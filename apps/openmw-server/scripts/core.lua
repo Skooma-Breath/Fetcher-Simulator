@@ -1628,6 +1628,27 @@ return {
                 end,
             })
         end,
+        handleChatCommand = function(data)
+            local guid = data and tonumber(data.guid) or nil
+            local player = guid and getPlayer(guid) or nil
+            local message = data and tostring(data.message or "") or ""
+            if not player then
+                return { ok = false, error = "player_not_found" }
+            end
+            if message == "" then
+                return { ok = false, error = "message_required" }
+            end
+            if message:sub(1, #COMMAND_PREFIX) ~= COMMAND_PREFIX then
+                return { ok = false, error = "command_prefix_required" }
+            end
+
+            handleChat(player, {
+                guid = guid,
+                name = player.name,
+                message = message,
+            })
+            return { ok = true }
+        end,
     },
     eventHandlers = {
         OnServerInit = function(_)

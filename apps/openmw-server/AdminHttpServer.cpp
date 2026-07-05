@@ -1147,8 +1147,14 @@ bool AdminHttpServer::start(const std::string& host, int port, std::string* erro
     server.Post("/api/admin/shutdown", [this](const httplib::Request& req, httplib::Response& res) {
         applyResponse(mImpl->handler("shutdown", copyQueryParams(req)), res);
     });
+    server.Post("/api/admin/reset-cell", [this](const httplib::Request& req, httplib::Response& res) {
+        applyResponse(mImpl->handler("reset_cell", copyQueryParams(req)), res);
+    });
     server.Post("/api/admin/bardcraft-command", [this](const httplib::Request& req, httplib::Response& res) {
         applyResponse(mImpl->handler("bardcraft_command", copyQueryParams(req)), res);
+    });
+    server.Post("/api/admin/chat-command", [this](const httplib::Request& req, httplib::Response& res) {
+        applyResponse(mImpl->handler("chat_command", copyQueryParams(req)), res);
     });
 
     server.set_exception_handler([](const httplib::Request&, httplib::Response& res, std::exception_ptr ep) {

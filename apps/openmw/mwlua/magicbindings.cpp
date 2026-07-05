@@ -170,12 +170,66 @@ namespace sol
 
 namespace MWLua
 {
+    static int32_t getEffectInteger(
+        const sol::table& effect, const char* primaryKey, const char* fallbackKey, int32_t defaultValue)
+    {
+        sol::object value = effect[primaryKey];
+        if (value == sol::nil && fallbackKey != nullptr)
+            value = effect[fallbackKey];
+        if (value == sol::nil)
+            return defaultValue;
+        return value.as<int32_t>();
+    }
+
+    static ESM::RefId getOptionalEffectRefId(const sol::table& effect, const char* key)
+    {
+        const sol::object value = effect[key];
+        if (value == sol::nil)
+            return {};
+        return ESM::RefId::deserializeText(value.as<std::string_view>());
+    }
+
+    static ESM::IndexedENAMstruct tableToEffectParams(const sol::table& effect)
+    {
+        ESM::IndexedENAMstruct result{};
+        const sol::object id = effect["id"];
+        if (id == sol::nil)
+            throw std::runtime_error("Magic effect entry is missing id");
+
+        if (id.is<std::string_view>())
+            result.mData.mEffectID = ESM::RefId::deserializeText(id.as<std::string_view>());
+        else
+        {
+            const int index = id.as<int>();
+            if (index < 0 || index >= ESM::MagicEffect::Length)
+                throw std::runtime_error("Invalid magic effect index: " + std::to_string(index));
+            result.mData.mEffectID = ESM::MagicEffect::indexToRefId(index);
+        }
+
+        result.mData.mSkill = getOptionalEffectRefId(effect, "affectedSkill");
+        result.mData.mAttribute = getOptionalEffectRefId(effect, "affectedAttribute");
+        result.mData.mRange = getEffectInteger(effect, "range", "rangeType", ESM::RT_Self);
+        result.mData.mArea = getEffectInteger(effect, "area", nullptr, 0);
+        result.mData.mDuration = getEffectInteger(effect, "duration", nullptr, 0);
+        result.mData.mMagnMin = getEffectInteger(effect, "magnitudeMin", nullptr, 0);
+        result.mData.mMagnMax = getEffectInteger(effect, "magnitudeMax", nullptr, 0);
+        return result;
+    }
+
     static void updateEffectListFromTable(ESM::EffectList& effectList, const sol::table& effectsTable)
     {
         const size_t numEffects = effectsTable.size();
         effectList.mList.resize(numEffects);
         for (size_t i = 0; i < numEffects; ++i)
-            effectList.mList[i] = LuaUtil::cast<ESM::IndexedENAMstruct>(effectsTable[LuaUtil::toLuaIndex(i)]);
+        {
+            const sol::object effect = effectsTable[LuaUtil::toLuaIndex(i)];
+            if (effect.is<ESM::IndexedENAMstruct>())
+                effectList.mList[i] = LuaUtil::cast<ESM::IndexedENAMstruct>(effect);
+            else if (effect.is<sol::table>())
+                effectList.mList[i] = tableToEffectParams(effect.as<sol::table>());
+            else
+                throw std::runtime_error("Magic effect entry must be an effect-params userdata or table");
+        }
         effectList.updateIndexes();
     }
 

@@ -208,6 +208,9 @@ static void writeDefaultConfig(const std::filesystem::path& cfgPath)
          "port            = 25565\n"
          "max_players     = 32\n"
          "db_path         = playerdata.db\n"
+         "actorAuthorityExteriorRadius = 1\n"
+         "actorAuthorityStickyMs = 3000\n"
+         "actorAuthorityPreferExactCell = true\n"
          "\n"
          "[master]\n"
          "public_listing  = false       # set true to appear in the server browser\n"
@@ -255,6 +258,12 @@ int main(int argc, char* argv[])
     uint16_t    port          = static_cast<uint16_t>(cfgInt(cfg, "server.port",        25565));
     std::string dbPath        = cfgStr (cfg, "server.db_path",       "playerdata.db");
     int         maxPlayers    = cfgInt (cfg, "server.max_players",   32);
+    int         actorAuthorityExteriorRadius = cfgInt(cfg, "server.actorAuthorityExteriorRadius",
+        cfgInt(cfg, "server.actor_authority_exterior_radius", 1));
+    int         actorAuthorityStickyMs = cfgInt(cfg, "server.actorAuthorityStickyMs",
+        cfgInt(cfg, "server.actor_authority_sticky_ms", 3000));
+    bool        actorAuthorityPreferExactCell = cfgBool(cfg, "server.actorAuthorityPreferExactCell",
+        cfgBool(cfg, "server.actor_authority_prefer_exact_cell", true));
     bool        publicListing = cfgBool(cfg, "master.public_listing", false);
     std::string masterUrl     = cfgStr (cfg, "master.master_url",    "");
     std::string serverName    = cfgStr (cfg, "master.server_name",   "My OpenMW Server");
@@ -276,7 +285,10 @@ int main(int argc, char* argv[])
     std::cout << "[Server] Config: " << cfgPath.string() << "\n"
               << "[Server] Port: " << port
               << "  MaxPlayers: " << maxPlayers
-              << "  DB: " << dbPath << "\n";
+              << "  DB: " << dbPath << "\n"
+              << "[Server] ActorAuthority: exteriorRadius=" << actorAuthorityExteriorRadius
+              << " stickyMs=" << actorAuthorityStickyMs
+              << " preferExactCell=" << (actorAuthorityPreferExactCell ? "true" : "false") << "\n";
     if (publicListing)
         std::cout << "[Server] MasterServer: " << masterUrl
                   << "  Name: " << serverName << "\n";
@@ -289,6 +301,9 @@ int main(int argc, char* argv[])
         mwmp::MPServer server(port);
         server.setDbPath(dbPath);
         server.setMaxPlayers(maxPlayers);
+        server.setActorAuthorityExteriorRadius(actorAuthorityExteriorRadius);
+        server.setActorAuthorityStickyMs(actorAuthorityStickyMs);
+        server.setActorAuthorityPreferExactCell(actorAuthorityPreferExactCell);
         if (publicListing && !masterUrl.empty())
         {
             server.setMasterUrl(masterUrl);

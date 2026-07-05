@@ -146,6 +146,36 @@ namespace mwmp
                 && Main::get().getActorSync().hasAuthority(cellId);
         });
 
+        mp.set_function("getActorAuthorityCell", sol::overload(
+            [](const MWLua::LObject& object) -> std::string {
+                if (!Main::isInitialised() || !Main::isConnected())
+                    return {};
+                return Main::get().getActorSync().getActorAuthorityCellId(object.ptr());
+            },
+            [](const MWLua::GObject& object) -> std::string {
+                if (!Main::isInitialised() || !Main::isConnected())
+                    return {};
+                return Main::get().getActorSync().getActorAuthorityCellId(object.ptr());
+            }));
+
+        mp.set_function("hasActorAuthorityForObject", sol::overload(
+            [](const MWLua::LObject& object) -> bool {
+                if (!Main::isInitialised() || !Main::isConnected())
+                    return false;
+                return Main::get().getActorSync().hasAuthorityForObject(object.ptr());
+            },
+            [](const MWLua::GObject& object) -> bool {
+                if (!Main::isInitialised() || !Main::isConnected())
+                    return false;
+                return Main::get().getActorSync().hasAuthorityForObject(object.ptr());
+            }));
+
+        mp.set_function("hasActorAuthorityForMpNum", [](uint32_t mpNum, const std::string& cellId) -> bool {
+            if (!Main::isInitialised() || !Main::isConnected())
+                return false;
+            return Main::get().getActorSync().hasAuthorityForMpNum(mpNum, cellId);
+        });
+
         mp.set_function("getObjectMpNum", sol::overload(
             [](const MWLua::LObject& object) -> sol::optional<uint32_t> {
                 return getObjectMpNum(object);

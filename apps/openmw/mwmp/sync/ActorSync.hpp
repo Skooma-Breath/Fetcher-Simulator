@@ -58,6 +58,9 @@ namespace mwmp
         void onActorCellChange(const ActorList& list);
 
         bool hasAuthority(const std::string& cellId) const;
+        bool hasAuthorityForMpNum(uint32_t mpNum, const std::string& cellId) const;
+        bool hasAuthorityForObject(const MWWorld::Ptr& ptr) const;
+        std::string getActorAuthorityCellId(const MWWorld::Ptr& ptr) const;
         uint32_t getActorMpNum(const MWWorld::Ptr& ptr) const;
         MWWorld::Ptr getActorByMpNum(uint32_t mpNum) const;
         void sendCombatRequest(const MWWorld::Ptr& victim, float damage, bool healthDamage, bool knocked,
@@ -183,6 +186,8 @@ namespace mwmp
             // local AI packages resume, avoiding a visible phase jump on the
             // client that just lost authority.
             float authoritySyncedIdleHandoffTimer = 0.f;
+            // Temporary targeted diagnostics: trace the canonical and physical
+            // transforms for a few frames after a reliable cell handoff.
             // Non-authority side: live AI package stack captured before this
             // runtime becomes a pure network puppet. If authority later moves to
             // this client, restore the real package stack instead of promoting an
@@ -220,6 +225,11 @@ namespace mwmp
             bool rebaseOnNextAuthoritativeSnapshot = false;
             bool smoothFreshBootstrapCorrection = false;
             uint64_t freshCellBootstrapMinServerTimestamp = 0;
+            std::string pendingCellChangeDestination;
+            float pendingCellChangeRetryTimer = 0.f;
+            std::string previousCellChangeCellId;
+            float cellChangeReverseGuardTimer = 0.f;
+            bool cellChangeReverseGuardLogged = false;
         };
 
         struct CellRuntime
@@ -254,6 +264,7 @@ namespace mwmp
         void rememberActorNetId(ActorInstanceId actorNetId, const BaseActor& actor);
         void indexActorNetId(ActorInstanceId actorNetId, const std::string& oldCellId, const std::string& newCellId);
         ActorRuntime* findPrimaryActorRuntime(const BaseActor& actor);
+        bool hasAuthorityForActor(ActorInstanceId actorNetId, const std::string& cellId) const;
         ActorRuntime& runtimeForPacketActor(const std::string& cellId, CellRuntime& cell, const BaseActor& actor);
         MWWorld::Ptr resolvePacketActorBinding(const std::string& packetCellId, CellRuntime& cell,
             const BaseActor& actor, const char* packetName);
@@ -264,7 +275,7 @@ namespace mwmp
         void sendAuthoritativeActorUpdates(const std::string& cellId, CellRuntime& cell, float dt);
         bool shouldAcceptSnapshot(CellRuntime& cell, const ActorList& list, const char* packetName,
             bool isPositionSnapshot = false);
-        bool resolveActorBinding(const std::string& cellId, ActorRuntime& actor);
+        bool resolveActorBinding(const std::string& cellId, ActorRuntime& actor, bool forceCanonicalCell = false);
         void applyBootstrapDeathState(ActorRuntime& actor);
         void applyBoundActorState(ActorRuntime& actor);
         void rememberServerSpawnedActor(const std::string& cellId, const MWWorld::Ptr& ptr, uint32_t mpNum);
@@ -283,6 +294,7 @@ namespace mwmp
         std::unordered_map<uint32_t, MWWorld::Ptr>   mServerSpawnedActorsByMpNum;
         std::unordered_map<uint32_t, uint64_t>       mServerSpawnedActorLastTimestamps;
         std::unordered_map<ActorInstanceId, ActorRuntime>   mActorsByNetId;
+        std::unordered_map<ActorInstanceId, uint32_t>       mActorAuthorityGuids;
         std::unordered_set<ActorInstanceId> mPendingPresentationSampleRequests;
         std::unordered_map<std::string, std::unordered_set<ActorInstanceId>> mCellActorIds;
         std::unordered_map<std::string, ActorInstanceId>    mActorNetIdsByKey;

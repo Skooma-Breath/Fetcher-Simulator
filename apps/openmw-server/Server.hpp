@@ -1,6 +1,7 @@
 #ifndef OPENMW_SERVER_SERVER_HPP
 #define OPENMW_SERVER_SERVER_HPP
 
+#include <algorithm>
 #include <chrono>
 #include <cmath>
 #include <cstdint>
@@ -83,6 +84,7 @@ struct ConnectedClient
     uint32_t actorSyncProtocolVersion = ActorSyncProtocolVersionV1;
     std::unordered_set<ActorInstanceId> actorV2IdentitySent;
     std::unordered_set<ActorInstanceId> actorV2IdentityAcked;
+    std::unordered_map<ActorInstanceId, std::string> actorAuthorityLeaseStateSent;
     std::unordered_map<ActorInstanceId, uint64_t> actorV2LastSentMs;
     std::unordered_map<ActorInstanceId, std::size_t> actorV2MissingIdentityByNetIdWindow;
     uint64_t actorV2DiagnosticsLastLogMs = 0;
@@ -170,11 +172,12 @@ public:
     // Look up a live client by guid. Returns nullptr if not found / disconnected.
     ConnectedClient* findClientByGuid(uint32_t guid);
     bool grantPlayerInventoryItem(uint32_t guid, const std::string& refId, int count);
+    bool ensurePlayerInventoryItem(uint32_t guid, const std::string& refId);
     bool placeObject(const std::string& refId, int count, const std::string& cellId, const Position& position);
     bool removePlacedObjectByMpNum(uint32_t mpNum, const std::string& cellId);
     bool spawnActor(
         const std::string& refId, uint32_t refNum, uint32_t mpNum, const std::string& cellId, const Position& position,
-        bool persistent = true);
+        bool persistent = true, uint32_t authorityGuid = 0);
     bool removeActor(uint32_t mpNum, const std::string& cellId);
     bool removeGameObject(uint32_t mpNum, const std::string& cellId);
     bool resetCellStateForTesting(const std::string& cellId);
@@ -220,6 +223,15 @@ public:
     void setSpawnCell        (const std::string& c) { mDefaultSpawnCell  = c; }
     void setMaxPlayers       (int n)                { mMaxPlayersConfig   = n; }
     void setMaxCharsPerAccount(int n)               { mMaxCharsPerAccount = n; }
+    void setActorAuthorityExteriorRadius(int radius)
+    {
+        mActorAuthorityExteriorRadius = std::clamp(radius, 0, 16);
+    }
+    void setActorAuthorityStickyMs(int milliseconds)
+    {
+        mActorAuthorityStickyMs = std::max(milliseconds, 0);
+    }
+    void setActorAuthorityPreferExactCell(bool prefer) { mActorAuthorityPreferExactCell = prefer; }
 
 private:
     // ── GNS callbacks ─────────────────────────────────────────────────────
@@ -365,6 +377,17 @@ private:
         HSteamNetConnection except = k_HSteamNetConnection_Invalid);
     void sendGameSettingsToClient(HSteamNetConnection conn, const std::string& cellId);
     bool validateActorUpdate(const ConnectedClient& c, const ActorList& actorList, const char* packetName);
+    bool isActorAuthorityLeaseValid(
+        const ActorRegistryRecord& record, const std::string& cellId, uint64_t now = 0);
+    bool isAllowedActorSender(
+        const ConnectedClient& sender, const ActorRegistryRecord& record, const std::string& cellId);
+    void updateActorAuthorityLeaseFromAi(const std::string& cellId, ActorRegistryRecord& record,
+        const BaseActor& actor, uint64_t timestamp, const char* source);
+    void broadcastActorAuthorityLease(
+        const std::string& cellId, const ActorRegistryRecord& record);
+    void broadcastActorAuthorityLeasesForCell(
+        const std::string& cellId, CellActorState& cellState);
+    bool clientEligibleForActorCell(const ConnectedClient& client, const std::string& cellId) const;
     bool clientHasActorCellLoaded(const ConnectedClient& client, const std::string& cellId) const;
     std::unordered_set<std::string> actorInterestCellsForClient(const ConnectedClient& client) const;
 
@@ -382,12 +405,24 @@ private:
         uint32_t lastDeathEventId = 0;
         uint64_t lastPersistTime = 0;
         bool pendingPersist = false;
+        std::string previousCellId;
+        uint32_t previousCellAuthorityGuid = 0;
+        // Timestamp of the last accepted canonical cell migration. Position,
+        // presentation, and stats snapshots must not refresh this value: the
+        // reverse-handoff guard ages from a commit, not general actor traffic.
+        uint64_t lastCellChangeTime = 0;
+        uint32_t actorAuthorityGuid = 0;
+        uint32_t actorAuthorityGeneration = 0;
+        std::string actorAuthorityReason;
+        uint32_t actorAuthorityTargetGuid = 0;
+        uint64_t actorAuthorityLeaseUntilMs = 0;
     };
 
     struct CellActorState
     {
         uint32_t authorityGuid = 0;
         uint32_t authorityGeneration = 0;
+        uint64_t authorityStickyUntilMs = 0;
         uint32_t nextSnapshotSequence = 1;
         std::unordered_map<std::string, ActorRegistryRecord> actors;
         std::unordered_set<std::string> resetSuppressedVanillaDeaths;
@@ -527,6 +562,9 @@ private:
     std::string                   mGeneratedRecordIdPrefix = "$custom";
     int                           mMaxPlayersConfig   = 32;
     int                           mMaxCharsPerAccount = 5; ///< 0 = unlimited; overridden from config.lua
+    int                           mActorAuthorityExteriorRadius = 1;
+    int                           mActorAuthorityStickyMs = 3000;
+    bool                          mActorAuthorityPreferExactCell = true;
 
     // ── Config ────────────────────────────────────────────────────────────
     static constexpr float       MAX_MOVE_SPEED = 600.f;

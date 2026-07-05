@@ -4,6 +4,7 @@
 #include "sha256.hpp"
 #include <algorithm>
 #include <cctype>
+#include <cstdio>
 #include <cstring>
 
 #include <stdexcept>
@@ -82,6 +83,7 @@
 #include <filesystem>
 #include <components/esm/position.hpp>
 #include <components/esm/refid.hpp>
+#include <components/esm3/loadcell.hpp>
 #include <components/esm3/loadclas.hpp>
 
 namespace mwmp
@@ -688,24 +690,30 @@ void Main::applySelectedCharacterSpawn(const std::string& spawnCell, const char*
     MWBase::World* world = MWBase::Environment::get().getWorld();
     ESM::Position dest {};
 
-    const auto interiorId = world->findInteriorPosition(targetCell, dest);
-    if (!interiorId.empty())
+    int exteriorGridX = 0;
+    int exteriorGridY = 0;
+    const bool isExteriorCellKey = targetCell.rfind("EXT:", 0) == 0;
+    if (isExteriorCellKey)
     {
-        if (hasSavedPos)
-        {
-            dest.pos[0] = sx;
-            dest.pos[1] = sy;
-            dest.pos[2] = sz;
-            dest.rot[0] = rx;
-            dest.rot[1] = ry;
-            dest.rot[2] = rz;
-        }
-        world->changeToCell(interiorId, dest, true);
+        if (std::sscanf(targetCell.c_str(), "EXT:%d,%d", &exteriorGridX, &exteriorGridY) != 2)
+            throw std::runtime_error("Invalid saved exterior cell key: " + targetCell);
+
+        // Player database exterior locations use the canonical EXT:x,y key.
+        // Resolve that key directly instead of passing it through the named-cell
+        // lookup, which treats it as an interior name and aborts the restore.
+        dest.pos[0] = sx;
+        dest.pos[1] = sy;
+        dest.pos[2] = sz;
+        dest.rot[0] = rx;
+        dest.rot[1] = ry;
+        dest.rot[2] = rz;
+        world->changeToCell(
+            ESM::Cell::generateIdForCell(true, {}, exteriorGridX, exteriorGridY), dest, true);
     }
     else
     {
-        const auto exteriorId = world->findExteriorPosition(targetCell, dest);
-        if (!exteriorId.empty())
+        const auto interiorId = world->findInteriorPosition(targetCell, dest);
+        if (!interiorId.empty())
         {
             if (hasSavedPos)
             {
@@ -716,10 +724,27 @@ void Main::applySelectedCharacterSpawn(const std::string& spawnCell, const char*
                 dest.rot[1] = ry;
                 dest.rot[2] = rz;
             }
-            world->changeToCell(exteriorId, dest, true);
+            world->changeToCell(interiorId, dest, true);
         }
         else
-            world->changeToInteriorCell(targetCell, dest, true);
+        {
+            const auto exteriorId = world->findExteriorPosition(targetCell, dest);
+            if (!exteriorId.empty())
+            {
+                if (hasSavedPos)
+                {
+                    dest.pos[0] = sx;
+                    dest.pos[1] = sy;
+                    dest.pos[2] = sz;
+                    dest.rot[0] = rx;
+                    dest.rot[1] = ry;
+                    dest.rot[2] = rz;
+                }
+                world->changeToCell(exteriorId, dest, true);
+            }
+            else
+                world->changeToInteriorCell(targetCell, dest, true);
+        }
     }
 
     Log(Debug::Info) << "[MP] Applied " << context << " spawn: cell=" << targetCell

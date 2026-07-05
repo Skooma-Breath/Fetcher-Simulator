@@ -22,6 +22,10 @@ local INITIAL_INSTRUMENT_GRANT_KEY = "initialInstrumentGrantVersion"
 local INITIAL_INSTRUMENT_GRANT_VERSION = 1
 local NPC_PERFORMANCE_MODE_KEY = "npcPerformanceMode"
 local DEFAULT_NPC_PERFORMANCE_MODE = "fill"
+local TEST_WATERWALK_ENABLED = config.Bardcraft
+    and config.Bardcraft.enableTestWaterWalking == true
+local TEST_WATERWALK_ENCHANTMENT_ID = "bardcraft_test_waterwalking_enchantment"
+local TEST_WATERWALK_AMULET_ID = "bardcraft_test_waterwalking_amulet"
 local bootstrapSequence = 0
 local performanceSessionSequence = 0
 local joinRequestSequence = 0
@@ -126,6 +130,18 @@ local function playerHasActorCellLoaded(player, cell)
         end
     end
     return false
+end
+
+local function playerWithinExteriorCellRadius(player, cell, radius)
+    local playerCell = playerCellKey(player)
+    local playerX, playerY = playerCell and playerCell:match("^EXT:(%-?%d+),(%-?%d+)$")
+    local cellX, cellY = tostring(cell or ""):match("^EXT:(%-?%d+),(%-?%d+)$")
+    if not playerX or not playerY or not cellX or not cellY then
+        return false
+    end
+    radius = tonumber(radius) or 0
+    return math.abs(tonumber(playerX) - tonumber(cellX)) <= radius
+        and math.abs(tonumber(playerY) - tonumber(cellY)) <= radius
 end
 
 local function playerActorInterestCells(player)
@@ -319,6 +335,72 @@ local function findOnlinePlayer(selector)
         return nil, "ambiguous"
     end
     return nil, "not-found"
+end
+
+local function ensureTestWaterWalkingAmulet()
+    if not TEST_WATERWALK_ENABLED then
+        return false
+    end
+    local options = { scope = "permanent", persistent = true }
+    local enchantmentQueued = mp.upsertDynamicRecord("enchantment", TEST_WATERWALK_ENCHANTMENT_ID, {
+        type = 3, -- ConstantEffect
+        cost = 1,
+        charge = 1,
+        isAutocalc = false,
+        effects = {
+            {
+                id = 2, -- Water Walking
+                rangeType = 0,
+                area = 0,
+                duration = 1,
+                magnitudeMin = 1,
+                magnitudeMax = 1,
+            },
+        },
+    }, options)
+    local amuletQueued = mp.upsertDynamicRecord("clothing", TEST_WATERWALK_AMULET_ID, {
+        baseId = "exquisite_amulet_01",
+        name = "Bardcraft Test Water Walking Amulet",
+        enchant = TEST_WATERWALK_ENCHANTMENT_ID,
+    }, options)
+    local dependenciesQueued = mp.setDynamicRecordDependencies(
+        "clothing", TEST_WATERWALK_AMULET_ID, { TEST_WATERWALK_ENCHANTMENT_ID })
+
+    mp.log(string.format(
+        "[bardcraft] test water-walking records queued enchantment=%s amulet=%s dependencies=%s",
+        tostring(enchantmentQueued), tostring(amuletQueued), tostring(dependenciesQueued)))
+end
+
+local function grantTestWaterWalkingAmulet(player, selector)
+    if not TEST_WATERWALK_ENABLED then
+        player:sendMessage("[Bardcraft] Test Water Walking is disabled by the server operator.")
+        return false
+    end
+    local target = player
+    selector = trim(selector)
+    if selector ~= "" then
+        local reason
+        target, reason = findOnlinePlayer(selector)
+        if not target then
+            player:sendMessage("[Bardcraft] Water Walking target not found (" .. tostring(reason) .. ").")
+            return false
+        end
+    end
+
+    if not mp.grantInventoryItem(tonumber(target.guid), TEST_WATERWALK_AMULET_ID, 1) then
+        player:sendMessage("[Bardcraft] Failed to queue the Water Walking amulet grant.")
+        return false
+    end
+
+    target:sendMessage("[Bardcraft] Test Water Walking amulet added to your inventory.")
+    if tonumber(target.guid) ~= tonumber(player.guid) then
+        player:sendMessage("[Bardcraft] Gave the test Water Walking amulet to "
+            .. playerDisplayName(target) .. ".")
+    end
+    mp.log(string.format(
+        "[bardcraft] test water-walking amulet grant source=%s target=%s record=%s",
+        tostring(player.guid), tostring(target.guid), TEST_WATERWALK_AMULET_ID))
+    return true
 end
 
 local function copyRelayValue(value, depth)
@@ -2338,7 +2420,7 @@ end
 
 local function sendBandUsage(player)
     player:sendMessage(
-        "Usage: /bc invite <player|pid> | /bc accept <leader|pid> | /bc decline <leader|pid> | /bc kick <player|pid> | /bc disband | /bc leave | /bc status | /bc npc [recordId|clear|mode fill|mode all]")
+        "Usage: /bc invite <player|pid> | /bc accept <leader|pid> | /bc decline <leader|pid> | /bc kick <player|pid> | /bc disband | /bc leave | /bc status | /bc npc [recordId|clear|mode fill|mode all] | /bc waterwalk [player|pid]")
 end
 
 local function setNpcPerformanceMode(player, requestedMode)
@@ -2431,7 +2513,8 @@ local function spawnNpcBandMember(player, requestedRecordId)
     npcBandMemberSpawnSequence = npcBandMemberSpawnSequence + 1
     local requestId = string.format("%s:%d:%d", tostring(player.guid), npcBandMemberSpawnSequence,
         math.floor(serverUptime() * 1000))
-    if not mp.spawnActor(recordId, 0, 0, cell, spawnPosition, { persistent = false }) then
+    if not mp.spawnActor(recordId, 0, 0, cell, spawnPosition,
+        { persistent = false, authorityGuid = ownerGuid }) then
         player:sendMessage("[Bardcraft] Failed to queue bard NPC spawn.")
         return false
     end
@@ -2455,6 +2538,7 @@ local function spawnNpcBandMember(player, requestedRecordId)
                 ownerGuid = tonumber(player.guid),
                 ownerName = playerDisplayName(player),
                 isOwner = tonumber(target.guid) == tonumber(player.guid),
+                enableTestWaterWalking = TEST_WATERWALK_ENABLED,
             })
             provisionRecipients = provisionRecipients + 1
         end
@@ -2517,12 +2601,18 @@ local function recordNpcBandMemberProvision(guid, data)
     end
 end
 
-local function sendNpcBandMemberProvision(target, ownerGuid, record, reason)
+local function sendNpcBandMemberProvision(target, ownerGuid, record, reason, allowAdjacentPreprovision)
     local targetGuid = tonumber(target and target.guid)
     local actorMpNum = tonumber(record and record.actorMpNum)
     local recordCell = trim(record and record.cell)
+    local cellLoaded = target and playerHasActorCellLoaded(target, recordCell)
+    -- Exact-mpNum preprovision requests are inert until that actor becomes
+    -- active on the receiver. Send them to every connected non-owner client;
+    -- server loaded-cell snapshots can lag a teleport or authority handoff and
+    -- are not reliable enough to decide who will own the destination cell.
+    local adjacentPreprovision = allowAdjacentPreprovision == true and target ~= nil
     if not targetGuid or not actorMpNum or actorMpNum <= 0 or recordCell == ""
-        or not record.recordId or not playerHasActorCellLoaded(target, recordCell)
+        or not record.recordId or (not cellLoaded and not adjacentPreprovision)
     then
         return false
     end
@@ -2543,7 +2633,9 @@ local function sendNpcBandMemberProvision(target, ownerGuid, record, reason)
         ownerGuid = tonumber(ownerGuid),
         ownerName = record.ownerName or playerDisplayName(owner),
         isOwner = targetGuid == tonumber(ownerGuid),
+        enableTestWaterWalking = TEST_WATERWALK_ENABLED,
         reason = reason,
+        preprovision = adjacentPreprovision and not cellLoaded,
     })
     mp.log(string.format(
         "[bardcraft] npc band member reprovision sent target=%s owner=%s actorMpNum=%s cell=%s reason=%s",
@@ -2553,6 +2645,24 @@ local function sendNpcBandMemberProvision(target, ownerGuid, record, reason)
         recordCell,
         tostring(reason)))
     return true
+end
+
+
+local function preprovisionAdjacentNpcBandMember(ownerGuid, actorMpNum)
+    local records = npcBandMembersByOwnerGuid[tonumber(ownerGuid)]
+    local record = records and records[tonumber(actorMpNum)] or nil
+    if not record then
+        return 0
+    end
+    local sent = 0
+    for _, target in ipairs(mp.getPlayers()) do
+        if tonumber(target.guid) ~= tonumber(ownerGuid)
+            and sendNpcBandMemberProvision(target, ownerGuid, record, "adjacent-preprovision", true)
+        then
+            sent = sent + 1
+        end
+    end
+    return sent
 end
 
 local function sendInterestedNpcBandMemberProvisions(player, reason)
@@ -2891,6 +3001,8 @@ local function handleBandCommand(player, args)
         end
     elseif subcommand == "despawnnpc" or subcommand == "despawnnpcs" or subcommand == "clearnpc" or subcommand == "clearnpcs" then
         despawnNpcBandMembers(player)
+    elseif subcommand == "waterwalk" or subcommand == "waterwalking" then
+        grantTestWaterWalkingAmulet(player, joinCommandArgs(args, 2))
     else
         sendBandUsage(player)
     end
@@ -4237,6 +4349,9 @@ end
 M.eventHandlers = {
     OnServerInit = function(_)
         networkPolicy.reset()
+        if TEST_WATERWALK_ENABLED then
+            ensureTestWaterWalkingAmulet()
+        end
         pendingJoinRequests = {}
         activePerformanceSessions = {}
         activeBandsByLeaderGuid = {}
@@ -4327,6 +4442,11 @@ M.eventHandlers = {
         sendKnownSheathedInstrumentStates(guid)
         local player = mp.getPlayer(guid)
         if player then
+            if TEST_WATERWALK_ENABLED and mp.ensureInventoryItem(guid, TEST_WATERWALK_AMULET_ID) then
+                mp.log(string.format(
+                    "[bardcraft] ensured test water-walking amulet after bootstrap guid=%s record=%s",
+                    tostring(guid), TEST_WATERWALK_AMULET_ID))
+            end
             sendInterestedNpcBandMemberProvisions(player, "bootstrap")
         end
     end,
@@ -4364,6 +4484,11 @@ M.eventHandlers = {
         end
         recordNpcBandMemberProvision(guid, data)
         if data and data.ok == true and data.isOwner == true then
+            local preprovisioned = preprovisionAdjacentNpcBandMember(
+                tonumber(data.ownerGuid) or guid, tonumber(data.actorMpNum))
+            mp.log(string.format(
+                "[bardcraft] npc band member adjacent preprovision owner=%s actorMpNum=%s sent=%d",
+                tostring(tonumber(data.ownerGuid) or guid), tostring(data.actorMpNum), preprovisioned))
             player:sendMessage(string.format(
                 "[Bardcraft] NPC band member ready (mpNum=%s, instruments=%s).",
                 tostring(data.actorMpNum),

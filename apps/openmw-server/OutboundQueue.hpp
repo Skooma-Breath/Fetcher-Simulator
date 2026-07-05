@@ -38,6 +38,7 @@ enum class OutboundLuaActionType
     BroadcastLuaStorage,
     SendLuaStorage,
     GrantInventoryItem,
+    EnsureInventoryItem,
     RemovePlacedObject,
     RemoveGameObject,
     ResetCellState,
@@ -62,6 +63,7 @@ struct OutboundLuaAction
     bool actorPersistent = true;
     uint32_t actorRefNum = 0;
     uint32_t actorMpNum = 0;
+    uint32_t actorAuthorityGuid = 0;
     Position position;
     PlayerMark playerMark;
     std::string text;

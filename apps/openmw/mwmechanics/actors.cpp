@@ -1580,8 +1580,18 @@ namespace MWMechanics
                     = MWBase::Environment::get().getLuaManager()->getActorControls(actor.getPtr());
 
                 const float distSqr = (playerPos - actor.getPtr().getRefData().getPosition().asVec3()).length2();
+                bool isMpAuthoritativeActor = false;
+#ifdef BUILD_MULTIPLAYER
+                if (const auto* baseNode = actor.getPtr().getRefData().getBaseNode())
+                    baseNode->getUserValue("mp_authoritative_actor", isMpAuthoritativeActor);
+#endif
                 // AI processing is only done within given distance to the player.
-                const bool inProcessingRange = distSqr <= actorsProcessingRange * actorsProcessingRange;
+                // A multiplayer authority must also simulate network actors in
+                // its loaded cells when they are outside the local player's
+                // normal range; otherwise accepted Follow/Travel packages never
+                // execute and the actor freezes at the authority boundary.
+                const bool inProcessingRange = isMpAuthoritativeActor
+                    || distSqr <= actorsProcessingRange * actorsProcessingRange;
 
                 // If dead or no longer in combat, no longer store any actors who attempted to hit us. Also remove for
                 // the player.
@@ -1699,6 +1709,11 @@ namespace MWMechanics
                 const float dist = (playerPos - actor.getPtr().getRefData().getPosition().asVec3()).length();
                 const bool isPlayer = actor.getPtr() == player;
                 CreatureStats& stats = actor.getPtr().getClass().getCreatureStats(actor.getPtr());
+                bool isMpAuthoritativeActor = false;
+#ifdef BUILD_MULTIPLAYER
+                if (const auto* baseNode = actor.getPtr().getRefData().getBaseNode())
+                    baseNode->getUserValue("mp_authoritative_actor", isMpAuthoritativeActor);
+#endif
                 // Actors with active AI should be able to move.
                 bool alwaysActive = false;
                 if (!isPlayer && isConscious(actor.getPtr()) && !stats.isParalyzed())
@@ -1706,7 +1721,12 @@ namespace MWMechanics
                     MWMechanics::AiSequence& seq = stats.getAiSequence();
                     alwaysActive = !seq.isEmpty() && seq.getActivePackage().alwaysActive();
                 }
-                const bool inRange = isPlayer || dist <= actorsProcessingRange || alwaysActive;
+                // Cell authority must keep the actor controller and physics body
+                // active even when the local player is outside the normal actor
+                // processing range. The AI loop above can otherwise execute a
+                // Travel package while this loop suppresses all displacement.
+                const bool inRange
+                    = isPlayer || isMpAuthoritativeActor || dist <= actorsProcessingRange || alwaysActive;
                 const int activeFlag = isPlayer ? 2 : 1; // Can be changed back to '2' to keep updating bounding boxes
                                                          // off screen (more accurate, but slower)
                 const int active = inRange ? activeFlag : 0;

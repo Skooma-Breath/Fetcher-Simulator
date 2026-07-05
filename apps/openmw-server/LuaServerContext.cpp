@@ -323,7 +323,7 @@ void LuaServerContext::drainOutbound()
                 break;
             case OutboundLuaActionType::SpawnActor:
                 mServer->spawnActor(action.text, action.actorRefNum, action.actorMpNum, action.cellId, action.position,
-                    action.actorPersistent);
+                    action.actorPersistent, action.actorAuthorityGuid);
                 break;
             case OutboundLuaActionType::RemoveActor:
                 mServer->removeActor(action.actorMpNum, action.cellId);
@@ -363,6 +363,9 @@ void LuaServerContext::drainOutbound()
                 break;
             case OutboundLuaActionType::GrantInventoryItem:
                 mServer->grantPlayerInventoryItem(action.guid, action.text, action.itemCount);
+                break;
+            case OutboundLuaActionType::EnsureInventoryItem:
+                mServer->ensurePlayerInventoryItem(action.guid, action.text);
                 break;
             case OutboundLuaActionType::RemovePlacedObject:
                 mServer->removePlacedObjectByMpNum(action.mpNum, action.cellId);
@@ -1030,7 +1033,7 @@ void LuaServerContext::queuePlaceObject(
 
 void LuaServerContext::queueSpawnActor(
     const std::string& refId, uint32_t refNum, uint32_t mpNum, const std::string& cellId, const Position& position,
-    bool persistent)
+    bool persistent, uint32_t authorityGuid)
 {
     if (refId.empty() || cellId.empty())
         return;
@@ -1043,6 +1046,7 @@ void LuaServerContext::queueSpawnActor(
     action.cellId = cellId;
     action.position = position;
     action.actorPersistent = persistent;
+    action.actorAuthorityGuid = authorityGuid;
     mOutboundQueue.push(std::move(action));
 }
 
@@ -1195,6 +1199,15 @@ void LuaServerContext::queueGrantInventoryItem(uint32_t guid, const std::string&
     action.guid = guid;
     action.text = refId;
     action.itemCount = count;
+    mOutboundQueue.push(std::move(action));
+}
+
+void LuaServerContext::queueEnsureInventoryItem(uint32_t guid, const std::string& refId)
+{
+    OutboundLuaAction action;
+    action.type = OutboundLuaActionType::EnsureInventoryItem;
+    action.guid = guid;
+    action.text = refId;
     mOutboundQueue.push(std::move(action));
 }
 

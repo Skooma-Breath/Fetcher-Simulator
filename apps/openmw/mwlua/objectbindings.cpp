@@ -25,6 +25,11 @@
 #include "../mwbase/environment.hpp"
 #include "../mwbase/world.hpp"
 
+#ifdef BUILD_MULTIPLAYER
+#include "../mwmp/Main.hpp"
+#include "../mwmp/sync/ActorSync.hpp"
+#endif
+
 #include "luaevents.hpp"
 #include "luamanagerimp.hpp"
 #include "types/types.hpp"
@@ -300,6 +305,20 @@ namespace MWLua
                 int mpNum = 0;
                 if (baseNode != nullptr && baseNode->getUserValue("mp_actor_mpnum", mpNum) && mpNum > 0)
                     return static_cast<uint32_t>(mpNum);
+#ifdef BUILD_MULTIPLAYER
+                // A cross-cell move can replace a Ptr's scene node before the
+                // destination node has inherited its mpNum user value. The
+                // ActorSync pointer registry remains canonical across that
+                // handoff, so use it as the identity fallback. Without this,
+                // Lua cannot rediscover some server-spawned actors in
+                // world.activeActors and their follower controls never resume.
+                if (mwmp::Main::isInitialised())
+                {
+                    const uint32_t mappedMpNum = mwmp::Main::get().getActorSync().getActorMpNum(ptr);
+                    if (mappedMpNum != 0)
+                        return mappedMpNum;
+                }
+#endif
                 return sol::nullopt;
             });
             objectT["globalVariable"] = sol::readonly_property([](const ObjectT& o) -> sol::optional<std::string> {
