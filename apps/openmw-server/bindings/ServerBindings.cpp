@@ -31,6 +31,7 @@ namespace mwmp
 namespace
 {
     constexpr std::uintmax_t MaxBardcraftHostedMidiSize = 512 * 1024;
+    constexpr std::size_t MaxGeneratedBardsExportSize = 4 * 1024 * 1024;
 
     std::filesystem::path serverExecutableDir()
     {
@@ -110,6 +111,64 @@ namespace
             return std::nullopt;
 
         return bytes;
+    }
+
+    bool writeGeneratedBardsExport(const std::string& json)
+    {
+        if (json.empty() || json.size() > MaxGeneratedBardsExportSize)
+        {
+            Log(Debug::Warning) << "[ServerBindings] Refused generated_bards.json export with size=" << json.size();
+            return false;
+        }
+
+        const std::filesystem::path exeDir = serverExecutableDir();
+        const std::filesystem::path outputPath
+            = (exeDir.empty() ? std::filesystem::current_path() : exeDir) / "generated_bards.json";
+        const std::filesystem::path temporaryPath = outputPath.string() + ".tmp";
+
+        {
+            std::ofstream output(temporaryPath, std::ios::binary | std::ios::trunc);
+            if (!output)
+            {
+                Log(Debug::Warning) << "[ServerBindings] Failed to open generated bard export temporary file: "
+                                    << temporaryPath.string();
+                return false;
+            }
+            output.write(json.data(), static_cast<std::streamsize>(json.size()));
+            output.flush();
+            if (!output)
+            {
+                Log(Debug::Warning) << "[ServerBindings] Failed to write generated bard export temporary file: "
+                                    << temporaryPath.string();
+                return false;
+            }
+        }
+
+#ifdef _WIN32
+        if (!MoveFileExW(temporaryPath.c_str(), outputPath.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH))
+        {
+            Log(Debug::Warning) << "[ServerBindings] Failed to replace generated bard export: "
+                                << outputPath.string() << " error=" << GetLastError();
+            std::error_code removeError;
+            std::filesystem::remove(temporaryPath, removeError);
+            return false;
+        }
+#else
+        std::error_code renameError;
+        std::filesystem::rename(temporaryPath, outputPath, renameError);
+        if (renameError)
+        {
+            Log(Debug::Warning) << "[ServerBindings] Failed to replace generated bard export: "
+                                << outputPath.string() << ": " << renameError.message();
+            std::error_code removeError;
+            std::filesystem::remove(temporaryPath, removeError);
+            return false;
+        }
+#endif
+
+        Log(Debug::Info) << "[ServerBindings] Wrote generated bard export: " << outputPath.string()
+                         << " bytes=" << json.size();
+        return true;
     }
 
     sol::table makePositionTable(sol::state_view lua, const Position& position)
@@ -305,6 +364,9 @@ sol::table initMpPackage(LuaUtil::LuaView& view, LuaServerContext* context, LuaU
     {
         if (context) context->queueSendLuaEvent(guid, eventName, LuaUtil::serialize(data));
     });
+
+    // Writes one fixed, server-owned export path. Lua cannot select an arbitrary filesystem destination.
+    mp.set_function("writeGeneratedBardsExport", &writeGeneratedBardsExport);
 
     mp.set_function("listBardcraftHostedMidiFiles", [](sol::this_state ts) -> sol::object
     {

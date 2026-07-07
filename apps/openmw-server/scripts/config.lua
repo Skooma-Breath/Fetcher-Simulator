@@ -154,6 +154,9 @@ Config.Bardcraft = {
     allowServerHostedMidiDownloads = false,
     allowPlayerSongUpload = false,
     allowImportedMidiLiveRelayFallback = false,
+    -- Generated bard rollout: dynamic sends every registry record, hybrid sends
+    -- only unbaked records, and baked assumes every generated record is in the ESP.
+    dynamicBardRecordsMode = "dynamic",
     -- Test-only dynamic record, player grants, and NPC equipment.
     enableTestWaterWalking = false,
     -- Optional external Discord/Drive/community-pack URL shown for missing songs.

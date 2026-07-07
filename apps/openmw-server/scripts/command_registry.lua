@@ -87,8 +87,8 @@ local COMMANDS = {
     {
         id = "bc",
         category = "Bardcraft",
-        usage = "/bc invite|accept|decline|kick|disband|leave|status",
-        summary = "Invite, accept, and manage live Bardcraft band membership.",
+        usage = "/bc invite|accept|decline|kick|disband|leave|status|npc",
+        summary = "Manage Bardcraft bands and generated NPC bards.",
     },
     {
         id = "bcm",

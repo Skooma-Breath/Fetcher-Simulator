@@ -1,5 +1,6 @@
 local mp = require("mp")
 local networkPolicy = require("bardcraft_network_policy")
+local generatedBards = require("bardcraft_generated_bards")
 local config = require("config")
 
 local M = {}
@@ -335,6 +336,14 @@ local function findOnlinePlayer(selector)
         return nil, "ambiguous"
     end
     return nil, "not-found"
+end
+
+local function isBardcraftNpcRecord(recordId)
+    recordId = normalizeLookup(recordId)
+    if bardcraftNpcRecords[recordId] == true then
+        return true
+    end
+    return generatedBards.isEnabledRecord(recordId)
 end
 
 local function ensureTestWaterWalkingAmulet()
@@ -2420,7 +2429,7 @@ end
 
 local function sendBandUsage(player)
     player:sendMessage(
-        "Usage: /bc invite <player|pid> | /bc accept <leader|pid> | /bc decline <leader|pid> | /bc kick <player|pid> | /bc disband | /bc leave | /bc status | /bc npc [recordId|clear|mode fill|mode all] | /bc waterwalk [player|pid]")
+        "Usage: /bc invite <player|pid> | /bc accept <leader|pid> | /bc decline <leader|pid> | /bc kick <player|pid> | /bc disband | /bc leave | /bc status | /bc npc [spawn <recordId>|makebard <sourceRefId> [name]|listbards|markbaked <recordId>|markunbaked <recordId>|exportbards|clear|mode fill|mode all] | /bc waterwalk [player|pid]")
 end
 
 local function setNpcPerformanceMode(player, requestedMode)
@@ -2470,12 +2479,95 @@ local function setNpcPerformanceMode(player, requestedMode)
     return true
 end
 
+local function sendPendingNpcBandMemberProvision(requestId, pending, actorMpNum, reason)
+    if not requestId or type(pending) ~= "table" then
+        return 0
+    end
+
+    local sent = 0
+    local pendingCell = trim(pending.cell)
+    local ownerGuid = tonumber(pending.ownerGuid)
+    for _, target in ipairs(mp.getPlayers()) do
+        local targetGuid = tonumber(target.guid)
+        if targetGuid and (targetGuid == ownerGuid or playerHasActorCellLoaded(target, pendingCell)) then
+            mp.send(targetGuid, "BC_BardcraftProvisionNpcBandMember", {
+                requestId = requestId,
+                actorMpNum = actorMpNum,
+                recordId = pending.recordId,
+                cell = pendingCell,
+                position = pending.position,
+                ownerGuid = ownerGuid,
+                ownerName = pending.ownerName,
+                isOwner = targetGuid == ownerGuid,
+                enableTestWaterWalking = TEST_WATERWALK_ENABLED,
+                reason = reason or "provision",
+            })
+            sent = sent + 1
+        end
+    end
+    return sent
+end
+
+local function pendingSpawnPositionDistanceSq(left, right)
+    local dx = (tonumber(left and left.x) or 0) - (tonumber(right and right.x) or 0)
+    local dy = (tonumber(left and left.y) or 0) - (tonumber(right and right.y) or 0)
+    return dx * dx + dy * dy
+end
+
+local function handleNpcBandMemberActorSpawned(data)
+    local refId = normalizeLookup(data and data.refId)
+    local cellId = trim(data and data.cellId)
+    local actorMpNum = tonumber(data and data.mpNum)
+    if refId == "" or cellId == "" or not actorMpNum or actorMpNum <= 0 then
+        return
+    end
+
+    local bestRequestId = nil
+    local bestPending = nil
+    local bestDistanceSq = 512 * 512
+
+    for requestId, pending in pairs(pendingNpcBandMemberSpawns) do
+        if normalizeLookup(pending.recordId) == refId and trim(pending.cell) == cellId then
+            local distanceSq = pendingSpawnPositionDistanceSq(data.position, pending.position)
+            if distanceSq <= bestDistanceSq then
+                bestRequestId = requestId
+                bestPending = pending
+                bestDistanceSq = distanceSq
+            end
+        end
+    end
+
+    if not bestRequestId or not bestPending then
+        return
+    end
+
+    bestPending.actorMpNum = actorMpNum
+    bestPending.actorSpawnedAt = serverUptime()
+
+    local sent = sendPendingNpcBandMemberProvision(
+        bestRequestId,
+        bestPending,
+        actorMpNum,
+        "actor-spawned-confirmed"
+    )
+
+    mp.log(string.format(
+        "[bardcraft] npc band member spawn confirmed request=%s record=%s actorMpNum=%s cell=%s sent=%d distanceSq=%.1f",
+        tostring(bestRequestId),
+        tostring(bestPending.recordId),
+        tostring(actorMpNum),
+        cellId,
+        sent,
+        bestDistanceSq
+    ))
+end
+
 local function spawnNpcBandMember(player, requestedRecordId)
     local recordId = normalizeLookup(requestedRecordId)
     if recordId == "" then
-        recordId = "r_bc_n_camilla"
+        recordId = "r_bc_dyn_bard_fargoth"
     end
-    if not bardcraftNpcRecords[recordId] then
+    if not isBardcraftNpcRecord(recordId) then
         player:sendMessage("[Bardcraft] Unknown bard NPC record: " .. tostring(recordId))
         return false
     end
@@ -2527,22 +2619,12 @@ local function spawnNpcBandMember(player, requestedRecordId)
         createdAt = serverUptime(),
     }
 
-    local provisionRecipients = 0
-    for _, target in ipairs(mp.getPlayers()) do
-        if playerHasActorCellLoaded(target, cell) then
-            mp.send(tonumber(target.guid), "BC_BardcraftProvisionNpcBandMember", {
-                requestId = requestId,
-                recordId = recordId,
-                cell = cell,
-                position = spawnPosition,
-                ownerGuid = tonumber(player.guid),
-                ownerName = playerDisplayName(player),
-                isOwner = tonumber(target.guid) == tonumber(player.guid),
-                enableTestWaterWalking = TEST_WATERWALK_ENABLED,
-            })
-            provisionRecipients = provisionRecipients + 1
-        end
-    end
+    local provisionRecipients = sendPendingNpcBandMemberProvision(
+        requestId,
+        pendingNpcBandMemberSpawns[requestId],
+        nil,
+        "spawn-queued"
+    )
     player:sendMessage("[Bardcraft] Spawning and recruiting " .. recordId .. ".")
     mp.log(string.format(
         "[bardcraft] npc band member spawn queued guid=%s name=%s request=%s record=%s cell=%s slot=%d ring=%d recipients=%d",
@@ -2928,6 +3010,80 @@ sendBandStateForBand = function(leaderGuid, reason)
     end
 end
 
+local function handleGeneratedBardCommand(player, args)
+    local action = string.lower(args[2] or "")
+    if action == "makebard" or action == "listbards" or action == "markbaked"
+        or action == "markunbaked" or action == "exportbards"
+    then
+        if type(generatedBards.isRuntimeAdmin) ~= "function" then
+            player:sendMessage("[Bardcraft] Generated-bard server scripts are out of sync; update bardcraft_generated_bards.lua and core.lua, then restart the server.")
+            mp.log("[bardcraft] generated bard command rejected: server scripts are out of sync (missing isRuntimeAdmin)")
+            return true
+        end
+        if not generatedBards.isRuntimeAdmin(player.guid) then
+            player:sendMessage("[Bardcraft] Permission denied. Use /login first.")
+            return true
+        end
+    end
+    if action == "makebard" then
+        local entry, err, reused = generatedBards.make(args[3], joinCommandArgs(args, 4))
+        if not entry then
+            player:sendMessage("[Bardcraft] " .. tostring(err))
+            return true
+        end
+        player:sendMessage(string.format(
+            "[Bardcraft] %s generated bard %s from %s (mode=%s).",
+            reused and "Reused" or "Created",
+            entry.recordId,
+            entry.sourceRefId,
+            generatedBards.mode()))
+        mp.log(string.format(
+            "[bardcraft] generated bard make guid=%s record=%s source=%s reused=%s mode=%s",
+            tostring(player.guid), entry.recordId, entry.sourceRefId, tostring(reused), generatedBards.mode()))
+        return true
+    elseif action == "listbards" then
+        local records = generatedBards.list()
+        player:sendMessage(string.format(
+            "[Bardcraft] Generated bards: %d (mode=%s).", #records, generatedBards.mode()))
+        for _, entry in ipairs(records) do
+            player:sendMessage(string.format(
+                "  %s <- %s | baked=%s enabled=%s | %s",
+                entry.recordId,
+                entry.sourceRefId,
+                tostring(entry.baked == true),
+                tostring(entry.enabled ~= false),
+                entry.name))
+        end
+        return true
+    elseif action == "markbaked" or action == "markunbaked" then
+        local baked = action == "markbaked"
+        local entry, err = generatedBards.setBaked(args[3], baked)
+        if not entry then
+            player:sendMessage("[Bardcraft] " .. tostring(err))
+            return true
+        end
+        player:sendMessage(string.format(
+            "[Bardcraft] %s is now %s (mode=%s).",
+            entry.recordId,
+            baked and "baked" or "unbaked",
+            generatedBards.mode()))
+        mp.log(string.format(
+            "[bardcraft] generated bard baked flag guid=%s record=%s baked=%s mode=%s",
+            tostring(player.guid), entry.recordId, tostring(baked), generatedBards.mode()))
+        return true
+    elseif action == "exportbards" then
+        local ok, result = generatedBards.export()
+        player:sendMessage(ok
+            and string.format("[Bardcraft] Exported %d generated bards to %s.", #generatedBards.list(), result)
+            or "[Bardcraft] " .. tostring(result))
+        return true
+    elseif action == "spawn" then
+        spawnNpcBandMember(player, args[3])
+        return true
+    end
+    return false
+end
+
 local function handleBandCommand(player, args)
     local subcommand = string.lower(args[1] or "status")
 
@@ -2982,7 +3138,9 @@ local function handleBandCommand(player, args)
         end
     elseif subcommand == "npc" or subcommand == "spawnnpc" then
         local npcArg = string.lower(args[2] or "")
-        if npcArg == "status" then
+        if handleGeneratedBardCommand(player, args) then
+            return
+        elseif npcArg == "status" then
             local guid = tonumber(player.guid)
             local leaderGuid = guid and bandLeaderByMemberGuid[guid] or nil
             local policyGuid = leaderGuid or guid
@@ -4349,6 +4507,7 @@ end
 M.eventHandlers = {
     OnServerInit = function(_)
         networkPolicy.reset()
+        generatedBards.initialize()
         if TEST_WATERWALK_ENABLED then
             ensureTestWaterWalkingAmulet()
         end
@@ -4370,6 +4529,10 @@ M.eventHandlers = {
             tostring(bardcraftNetworkPolicy.allowPlayerSongUpload),
             tostring(bardcraftNetworkPolicy.allowImportedMidiLiveRelayFallback),
             bardcraftNetworkPolicy.communitySongPackUrl ~= "" and bardcraftNetworkPolicy.communitySongPackUrl or "-"))
+    end,
+
+    OnActorSpawned = function(data)
+        handleNpcBandMemberActorSpawned(data)
     end,
 
     OnPlayerDisconnect = function(data)

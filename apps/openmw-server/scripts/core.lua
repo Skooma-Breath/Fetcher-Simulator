@@ -48,6 +48,8 @@ local SUICIDE_PREFIX = COMMAND_PREFIX .. "suicide "
 -- State
 ------------------------------------------------------------------------
 local admins = {}
+local adminRuntimeStorage = mp.storage.globalSection("CoreRuntimeAdmins")
+adminRuntimeStorage:setLifeTime(mp.storage.LIFE_TIME.GameSession)
 local tickAccum = 0
 local luaTestSeq = 0
 local doorStateCache = {}
@@ -73,6 +75,11 @@ end
 
 local function isAdmin(player)
     return admins[player.guid] == true
+end
+
+local function setRuntimeAdmin(guid, enabled)
+    admins[guid] = enabled == true and true or nil
+    adminRuntimeStorage:set(tostring(guid), enabled == true and true or nil)
 end
 
 local function requireAdmin(player)
@@ -810,7 +817,7 @@ local function handleChat(player, data)
     if msg:sub(1, #LOGIN_PREFIX) == LOGIN_PREFIX then
         local pw = msg:sub(#LOGIN_PREFIX + 1)
         if pw == ADMIN_PASSWORD then
-            admins[player.guid] = true
+            setRuntimeAdmin(player.guid, true)
             player:sendMessage("You are now an admin.")
             mp.log("[core] Admin login: " .. player.name)
         else
@@ -1653,6 +1660,7 @@ return {
     eventHandlers = {
         OnServerInit = function(_)
             admins = {}
+            adminRuntimeStorage:reset()
             markRecallCommands.onServerInit()
             recordStore.onServerInit()
             recordDynamicTest.onServerInit()
@@ -1675,7 +1683,7 @@ return {
         end,
 
         OnPlayerDisconnect = function(data)
-            admins[data.guid] = nil
+            setRuntimeAdmin(data.guid, false)
             markRecallCommands.onPlayerDisconnect(data)
             surfCommands.onPlayerDisconnect(data)
             surfTimer.onPlayerDisconnect(data)
