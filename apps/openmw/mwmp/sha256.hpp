@@ -4,16 +4,17 @@
 /// mwmp/sha256.hpp — self-contained SHA-256 (RFC 6234) + hex encoding.
 ///
 /// Header-only, no external dependencies.
-/// Include from any translation unit that needs to hash a multiplayer password.
-/// Single definition is prevented by the anonymous namespace.
+/// Include from any translation unit that needs to hash multiplayer data.
+/// Inline definitions make the header safe to include in multiple translation units.
 ///
 
 #include <array>
 #include <algorithm>
 #include <cstdint>
 #include <iomanip>
+#include <istream>
 #include <sstream>
-#include <vector>
+#include <string>
 
 namespace mwmp::crypto
 {
@@ -47,56 +48,104 @@ namespace detail
     inline uint32_t G0 (uint32_t x) { return rotr(x,  7) ^ rotr(x, 18) ^ (x >>  3); }
     inline uint32_t G1 (uint32_t x) { return rotr(x, 17) ^ rotr(x, 19) ^ (x >> 10); }
 
-    inline std::array<uint32_t, 8> sha256raw(const uint8_t* data, size_t len)
+    inline void transform(std::array<uint32_t, 8>& h, const uint8_t* block)
     {
-        std::array<uint32_t, 8> h = {
-            0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a,
-            0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19,
-        };
-
-        const size_t bitLen = len * 8;
-        const size_t padLen = ((len + 8) / 64 + 1) * 64;
-        std::vector<uint8_t> msg(padLen, 0);
-        std::copy(data, data + len, msg.begin());
-        msg[len] = 0x80;
-        for (int i = 7; i >= 0; --i)
-            msg[padLen - 8 + (7 - i)] = static_cast<uint8_t>((bitLen >> (i * 8)) & 0xFF);
-
-        for (size_t blk = 0; blk < padLen / 64; ++blk)
+        std::array<uint32_t, 64> w{};
+        for (int i = 0; i < 16; ++i)
         {
-            std::array<uint32_t, 64> w{};
-            const uint8_t* b = msg.data() + blk * 64;
-            for (int i = 0; i < 16; ++i)
-                w[i] = (uint32_t(b[i*4])<<24) | (uint32_t(b[i*4+1])<<16)
-                      |(uint32_t(b[i*4+2])<<8) |  uint32_t(b[i*4+3]);
-            for (int i = 16; i < 64; ++i)
-                w[i] = G1(w[i-2]) + w[i-7] + G0(w[i-15]) + w[i-16];
-
-            auto [a,b2,c,d,e,f,g,hh] = h;
-            for (int i = 0; i < 64; ++i)
-            {
-                uint32_t t1 = hh + S1(e) + ch(e,f,g) + kSHA256[i] + w[i];
-                uint32_t t2 = S0(a) + maj(a,b2,c);
-                hh = g; g = f; f = e; e = d + t1;
-                d  = c; c = b2; b2 = a; a = t1 + t2;
-            }
-            h[0]+=a; h[1]+=b2; h[2]+=c; h[3]+=d;
-            h[4]+=e; h[5]+=f;  h[6]+=g; h[7]+=hh;
+            w[i] = (uint32_t(block[i * 4]) << 24) | (uint32_t(block[i * 4 + 1]) << 16)
+                | (uint32_t(block[i * 4 + 2]) << 8) | uint32_t(block[i * 4 + 3]);
         }
-        return h;
+        for (int i = 16; i < 64; ++i)
+            w[i] = G1(w[i - 2]) + w[i - 7] + G0(w[i - 15]) + w[i - 16];
+
+        auto [a, b, c, d, e, f, g, hh] = h;
+        for (int i = 0; i < 64; ++i)
+        {
+            const uint32_t t1 = hh + S1(e) + ch(e, f, g) + kSHA256[i] + w[i];
+            const uint32_t t2 = S0(a) + maj(a, b, c);
+            hh = g; g = f; f = e; e = d + t1;
+            d = c; c = b; b = a; a = t1 + t2;
+        }
+        h[0] += a; h[1] += b; h[2] += c; h[3] += d;
+        h[4] += e; h[5] += f; h[6] += g; h[7] += hh;
     }
 } // namespace detail
+
+class Sha256
+{
+public:
+    void update(const uint8_t* data, std::size_t size)
+    {
+        mTotalBytes += size;
+        while (size > 0)
+        {
+            const std::size_t count = std::min(size, mBlock.size() - mBlockSize);
+            std::copy_n(data, count, mBlock.data() + mBlockSize);
+            mBlockSize += count;
+            data += count;
+            size -= count;
+            if (mBlockSize == mBlock.size())
+            {
+                detail::transform(mHash, mBlock.data());
+                mBlockSize = 0;
+            }
+        }
+    }
+
+    std::string finish()
+    {
+        const uint64_t bitLength = mTotalBytes * 8;
+        mBlock[mBlockSize++] = 0x80;
+        if (mBlockSize > 56)
+        {
+            std::fill(mBlock.begin() + mBlockSize, mBlock.end(), 0);
+            detail::transform(mHash, mBlock.data());
+            mBlockSize = 0;
+        }
+        std::fill(mBlock.begin() + mBlockSize, mBlock.begin() + 56, 0);
+        for (int i = 0; i < 8; ++i)
+            mBlock[56 + i] = static_cast<uint8_t>(bitLength >> ((7 - i) * 8));
+        detail::transform(mHash, mBlock.data());
+
+        std::ostringstream out;
+        out << std::hex << std::setfill('0');
+        for (uint32_t word : mHash)
+            out << std::setw(8) << word;
+        return out.str();
+    }
+
+private:
+    std::array<uint32_t, 8> mHash = {
+        0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a,
+        0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19,
+    };
+    std::array<uint8_t, 64> mBlock{};
+    std::size_t mBlockSize = 0;
+    uint64_t mTotalBytes = 0;
+};
 
 /// Compute SHA-256(input) and return the lowercase 64-character hex digest.
 inline std::string sha256hex(const std::string& input)
 {
-    const auto digest = detail::sha256raw(
-        reinterpret_cast<const uint8_t*>(input.data()), input.size());
-    std::ostringstream ss;
-    ss << std::hex << std::setfill('0');
-    for (uint32_t word : digest)
-        ss << std::setw(8) << word;
-    return ss.str();
+    Sha256 hash;
+    hash.update(reinterpret_cast<const uint8_t*>(input.data()), input.size());
+    return hash.finish();
+}
+
+/// Compute SHA-256 from a binary stream without loading the whole file into memory.
+inline std::string sha256hex(std::istream& input)
+{
+    Sha256 hash;
+    std::array<char, 64 * 1024> buffer{};
+    while (input)
+    {
+        input.read(buffer.data(), static_cast<std::streamsize>(buffer.size()));
+        const std::streamsize count = input.gcount();
+        if (count > 0)
+            hash.update(reinterpret_cast<const uint8_t*>(buffer.data()), static_cast<std::size_t>(count));
+    }
+    return hash.finish();
 }
 
 } // namespace mwmp::crypto

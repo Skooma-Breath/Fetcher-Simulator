@@ -9,6 +9,7 @@
 #include <components/openmw-mp/Packets/System/PacketHandshake.hpp>
 
 namespace MWWorld { class Ptr; }
+namespace Files { class Collections; }
 
 namespace mwmp
 {
@@ -78,6 +79,7 @@ namespace mwmp
         bool               isKeypairLinked()        const { return mIsLinked; }
         const std::string& getLocalPublicKey()       const { return mLocalPublicKey; }
         static void        setStaticKeysDir(const std::filesystem::path& dir);
+        static void        setFileCollections(const Files::Collections* collections);
         const std::string& getCharSelectError()      const { return mCharSelectError; }
         void               clearCharSelectError()          { mCharSelectError.clear(); }
         bool               isDeleteCharResponseReady() const { return mDeleteCharResponseReady; }

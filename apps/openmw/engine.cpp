@@ -623,6 +623,9 @@ void OMW::Engine::setDataDirs(const Files::PathContainer& dataDirs)
     mDataDirs = dataDirs;
     mDataDirs.insert(mDataDirs.begin(), mResDir / "vfs");
     mFileCollections = Files::Collections(mDataDirs);
+#ifdef BUILD_MULTIPLAYER
+    mwmp::Main::setFileCollections(&mFileCollections);
+#endif
 }
 
 // Add BSA archive

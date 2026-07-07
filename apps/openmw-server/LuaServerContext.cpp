@@ -710,6 +710,50 @@ std::vector<PlayerMark> LuaServerContext::getConfigPlayerMarks(const std::string
     return marks;
 }
 
+std::vector<ContentFileRule> LuaServerContext::getConfigContentFileRules(const std::string& key) const
+{
+    std::vector<ContentFileRule> rules;
+    if (!mLoaded)
+        return rules;
+
+    const std::optional<sol::table> config = loadConfigTable(*mLua);
+    if (!config)
+        return rules;
+
+    sol::object entriesObject = (*config)[key];
+    if (!entriesObject.is<sol::table>())
+        return rules;
+
+    sol::table entries = entriesObject.as<sol::table>();
+    for (std::size_t index = 1; index <= entries.size(); ++index)
+    {
+        sol::object value = entries[index];
+        if (!value.is<sol::table>())
+        {
+            Log(Debug::Warning) << "[LuaServerContext] Ignored invalid Config." << key
+                                << " entry at index " << index;
+            continue;
+        }
+
+        const sol::table entry = value.as<sol::table>();
+        ContentFileRule rule;
+        rule.filename = entry.get_or("filename", std::string{});
+        rule.sha256 = entry.get_or("sha256", std::string{});
+        if (rule.filename.empty())
+        {
+            Log(Debug::Warning) << "[LuaServerContext] Ignored Config." << key
+                                << " entry without filename at index " << index;
+            continue;
+        }
+        if (rule.sha256.empty())
+            Log(Debug::Warning) << "[LuaServerContext] Config." << key
+                                << " entry has no sha256 at index " << index;
+        rules.push_back(std::move(rule));
+    }
+
+    return rules;
+}
+
 std::optional<LuaPlayerSnapshot> LuaServerContext::getPlayer(uint32_t guid) const
 {
     std::lock_guard<std::mutex> lock(mSnapshotMutex);

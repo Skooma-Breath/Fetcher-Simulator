@@ -41,6 +41,22 @@ Config.ADMIN_HTTP_PORT = 8081
 Config.ADMIN_HTTP_TIMEOUT_MS = 250
 
 ------------------------------------------------------------------------
+-- Client content-file validation
+------------------------------------------------------------------------
+
+-- Required-file subset mode is the recommended initial deployment: only the
+-- files listed below must match, while harmless client-only extras are allowed.
+Config.MOD_CHECKS_ENABLED = true
+Config.MOD_CHECKS_STRICT_ORDER = false
+Config.MOD_CHECKS_REQUIRE_EXACT_LIST = false
+Config.MOD_CHECKS_HELP_URL = ""
+
+-- Generate this list from the published client Data Files with
+-- scripts/generate_mod_manifest.py. To keep it in a separate generated file:
+-- Config.REQUIRED_CONTENT_FILES = require("mod_manifest")
+Config.REQUIRED_CONTENT_FILES = require("mod_manifest")
+
+------------------------------------------------------------------------
 -- Characters
 ------------------------------------------------------------------------
 

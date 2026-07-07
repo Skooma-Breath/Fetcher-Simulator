@@ -565,6 +565,11 @@ private:
     int                           mActorAuthorityExteriorRadius = 1;
     int                           mActorAuthorityStickyMs = 3000;
     bool                          mActorAuthorityPreferExactCell = true;
+    bool                          mModChecksEnabled = false;
+    bool                          mModChecksStrictOrder = false;
+    bool                          mModChecksRequireExactList = false;
+    std::string                   mModChecksHelpUrl;
+    std::vector<ContentFileRule>  mRequiredContentFiles;
 
     // ── Config ────────────────────────────────────────────────────────────
     static constexpr float       MAX_MOVE_SPEED = 600.f;

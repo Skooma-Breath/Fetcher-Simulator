@@ -28,7 +28,7 @@ namespace mwmp
         struct PluginEntry
         {
             std::string filename;
-            uint32_t    crc32 = 0;
+            std::string sha256;
         };
         std::vector<PluginEntry> plugins;
 
@@ -50,7 +50,7 @@ namespace mwmp
             for (const auto& p : plugins)
             {
                 ws.writeString(p.filename);
-                ws.write(p.crc32);
+                ws.writeString(p.sha256);
             }
         }
 
@@ -65,11 +65,13 @@ namespace mwmp
 
             uint32_t count = 0;
             rs.read(count);
+            if (count > 4096 || count > rs.remaining() / (sizeof(uint16_t) * 2))
+                throw std::runtime_error("PacketHandshake: invalid plugin count");
             plugins.resize(count);
             for (auto& p : plugins)
             {
                 p.filename = rs.readString();
-                rs.read(p.crc32);
+                p.sha256 = rs.readString();
             }
         }
     };
@@ -93,7 +95,9 @@ namespace mwmp
         struct PluginMismatch
         {
             std::string filename;
-            uint32_t    serverCrc = 0;
+            std::string expectedSha256;
+            std::string actualSha256;
+            std::string reason;
         };
         std::vector<PluginMismatch> pluginMismatches;
 
@@ -113,7 +117,9 @@ namespace mwmp
             for (const auto& m : pluginMismatches)
             {
                 ws.writeString(m.filename);
-                ws.write(m.serverCrc);
+                ws.writeString(m.expectedSha256);
+                ws.writeString(m.actualSha256);
+                ws.writeString(m.reason);
             }
         }
 
@@ -130,8 +136,10 @@ namespace mwmp
             pluginMismatches.resize(count);
             for (auto& m : pluginMismatches)
             {
-                m.filename  = rs.readString();
-                rs.read(m.serverCrc);
+                m.filename       = rs.readString();
+                m.expectedSha256 = rs.readString();
+                m.actualSha256   = rs.readString();
+                m.reason         = rs.readString();
             }
         }
     };

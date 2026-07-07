@@ -84,6 +84,119 @@
 // Format: specialization, attr[0], attr[1], skills[0..4][0..1], isPlayable, services
 namespace
 {
+    std::string lowerAscii(std::string_view value)
+    {
+        std::string out(value);
+        std::transform(out.begin(), out.end(), out.begin(),
+            [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+        return out;
+    }
+
+    bool isSha256(std::string_view value)
+    {
+        return value.size() == 64 && std::all_of(value.begin(), value.end(), [](unsigned char c) {
+            return std::isxdigit(c) != 0;
+        });
+    }
+
+    std::vector<mwmp::PacketHandshakeResponse::PluginMismatch> validateContentFiles(
+        const std::vector<mwmp::PacketHandshake::PluginEntry>& clientFiles,
+        const std::vector<mwmp::ContentFileRule>& requiredFiles,
+        bool strictOrder,
+        bool requireExactList)
+    {
+        using Mismatch = mwmp::PacketHandshakeResponse::PluginMismatch;
+        std::vector<Mismatch> mismatches;
+        std::unordered_set<std::string> seenClientNames;
+        for (const auto& clientFile : clientFiles)
+        {
+            const std::string normalizedName = lowerAscii(clientFile.filename);
+            if (normalizedName.empty() || !seenClientNames.insert(normalizedName).second)
+            {
+                mismatches.push_back({ clientFile.filename, {}, clientFile.sha256,
+                    normalizedName.empty() ? "empty filename" : "duplicate filename" });
+            }
+        }
+
+        std::size_t previousIndex = 0;
+        bool havePreviousIndex = false;
+        std::unordered_set<std::string> requiredNames;
+        for (const auto& required : requiredFiles)
+        {
+            const std::string normalizedName = lowerAscii(required.filename);
+            if (normalizedName.empty() || !requiredNames.insert(normalizedName).second)
+            {
+                mismatches.push_back({ required.filename, required.sha256, {},
+                    normalizedName.empty() ? "server manifest has an empty filename"
+                                           : "server manifest has a duplicate filename" });
+                continue;
+            }
+            if (!isSha256(required.sha256))
+            {
+                mismatches.push_back(
+                    { required.filename, required.sha256, {}, "server manifest has an invalid SHA-256" });
+                continue;
+            }
+
+            const auto clientIt = std::find_if(clientFiles.begin(), clientFiles.end(), [&](const auto& client) {
+                return lowerAscii(client.filename) == normalizedName;
+            });
+            if (clientIt == clientFiles.end())
+            {
+                mismatches.push_back({ required.filename, lowerAscii(required.sha256), {}, "required file is missing" });
+                continue;
+            }
+
+            const std::size_t clientIndex = static_cast<std::size_t>(std::distance(clientFiles.begin(), clientIt));
+            if (strictOrder && havePreviousIndex && clientIndex <= previousIndex)
+            {
+                mismatches.push_back(
+                    { required.filename, lowerAscii(required.sha256), clientIt->sha256, "required file is out of order" });
+            }
+            previousIndex = clientIndex;
+            havePreviousIndex = true;
+
+            if (!isSha256(clientIt->sha256))
+            {
+                mismatches.push_back({ required.filename, lowerAscii(required.sha256), clientIt->sha256,
+                    "client could not provide a valid SHA-256" });
+            }
+            else if (lowerAscii(clientIt->sha256) != lowerAscii(required.sha256))
+            {
+                mismatches.push_back({ required.filename, lowerAscii(required.sha256), lowerAscii(clientIt->sha256),
+                    "SHA-256 mismatch" });
+            }
+        }
+
+        if (requireExactList)
+        {
+            for (const auto& clientFile : clientFiles)
+            {
+                if (!requiredNames.contains(lowerAscii(clientFile.filename)))
+                    mismatches.push_back({ clientFile.filename, {}, clientFile.sha256, "unexpected file" });
+            }
+        }
+
+        return mismatches;
+    }
+
+    std::string contentFileRejectReason(
+        const std::vector<mwmp::PacketHandshakeResponse::PluginMismatch>& mismatches,
+        const std::string& helpUrl)
+    {
+        std::ostringstream out;
+        out << "Content-file validation failed";
+        if (!mismatches.empty())
+        {
+            out << ": " << (mismatches.front().filename.empty() ? "content list" : mismatches.front().filename)
+                << " (" << mismatches.front().reason << ")";
+        }
+        out << ". Update your required mods and load order.";
+        if (!helpUrl.empty())
+            out << " Help: " << helpUrl;
+        return out.str();
+    }
+
     std::string jsonEscape(std::string_view text)
     {
         std::string out;
@@ -1477,6 +1590,19 @@ void MPServer::run()
     mMaxCharsPerAccount = mLua.getInt("Config", "MAX_CHARS_PER_ACCOUNT", mMaxCharsPerAccount);
     Log(Debug::Info) << "[Server] Max chars per account: "
                      << (mMaxCharsPerAccount == 0 ? "unlimited" : std::to_string(mMaxCharsPerAccount));
+
+    mModChecksEnabled = mLua.getBool("Config", "MOD_CHECKS_ENABLED", false);
+    mModChecksStrictOrder = mLua.getBool("Config", "MOD_CHECKS_STRICT_ORDER", false);
+    mModChecksRequireExactList = mLua.getBool("Config", "MOD_CHECKS_REQUIRE_EXACT_LIST", false);
+    mModChecksHelpUrl = mLua.getString("Config", "MOD_CHECKS_HELP_URL", "");
+    mRequiredContentFiles = mLua.getConfigContentFileRules("REQUIRED_CONTENT_FILES");
+    Log(Debug::Info) << "[Server] Content-file checks: "
+                     << (mModChecksEnabled ? "enabled" : "disabled")
+                     << " required=" << mRequiredContentFiles.size()
+                     << " strictOrder=" << (mModChecksStrictOrder ? "true" : "false")
+                     << " exactList=" << (mModChecksRequireExactList ? "true" : "false");
+    if (mModChecksEnabled && mRequiredContentFiles.empty())
+        Log(Debug::Warning) << "[Server] Content-file checks are enabled but REQUIRED_CONTENT_FILES is empty";
 
     mAdminHttpEnabled = mLua.getBool("Config", "ADMIN_HTTP_ENABLED", true);
     mAdminHttpHost = mLua.getString("Config", "ADMIN_HTTP_HOST", "127.0.0.1");
@@ -4108,6 +4234,27 @@ void MPServer::handleHandshake(ConnectedClient& c, const uint8_t* data, size_t s
         return;
     }
     c.actorSyncProtocolVersion = ActorSyncProtocolVersionV2;
+
+    // Validate content before any password/key lookup so incompatible clients
+    // cannot create accounts or spend authentication work.
+    if (mModChecksEnabled)
+    {
+        auto mismatches = validateContentFiles(
+            hs.plugins, mRequiredContentFiles, mModChecksStrictOrder, mModChecksRequireExactList);
+        if (!mismatches.empty())
+        {
+            PacketHandshakeResponse rsp;
+            rsp.accepted = false;
+            rsp.serverVersion = SERVER_VERSION;
+            rsp.actorSyncProtocolVersion = ActorSyncProtocolVersionV2;
+            rsp.pluginMismatches = std::move(mismatches);
+            rsp.rejectReason = contentFileRejectReason(rsp.pluginMismatches, mModChecksHelpUrl);
+            Log(Debug::Warning) << "[Handshake] Rejecting " << hs.playerName << ": " << rsp.rejectReason;
+            sendTo(c.conn, rsp.encode());
+            mInterface->CloseConnection(c.conn, 0, "Content-file mismatch", true);
+            return;
+        }
+    }
 
     // â”€â”€ Ed25519 keypair path â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     // If the client presents a public key and it maps to a known account,

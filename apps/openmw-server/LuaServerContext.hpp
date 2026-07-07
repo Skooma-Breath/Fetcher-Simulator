@@ -61,6 +61,12 @@ struct LuaActorSnapshot
     bool persistent = false;
 };
 
+struct ContentFileRule
+{
+    std::string filename;
+    std::string sha256;
+};
+
 class LuaServerContext
 {
 public:
@@ -105,6 +111,7 @@ public:
     bool getBool(const std::string& tableName, const std::string& key, bool defaultVal = false) const;
     std::optional<PlayerMark> getConfigPlayerMark(const std::string& key) const;
     std::vector<PlayerMark> getConfigPlayerMarks(const std::string& key) const;
+    std::vector<ContentFileRule> getConfigContentFileRules(const std::string& key) const;
     std::optional<LuaPlayerSnapshot> getPlayer(uint32_t guid) const;
     std::vector<LuaPlayerSnapshot> getPlayers() const;
     int getPlayerCount() const;

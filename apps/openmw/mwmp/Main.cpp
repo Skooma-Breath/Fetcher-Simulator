@@ -6,11 +6,13 @@
 #include <cctype>
 #include <cstdio>
 #include <cstring>
+#include <fstream>
 
 #include <stdexcept>
 #include <string_view>
 
 #include <components/debug/debuglog.hpp>
+#include <components/files/collections.hpp>
 #include <components/openmw-mp/Packets/Player/PacketPlayerPosition.hpp>
 #include <components/openmw-mp/Packets/Player/PacketPlayerCellChange.hpp>
 #include <components/openmw-mp/Packets/Player/PacketPlayerStatsDynamic.hpp>
@@ -90,6 +92,8 @@ namespace mwmp
 {
 namespace
 {
+    const Files::Collections* sFileCollections = nullptr;
+
     bool startsWithNoCase(std::string_view value, std::string_view prefix)
     {
         if (value.size() < prefix.size())
@@ -442,6 +446,33 @@ void Main::onConnected()
     hs.passwordHash    = mPasswordHash;
     hs.isRegistration  = mIsRegistration;
     hs.actorSyncProtocolVersion = ActorSyncProtocolVersionV2;
+
+    const auto& contentFiles = MWBase::Environment::get().getWorld()->getContentFiles();
+    hs.plugins.reserve(contentFiles.size());
+    for (const std::string& filename : contentFiles)
+    {
+        PacketHandshake::PluginEntry plugin;
+        plugin.filename = filename;
+        try
+        {
+            if (!sFileCollections)
+                throw std::runtime_error("active file collections are unavailable");
+
+            const std::filesystem::path path = sFileCollections->getPath(filename);
+            std::ifstream stream(path, std::ios::binary);
+            if (!stream)
+                throw std::runtime_error("could not open resolved content file");
+            plugin.sha256 = crypto::sha256hex(stream);
+            if (!stream.eof())
+                throw std::runtime_error("error while reading content file");
+        }
+        catch (const std::exception& e)
+        {
+            Log(Debug::Error) << "[MP] Failed to hash content file '" << filename << "': " << e.what();
+        }
+        hs.plugins.push_back(std::move(plugin));
+    }
+    Log(Debug::Info) << "[MP] Handshake includes " << hs.plugins.size() << " content-file SHA-256 checksums";
     
     if (mUseKeypair)
     {
@@ -496,6 +527,13 @@ void Main::onDisconnected()
 void Main::setStaticKeysDir(const std::filesystem::path& dir)
 {
     Identity::setKeysDir(dir);
+}
+
+// ---------------------------------------------------------------------------
+/*static*/
+void Main::setFileCollections(const Files::Collections* collections)
+{
+    sFileCollections = collections;
 }
 
 // ---------------------------------------------------------------------------
