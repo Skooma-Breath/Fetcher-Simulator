@@ -1391,7 +1391,7 @@ bool MPServer::killPlayer(uint32_t guid, const std::string& deathMessage)
     broadcastToAll(encoded, client->conn);
 
     Log(Debug::Info) << "[Server] Killed player by script: " << client->name;
-    if (!deathMessage.empty() && mLua.getBool("Config", "ANNOUNCE_PLAYER_DEATHS", true))
+    if (!deathMessage.empty() && mAnnouncePlayerDeaths)
         broadcastNameColorMessage(client->name + " " + deathMessage);
     else
         announcePlayerDeath(*client, pkt);
@@ -1588,6 +1588,7 @@ void MPServer::run()
 
     // Read Config.MAX_CHARS_PER_ACCOUNT from config.lua (0 = unlimited).
     mMaxCharsPerAccount = mLua.getInt("Config", "MAX_CHARS_PER_ACCOUNT", mMaxCharsPerAccount);
+    mAnnouncePlayerDeaths = mLua.getBool("Config", "ANNOUNCE_PLAYER_DEATHS", true);
     Log(Debug::Info) << "[Server] Max chars per account: "
                      << (mMaxCharsPerAccount == 0 ? "unlimited" : std::to_string(mMaxCharsPerAccount));
 
@@ -3743,23 +3744,18 @@ void MPServer::sendDynamicRecordsToClient(HSteamNetConnection conn)
         return left->sequence < right->sequence;
     });
 
-    PacketRecordDynamic pkt;
-    pkt.action = DynamicRecordAction::Upsert;
-
+    // Keep records isolated on initial bootstrap. Client-side conversion can
+    // legitimately defer one record while its base dependency is unavailable;
+    // batching same-type records would make that one bad entry block every
+    // otherwise valid record in the packet.
     for (const auto* record : ordered)
     {
-        if (!pkt.entries.empty() && pkt.recordType != record->recordType)
-        {
-            sendTo(conn, pkt.encode());
-            pkt.entries.clear();
-        }
-
+        PacketRecordDynamic pkt;
+        pkt.action = DynamicRecordAction::Upsert;
         pkt.recordType = record->recordType;
         pkt.entries.push_back({ record->recordId, record->data });
-    }
-
-    if (!pkt.entries.empty())
         sendTo(conn, pkt.encode());
+    }
 }
 
 std::unordered_map<std::string, uint64_t> MPServer::buildGeneratedDynamicRecordCounters(const std::string& prefix) const
@@ -4486,6 +4482,7 @@ void MPServer::handleCharacterSelect(ConnectedClient& c, const uint8_t* data, si
     c.hasRestoredStatsSnapshot = false;
     c.acceptedPlayerStatsThisSession = false;
     c.playerStatsRestoreGuardUntilMs = 0;
+    c.playerDeathRestoreGuardUntilMs = 0;
     c.restoredInventorySnapshot.clear();
     c.restoredEquipmentSnapshot = {};
     c.hasRestoredInventorySnapshot = false;
@@ -4661,6 +4658,7 @@ void MPServer::handleCharacterSelect(ConnectedClient& c, const uint8_t* data, si
                     c.restoredStatsSnapshot = c.player;
                     c.hasRestoredStatsSnapshot = true;
                     c.playerStatsRestoreGuardUntilMs = currentServerTimeMs() + 5000;
+                    c.playerDeathRestoreGuardUntilMs = currentServerTimeMs() + 5000;
                     const Attribute& strength = c.player.attributes[0];
                     const Skill& blunt = c.player.skills[4];
                     if (strength.base > 100 || blunt.base > 100.f)
@@ -5408,11 +5406,26 @@ void MPServer::handlePlayerStatsDynamic(ConnectedClient& c, const uint8_t* data,
 // ---------------------------------------------------------------------------
 void MPServer::handlePlayerDeath(ConnectedClient& c, const uint8_t* data, size_t size)
 {
+    BasePlayer incoming = c.player;
     PacketPlayerDeath pkt;
-    pkt.setPlayer(&c.player);
+    pkt.setPlayer(&incoming);
     if (!pkt.decode(data, size)) return;
 
+    const uint64_t nowMs = currentServerTimeMs();
+    if (nowMs < c.playerDeathRestoreGuardUntilMs
+        && c.player.dynamicStats.health.current > 0.f)
+    {
+        Log(Debug::Info) << "[Server] Ignored stale startup PlayerDeath for " << c.name
+                         << " health=" << c.player.dynamicStats.health.current
+                         << "/" << c.player.dynamicStats.health.base
+                         << " guardRemainingMs=" << (c.playerDeathRestoreGuardUntilMs - nowMs)
+                         << " anim='" << incoming.deathAnimationGroup << "'";
+        return;
+    }
+
+    c.playerDeathRestoreGuardUntilMs = 0;
     c.player.isDead = true;
+    c.player.deathAnimationGroup = incoming.deathAnimationGroup;
     broadcastToAll(std::vector<uint8_t>(data, data + size), c.conn);
 
     Log(Debug::Info) << "[Server] Relayed PlayerDeath for " << c.name
@@ -5426,7 +5439,7 @@ void MPServer::handlePlayerDeath(ConnectedClient& c, const uint8_t* data, size_t
 // ---------------------------------------------------------------------------
 void MPServer::announcePlayerDeath(const ConnectedClient& victim, const PacketPlayerDeath& pkt)
 {
-    if (!mLua.getBool("Config", "ANNOUNCE_PLAYER_DEATHS", true))
+    if (!mAnnouncePlayerDeaths)
         return;
 
     std::string message;
@@ -8827,7 +8840,18 @@ bool MPServer::removeActor(uint32_t mpNum, const std::string& cellId)
 
     PacketActorList pkt;
     pkt.setActorList(&actorList);
-    broadcastActorToCell(resolvedCellId, pkt.encode());
+    const std::vector<uint8_t> encodedActorList = pkt.encode();
+    for (auto& [conn, client] : mClients)
+    {
+        // ActorSync v2 lifetime is driven by the reliable removed identities
+        // sent above. Broadcasting a shrinking full ActorList after every
+        // removal amplifies an N-actor clear to O(N^2) reliable traffic and can
+        // fill the connection queue before the final removals are delivered.
+        if (client.actorSyncProtocolVersion >= ActorSyncProtocolVersionV2
+            || !clientHasActorCellLoaded(client, resolvedCellId))
+            continue;
+        sendTo(conn, encodedActorList);
+    }
 
     Log(Debug::Info) << "[Server] Script ActorRemove accepted: mpNum=" << mpNum
                      << " cell=" << resolvedCellId;

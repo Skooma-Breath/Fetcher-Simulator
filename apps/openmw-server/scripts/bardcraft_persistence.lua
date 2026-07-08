@@ -35,6 +35,7 @@ local npcBandMemberSpawnSequence = 0
 local npcBandMemberSpawnSlotsByOwnerGuid = {}
 local pendingNpcBandMemberSpawns = {}
 local npcBandMembersByOwnerGuid = {}
+local npcBandMemberReadyNotifiedByOwnerGuid = {}
 local characterIdByGuid = {}
 local npcPerformanceModeByGuid = {}
 local pendingJoinRequests = {}
@@ -1407,9 +1408,35 @@ end
 
 local function splitCommandArgs(text)
     local args = {}
-    for token in tostring(text or ""):gmatch("%S+") do
-        table.insert(args, token)
+    local current = {}
+    local quote = nil
+    text = tostring(text or "")
+
+    local function pushCurrent()
+        if #current > 0 then
+            table.insert(args, table.concat(current))
+            current = {}
+        end
     end
+
+    for index = 1, #text do
+        local ch = text:sub(index, index)
+        if quote then
+            if ch == quote then
+                quote = nil
+            else
+                table.insert(current, ch)
+            end
+        elseif ch == '"' or ch == "'" then
+            quote = ch
+        elseif ch:match("%s") then
+            pushCurrent()
+        else
+            table.insert(current, ch)
+        end
+    end
+
+    pushCurrent()
     return args
 end
 
@@ -2276,13 +2303,17 @@ local function trySendScheduledBandLocalPlay(player, selector, requestedPart, pe
     end
 
     local scheduledGuiNpcPerformers = {}
+    local sharedPlayerPartCount = 0
     for _, performer in ipairs(guiNpcPerformers) do
-        if not occupied[performer.part] then
-            occupied[performer.part] = true
-            table.insert(scheduledGuiNpcPerformers, performer)
-        else
+        -- Conductor supports multiple performers per MIDI part. Preserve the
+        -- explicit GUI assignment even when a player is already using that
+        -- part; dropping it made instrument reassignment appear ineffective in
+        -- multiplayer bands and made two-part songs unable to use any NPCs.
+        table.insert(scheduledGuiNpcPerformers, performer)
+        if occupied[performer.part] then
+            sharedPlayerPartCount = sharedPlayerPartCount + 1
             mp.log(string.format(
-                "[bardcraft] gui npc assignment skipped leader=%s actorMpNum=%s actorId=%s part=%s reason=part-reserved-for-player",
+                "[bardcraft] gui npc assignment shares player part leader=%s actorMpNum=%s actorId=%s part=%s",
                 tostring(leaderGuid),
                 tostring(performer.actorMpNum),
                 tostring(performer.actorId),
@@ -2324,7 +2355,7 @@ local function trySendScheduledBandLocalPlay(player, selector, requestedPart, pe
         #members,
         selector))
     mp.log(string.format(
-        "[bardcraft] band scheduled start leader=%s name=%s selector=%s requestedPart=%s members=%d npcAssignments=%s npcPolicy=%s npcOwners=%d npcRequested=%d npcScheduled=%d startServerTime=%.3f delay=%.3f bandSession=%s",
+        "[bardcraft] band scheduled start leader=%s name=%s selector=%s requestedPart=%s members=%d npcAssignments=%s npcPolicy=%s npcOwners=%d npcRequested=%d npcScheduled=%d npcSharedPlayerParts=%d startServerTime=%.3f delay=%.3f bandSession=%s",
         tostring(player.guid),
         tostring(player.name),
         tostring(selector),
@@ -2335,6 +2366,7 @@ local function trySendScheduledBandLocalPlay(player, selector, requestedPart, pe
         npcOwnerCount,
         #guiNpcPerformers,
         #scheduledGuiNpcPerformers,
+        sharedPlayerPartCount,
         startServerTime,
         BAND_SCHEDULED_START_LEAD_SECONDS,
         tostring(bandSessionId)))
@@ -4521,6 +4553,7 @@ M.eventHandlers = {
         sheathedInstrumentByGuid = {}
         characterIdByGuid = {}
         npcPerformanceModeByGuid = {}
+        npcBandMemberReadyNotifiedByOwnerGuid = {}
         mp.log(string.format(
             "[bardcraft] network policy localHash=%s communityMode=%s hostedDownloads=%s playerUpload=%s importedRelayFallback=%s packUrl=%s",
             tostring(bardcraftNetworkPolicy.requireLocalSongHash),
@@ -4647,15 +4680,24 @@ M.eventHandlers = {
         end
         recordNpcBandMemberProvision(guid, data)
         if data and data.ok == true and data.isOwner == true then
-            local preprovisioned = preprovisionAdjacentNpcBandMember(
-                tonumber(data.ownerGuid) or guid, tonumber(data.actorMpNum))
-            mp.log(string.format(
-                "[bardcraft] npc band member adjacent preprovision owner=%s actorMpNum=%s sent=%d",
-                tostring(tonumber(data.ownerGuid) or guid), tostring(data.actorMpNum), preprovisioned))
-            player:sendMessage(string.format(
-                "[Bardcraft] NPC band member ready (mpNum=%s, instruments=%s).",
-                tostring(data.actorMpNum),
-                tostring(data.instrumentsAdded or 0)))
+            local ownerGuid = tonumber(data.ownerGuid) or guid
+            local actorMpNum = tonumber(data.actorMpNum)
+            npcBandMemberReadyNotifiedByOwnerGuid[ownerGuid] = npcBandMemberReadyNotifiedByOwnerGuid[ownerGuid] or {}
+            if actorMpNum and not npcBandMemberReadyNotifiedByOwnerGuid[ownerGuid][actorMpNum] then
+                npcBandMemberReadyNotifiedByOwnerGuid[ownerGuid][actorMpNum] = true
+                local preprovisioned = preprovisionAdjacentNpcBandMember(ownerGuid, actorMpNum)
+                mp.log(string.format(
+                    "[bardcraft] npc band member adjacent preprovision owner=%s actorMpNum=%s sent=%d",
+                    tostring(ownerGuid), tostring(actorMpNum), preprovisioned))
+                player:sendMessage(string.format(
+                    "[Bardcraft] NPC band member ready (mpNum=%s, instruments=%s).",
+                    tostring(data.actorMpNum),
+                    tostring(data.instrumentsAdded or 0)))
+            else
+                mp.log(string.format(
+                    "[bardcraft] npc band member duplicate owner ready suppressed owner=%s actorMpNum=%s request=%s instruments=%s",
+                    tostring(ownerGuid), tostring(data.actorMpNum), tostring(data.requestId), tostring(data.instrumentsAdded)))
+            end
         elseif data and data.ok ~= true and data.isOwner == true then
             player:sendMessage("[Bardcraft] NPC band member spawned but could not be recruited locally.")
         end

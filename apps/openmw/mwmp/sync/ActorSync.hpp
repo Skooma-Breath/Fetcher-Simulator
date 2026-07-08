@@ -218,6 +218,13 @@ namespace mwmp
             // been emitted for the current boundActor.  Reset whenever a new
             // binding is established so the first confirmation is always logged.
             bool bindingLogged = false;
+            // Missing dynamic records and temporarily unavailable templates can
+            // make server-spawned binding fail. Back off per actor instead of
+            // retrying and logging on every incoming snapshot.
+            uint64_t nextBindingRetryTimeMs = 0;
+            uint64_t lastBindingFailureLogTimeMs = 0;
+            uint32_t bindingFailureCount = 0;
+            uint32_t suppressedBindingFailureLogs = 0;
             ActorInstanceId actorNetId = 0;
             bool hasAuthoritativeTransform = false;
             bool hasAuthoritativeEquipment = false;

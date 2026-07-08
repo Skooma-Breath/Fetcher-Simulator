@@ -1634,8 +1634,35 @@ namespace mwmp
                 }
                 else
                 {
-                    mActorNetIdsByKey.erase(makeActorKey(actorState));
+                    const std::string packetKey = makeActorKey(actorState);
+                    mActorNetIdsByKey.erase(packetKey);
+                    for (auto& cellEntry : mCells)
+                        cellEntry.second.actors.erase(packetKey);
+
+                    // A server-spawned actor can already exist in the world while its
+                    // v2 identity is still waiting to be promoted into mActorsByNetId.
+                    // Bulk removals used to erase this fallback mapping without deleting
+                    // the object, leaving a visible orphan until the cell was reloaded.
+                    MWWorld::Ptr mappedActor;
                     if (actorState.mpNum != 0)
+                    {
+                        auto mappedIt = mServerSpawnedActorsByMpNum.find(actorState.mpNum);
+                        if (mappedIt != mServerSpawnedActorsByMpNum.end())
+                            mappedActor = mappedIt->second;
+                    }
+
+                    if (!mappedActor.isEmpty())
+                    {
+                        Log(Debug::Info) << "[MP] ActorSync: removing mapped server-spawned actor without primary runtime"
+                                         << " actorNetId=" << record.actorNetId
+                                         << " refId=" << actorState.refId
+                                         << " mpNum=" << actorState.mpNum
+                                         << " cell=" << actorState.cellId;
+                        forgetServerSpawnedActorPtrMappings(mappedActor, actorState.mpNum);
+                        MWBase::Environment::get().getWorld()->deleteObject(mappedActor);
+                        ++removed;
+                    }
+                    else if (actorState.mpNum != 0)
                         forgetLocalMpNumMappings(actorState.mpNum);
                 }
                 continue;
@@ -6438,6 +6465,10 @@ namespace mwmp
         auto prepareSyncedIdleForNewBinding = [&]()
         {
             actor.bindingLogged = false;
+            actor.nextBindingRetryTimeMs = 0;
+            actor.lastBindingFailureLogTimeMs = 0;
+            actor.bindingFailureCount = 0;
+            actor.suppressedBindingFailureLogs = 0;
             if (!actor.boundActor.isEmpty())
             {
                 if (auto* baseNode = actor.boundActor.getRefData().getBaseNode())
@@ -6998,6 +7029,41 @@ namespace mwmp
 
         if (found.isEmpty() && expectsServerSpawn)
         {
+            const uint64_t bindingAttemptTimeMs = currentClientTimeMs();
+            if (actor.nextBindingRetryTimeMs != 0 && bindingAttemptTimeMs < actor.nextBindingRetryTimeMs)
+                return false;
+
+            auto bindingFailed = [&](const std::string& reason) -> bool
+            {
+                ++actor.bindingFailureCount;
+                const uint32_t exponent = std::min<uint32_t>(actor.bindingFailureCount - 1, 4);
+                const uint64_t retryDelayMs = std::min<uint64_t>(2000, 125ull << exponent);
+                actor.nextBindingRetryTimeMs = bindingAttemptTimeMs + retryDelayMs;
+
+                const bool shouldLog = actor.lastBindingFailureLogTimeMs == 0
+                    || bindingAttemptTimeMs - actor.lastBindingFailureLogTimeMs >= 5000;
+                if (shouldLog)
+                {
+                    Log(Debug::Warning) << "[MP] ActorSync: server-spawned actor binding failed"
+                                        << " cell=" << targetCellId
+                                        << " packetCell=" << cellId
+                                        << " refId=" << actor.state.refId
+                                        << " mpNum=" << actor.state.mpNum
+                                        << " actorNetId=" << actor.actorNetId
+                                        << " failures=" << actor.bindingFailureCount
+                                        << " suppressed=" << actor.suppressedBindingFailureLogs
+                                        << " retryMs=" << retryDelayMs
+                                        << " reason=" << reason;
+                    actor.lastBindingFailureLogTimeMs = bindingAttemptTimeMs;
+                    actor.suppressedBindingFailureLogs = 0;
+                }
+                else
+                    ++actor.suppressedBindingFailureLogs;
+
+                actor.boundActor = MWWorld::Ptr();
+                return false;
+            };
+
             try
             {
                 if (actor.waitingForFreshCellBootstrap)
@@ -7030,21 +7096,17 @@ namespace mwmp
                     actor.boundActor = MWWorld::Ptr();
                     return false;
                 }
-                Log(Debug::Info) << "[MP] ActorSync: resolveActorBinding spawning missing actor"
-                                 << " cell=" << targetCellId
-                                 << " packetCell=" << cellId
-                                 << " refId=" << actor.state.refId
-                                 << " mpNum=" << actor.state.mpNum
-                                 << " pos=(" << spawnX << "," << spawnY << "," << spawnZ << ")"
-                                 << (suspectPos ? " WARN:pos-is-zero" : "");
+                Log(Debug::Verbose) << "[MP] ActorSync: resolveActorBinding spawning missing actor"
+                                    << " cell=" << targetCellId
+                                    << " packetCell=" << cellId
+                                    << " refId=" << actor.state.refId
+                                    << " mpNum=" << actor.state.mpNum
+                                    << " pos=(" << spawnX << "," << spawnY << "," << spawnZ << ")"
+                                    << (suspectPos ? " WARN:pos-is-zero" : "");
                 MWWorld::ManualRef ref(world->getStore(), ESM::RefId::stringRefId(actor.state.refId), 1);
                 MWWorld::Ptr actorTemplate = ref.getPtr();
                 if (actorTemplate.isEmpty() || !actorTemplate.getClass().isActor())
-                {
-                    Log(Debug::Warning) << "[MP] ActorSync: cannot spawn non-actor refId=" << actor.state.refId;
-                    actor.boundActor = MWWorld::Ptr();
-                    return false;
-                }
+                    return bindingFailed("record is missing or is not an actor");
 
                 ESM::Position esmPos;
                 for (int i = 0; i < 3; ++i)
@@ -7055,12 +7117,7 @@ namespace mwmp
 
                 found = world->placeObject(actorTemplate, targetCell, esmPos);
                 if (found.isEmpty())
-                {
-                    Log(Debug::Warning) << "[MP] ActorSync: placeObject failed for spawned actor refId="
-                                        << actor.state.refId << " mpNum=" << actor.state.mpNum;
-                    actor.boundActor = MWWorld::Ptr();
-                    return false;
-                }
+                    return bindingFailed("placeObject returned an empty actor");
 
                 // placeObject performs normal single-player grounding, which
                 // can drop an actor spawned on a water surface to the seabed
@@ -7069,12 +7126,7 @@ namespace mwmp
                 // it immediately before the first mechanics update.
                 found = world->moveObject(found, targetCell, osg::Vec3f(spawnX, spawnY, spawnZ));
                 if (found.isEmpty())
-                {
-                    Log(Debug::Warning) << "[MP] ActorSync: authoritative placement failed for spawned actor refId="
-                                        << actor.state.refId << " mpNum=" << actor.state.mpNum;
-                    actor.boundActor = MWWorld::Ptr();
-                    return false;
-                }
+                    return bindingFailed("authoritative move returned an empty actor");
 
                 rememberServerSpawnedActor(targetCellId, found, actor.state.mpNum);
                 Log(Debug::Info) << "[MP] ActorSync: spawned actor refId=" << actor.state.refId
@@ -7084,11 +7136,7 @@ namespace mwmp
             }
             catch (const std::exception& e)
             {
-                Log(Debug::Verbose) << "[MP] ActorSync: delaying actor spawn for refId=" << actor.state.refId
-                                    << " mpNum=" << actor.state.mpNum
-                                    << " reason=" << e.what();
-                actor.boundActor = MWWorld::Ptr();
-                return false;
+                return bindingFailed(e.what());
             }
         }
 

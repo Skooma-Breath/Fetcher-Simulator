@@ -1,4 +1,5 @@
 local mp = require("mp")
+local generatedBards = require("bardcraft_generated_bards")
 local commandRegistry = require("command_registry")
 local destructibleSpawners = require("destructible_spawners")
 local recordStore = require("recordstore")
@@ -832,6 +833,7 @@ local function handleDelete(player, data, env)
         return
     end
 
+    local generatedBard = recordType == "npc" and generatedBards.get(recordId) or nil
     local ok, result = recordStore.remove(recordType, recordId, {
         force = data.force == true,
     })
@@ -839,6 +841,21 @@ local function handleDelete(player, data, env)
         sendToast(player, result or "Failed to remove dynamic record.", "error")
         sendSnapshot(player, "AdminUi_Snapshot", env)
         return
+    end
+
+    if generatedBard then
+        local forgotten = generatedBards.forget(recordId)
+        if not forgotten then
+            mp.log(string.format(
+                "[admin_ui] warning: removed generated bard dynamic record %s but failed to remove its registry entry",
+                recordId))
+            sendToast(player,
+                string.format("Removed %s %s, but its Bardcraft registry entry could not be removed.", recordType, recordId),
+                "error")
+            sendSnapshot(player, "AdminUi_Snapshot", env)
+            return
+        end
+        mp.log(string.format("[admin_ui] removed generated bard registry entry %s", recordId))
     end
 
     sendToast(player, string.format("Removed %s %s.", recordType, recordId), "success")

@@ -56,6 +56,7 @@ struct ConnectedClient
     bool                hasRestoredStatsSnapshot = false;
     bool                acceptedPlayerStatsThisSession = false;
     uint64_t            playerStatsRestoreGuardUntilMs = 0;
+    uint64_t            playerDeathRestoreGuardUntilMs = 0;
     std::vector<Item>   restoredInventorySnapshot;
     std::array<EquipmentItem, BasePlayer::NUM_EQUIPMENT_SLOTS> restoredEquipmentSnapshot{};
     bool                hasRestoredInventorySnapshot = false;
@@ -565,6 +566,7 @@ private:
     int                           mActorAuthorityExteriorRadius = 1;
     int                           mActorAuthorityStickyMs = 3000;
     bool                          mActorAuthorityPreferExactCell = true;
+    bool                          mAnnouncePlayerDeaths = true;
     bool                          mModChecksEnabled = false;
     bool                          mModChecksStrictOrder = false;
     bool                          mModChecksRequireExactList = false;

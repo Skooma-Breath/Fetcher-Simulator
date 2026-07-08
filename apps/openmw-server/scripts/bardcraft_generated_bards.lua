@@ -33,6 +33,18 @@ local function normalizeLookup(value)
     return string.lower(trim(value))
 end
 
+local function stripWrappingQuotes(value)
+    value = trim(value)
+    if #value >= 2 then
+        local first = value:sub(1, 1)
+        local last = value:sub(-1)
+        if (first == '"' and last == '"') or (first == "'" and last == "'") then
+            return trim(value:sub(2, -2))
+        end
+    end
+    return value
+end
+
 local function runtimeMode()
     local bardcraftConfig = type(config.Bardcraft) == "table" and config.Bardcraft or {}
     local mode = normalizeLookup(bardcraftConfig.dynamicBardRecordsMode)
@@ -54,7 +66,10 @@ local function normalizeRecord(entry)
     end
 
     local recordId = normalizeLookup(entry.recordId)
-    local sourceRefId = normalizeLookup(entry.sourceRefId)
+    -- Older command parsing preserved wrapping quotes from inputs such as
+    -- /bc npc makebard "caius cosades". Repair those persisted records before
+    -- re-upserting them so a malformed baseId cannot poison client bootstrap.
+    local sourceRefId = normalizeLookup(stripWrappingQuotes(entry.sourceRefId))
     if recordId == "" or sourceRefId == "" or recordId:sub(1, #GENERATED_BARD_PREFIX) ~= GENERATED_BARD_PREFIX then
         return nil
     end
@@ -267,7 +282,7 @@ function M.initialize()
 end
 
 function M.make(sourceRefId, displayName)
-    sourceRefId = normalizeLookup(sourceRefId)
+    sourceRefId = normalizeLookup(stripWrappingQuotes(sourceRefId))
     if sourceRefId == "" then
         return nil, "Source NPC record ID is required."
     end
@@ -348,6 +363,19 @@ end
 
 function M.get(recordId)
     return findRecord(recordId)
+end
+
+function M.forget(recordId)
+    local wanted = normalizeLookup(recordId)
+    local records = loadRegistry().records
+    for index, entry in ipairs(records) do
+        if entry.recordId == wanted then
+            table.remove(records, index)
+            saveRegistry()
+            return entry
+        end
+    end
+    return nil
 end
 
 function M.isEnabledRecord(recordId)
