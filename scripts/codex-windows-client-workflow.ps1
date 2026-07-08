@@ -13,6 +13,7 @@ param(
     [string]$ModBundleUrl = "",
     [string]$ModBundleReleaseTag = "",
     [string]$ModBundleAsset = "openmw-client-mods.zip",
+    [bool]$IncludeTesterTools = $false,
     [string]$RunLabel = "codex",
     [string]$OutDir = "remote-workflow-logs"
 )
@@ -84,6 +85,7 @@ $workflowRunArgs = @(
     "-f", "build-type=$BuildType",
     "-f", "package=$packageInput",
     "-f", "release=$releaseInput",
+    "-f", "include-tester-tools=$($IncludeTesterTools.ToString().ToLowerInvariant())",
     "-f", "run-label=$RunLabel"
 )
 if ($ReleaseTag) {

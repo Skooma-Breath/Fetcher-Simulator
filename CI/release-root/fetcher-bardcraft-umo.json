@@ -76,6 +76,82 @@
     ]
   },
   {
+    "name": "OAAB_Data",
+    "author": "OAAB_Data Team",
+    "description": "Shared Vvardenfell-focused assets required by Devilish Touch of Madness.",
+    "url": "https://www.nexusmods.com/morrowind/mods/49042",
+    "category": "ModdingResources",
+    "dl_url": "",
+    "usage_notes": "Download the OAAB_Data main file. Optional HD and developer archives are not required.",
+    "compat": 5,
+    "dir": "OAABData",
+    "slug": "oaab_data",
+    "date_added": "2026-07-08T00:00:00+00:00",
+    "date_updated": "2026-07-08T00:00:00+00:00",
+    "download_info": [
+      {
+        "direct_download": null,
+        "file_name": "OAAB_Data",
+        "extract_to": "OAABData",
+        "nexus_file_id": null,
+        "pinned": false,
+        "actions": []
+      }
+    ],
+    "tags": [
+      "oaab-data"
+    ],
+    "on_lists": [
+      "fetcher-bardcraft"
+    ],
+    "data_paths": [
+      "OAABData/00 Core"
+    ],
+    "plugins": [
+      "OAAB_Data.esm"
+    ]
+  },
+  {
+    "name": "Tamriel Rebuilt",
+    "author": "Tamriel Rebuilt Team",
+    "description": "Mainland Morrowind content required by Devilish Touch of Madness.",
+    "url": "https://www.nexusmods.com/morrowind/mods/42145",
+    "category": "Landmasses",
+    "dl_url": "",
+    "usage_notes": "Requires Tribunal, Bloodmoon, and Tamriel_Data v12 or newer. Fetcher already installs those prerequisites.",
+    "compat": 4,
+    "dir": "TamrielRebuilt",
+    "slug": "tamriel-rebuilt",
+    "date_added": "2026-07-08T00:00:00+00:00",
+    "date_updated": "2026-07-08T00:00:00+00:00",
+    "download_info": [
+      {
+        "direct_download": null,
+        "file_name": "Tamriel Rebuilt 25.08.12",
+        "extract_to": "TamrielRebuilt",
+        "nexus_file_id": null,
+        "pinned": false,
+        "actions": []
+      }
+    ],
+    "tags": [
+      "openmw-lua",
+      "tamriel-data"
+    ],
+    "on_lists": [
+      "fetcher-bardcraft"
+    ],
+    "data_paths": [
+      "TamrielRebuilt/00 Core",
+      "TamrielRebuilt/01 Faction Integration"
+    ],
+    "plugins": [
+      "TR_Mainland.esm",
+      "TR_Factions.esp",
+      "tamrielrebuilt.omwscripts"
+    ]
+  },
+  {
     "name": "Stats Window Extender (OpenMW)",
     "author": "<a href=\"https://next.nexusmods.com/profile/therealralts/about-me\">Ralts</a>",
     "description": "A replacement for the Stats window with built-in tweaks and an API for modders to add new content.",
@@ -148,6 +224,252 @@
     "plugins": [
       "Bardcraft.ESP",
       "Bardcraft.omwscripts"
+    ]
+  },
+  {
+    "name": "Playable Creature Race Pack",
+    "author": "PsychoGherkin",
+    "description": "Adds playable versions of Morrowind's humanoid creatures.",
+    "url": "https://www.nexusmods.com/morrowind/mods/45104",
+    "category": "Races",
+    "dl_url": "",
+    "usage_notes": "Requires Tribunal and Bloodmoon. Install the V0.09 main file; the optional Ashzomb_hand file is only a legacy crash workaround.",
+    "compat": 4,
+    "dir": "PlayableCreatureRacePack",
+    "slug": "playable-creature-race-pack",
+    "date_added": "2026-07-08T00:00:00+00:00",
+    "date_updated": "2026-07-08T00:00:00+00:00",
+    "download_info": [
+      {
+        "direct_download": null,
+        "file_name": "Playable Creature Race Pack V0.09",
+        "extract_to": "PlayableCreatureRacePack",
+        "nexus_file_id": null,
+        "pinned": false,
+        "actions": []
+      }
+    ],
+    "tags": [],
+    "on_lists": [
+      "fetcher-bardcraft"
+    ],
+    "data_paths": [
+      "PlayableCreatureRacePack/Data Files"
+    ],
+    "plugins": [
+      "Playable_Creature_Pack.ESP"
+    ]
+  },
+  {
+    "name": "Mario Race 1.0",
+    "author": "ModDB uploader",
+    "description": "Adds Mario from Mario Tennis as a playable Morrowind race.",
+    "url": "https://www.moddb.com/games/morrowind/addons/mario-race-1-0",
+    "category": "Races",
+    "dl_url": "",
+    "usage_notes": "Manual ModDB download. The installer opens the official page and detects Mario_Race_1.0.rar in your Downloads folder.",
+    "compat": 4,
+    "dir": "MarioRace",
+    "slug": "mario-race-1-0",
+    "date_added": "2026-07-08T00:00:00+00:00",
+    "date_updated": "2026-07-08T00:00:00+00:00",
+    "download_info": [
+      {
+        "direct_download": null,
+        "file_name": "Mario_Race_1.0.rar",
+        "extract_to": "MarioRace",
+        "nexus_file_id": null,
+        "pinned": true,
+        "actions": [],
+        "sha256": "b824cabf781aeee90940fd31f586f4779d04979e9acd3515b5dc1d4837da9392"
+      }
+    ],
+    "tags": [],
+    "on_lists": [
+      "fetcher-bardcraft"
+    ],
+    "data_paths": [
+      "MarioRace/Data Files"
+    ],
+    "plugins": [
+      "Mario.ESP"
+    ]
+  },
+  {
+    "name": "NIF test level",
+    "author": "Kurpulio",
+    "description": "An in-game level for browsing interesting NIF assets.",
+    "url": "https://www.nexusmods.com/morrowind/mods/52094",
+    "category": "ModdingResources",
+    "dl_url": "",
+    "usage_notes": "Requires Tribunal and Bloodmoon.",
+    "compat": 4,
+    "dir": "NifTestLevel",
+    "slug": "nif-test-level",
+    "date_added": "2026-07-08T00:00:00+00:00",
+    "date_updated": "2026-07-08T00:00:00+00:00",
+    "download_info": [
+      {
+        "direct_download": null,
+        "file_name": "nif test level",
+        "extract_to": "NifTestLevel",
+        "nexus_file_id": null,
+        "pinned": false,
+        "actions": []
+      }
+    ],
+    "tags": [],
+    "on_lists": [
+      "fetcher-bardcraft"
+    ],
+    "data_paths": [
+      "NifTestLevel"
+    ],
+    "plugins": [
+      "nifTest.esp"
+    ]
+  },
+  {
+    "name": "Devilish Touch of Madness (OpenMW)",
+    "author": "DetailDevil",
+    "description": "A skooma-induced OpenMW quest and hallucination adventure.",
+    "url": "https://www.nexusmods.com/morrowind/mods/59337",
+    "category": "Quests",
+    "dl_url": "",
+    "usage_notes": "Requires OpenMW 0.50+, Tamriel_Data, OAAB_Data, and Tamriel Rebuilt. Do not install the author's separate shrink, skooma, or Wabbajack mods alongside it.",
+    "compat": 4,
+    "dir": "DevilishTouchOfMadness",
+    "slug": "devilish-touch-of-madness-openmw",
+    "date_added": "2026-07-08T00:00:00+00:00",
+    "date_updated": "2026-07-08T00:00:00+00:00",
+    "download_info": [
+      {
+        "direct_download": null,
+        "file_name": "Devilish Touch Of Madness",
+        "extract_to": "DevilishTouchOfMadness",
+        "nexus_file_id": null,
+        "pinned": false,
+        "actions": []
+      }
+    ],
+    "tags": [
+      "openmw-lua",
+      "oaab-data",
+      "tamriel-data"
+    ],
+    "on_lists": [
+      "fetcher-bardcraft"
+    ],
+    "data_paths": [
+      "DevilishTouchOfMadness"
+    ],
+    "plugins": [
+      "Devilish Touch of Madness.esp",
+      "Devilish Touch of Madness.omwscripts"
+    ]
+  },
+  {
+    "name": "Rafael's Shader Pack",
+    "author": "rafaeldk and contributors",
+    "description": "Optimized post-processing shaders for OpenMW.",
+    "url": "https://www.nexusmods.com/morrowind/mods/53667",
+    "category": "Shaders",
+    "dl_url": "",
+    "usage_notes": "Install the main shader pack. Enhanced Water, PBR Lighting, and Enhanced Shadows are optional and are not installed by Fetcher.",
+    "compat": 4,
+    "dir": "RafaelsShaderPack",
+    "slug": "rafaels-shader-pack",
+    "date_added": "2026-07-08T00:00:00+00:00",
+    "date_updated": "2026-07-08T00:00:00+00:00",
+    "download_info": [
+      {
+        "direct_download": null,
+        "file_name": "Rafael's Shader Pack 2.0c",
+        "extract_to": "RafaelsShaderPack",
+        "nexus_file_id": null,
+        "pinned": false,
+        "actions": []
+      }
+    ],
+    "tags": [
+      "openmw-shaders"
+    ],
+    "on_lists": [
+      "fetcher-bardcraft"
+    ],
+    "data_paths": [
+      "RafaelsShaderPack/RafaelsShaderPack"
+    ],
+    "plugins": []
+  },
+  {
+    "name": "OpenMW Hookshot",
+    "author": "imarchnemesis",
+    "description": "Adds a Zelda-style hookshot for pulling actors, items, or the player.",
+    "url": "https://www.nexusmods.com/morrowind/mods/53441",
+    "category": "Gameplay",
+    "dl_url": "",
+    "usage_notes": "Requires Tribunal, Bloodmoon, and OpenMW 0.49+.",
+    "compat": 4,
+    "dir": "OpenMWHookshot",
+    "slug": "openmw-hookshot",
+    "date_added": "2026-07-08T00:00:00+00:00",
+    "date_updated": "2026-07-08T00:00:00+00:00",
+    "download_info": [
+      {
+        "direct_download": null,
+        "file_name": "OpenMWHookshot.7z",
+        "extract_to": "OpenMWHookshot",
+        "nexus_file_id": null,
+        "pinned": false,
+        "actions": []
+      }
+    ],
+    "tags": [
+      "openmw-lua"
+    ],
+    "on_lists": [
+      "fetcher-bardcraft"
+    ],
+    "data_paths": [
+      "OpenMWHookshot/OpenMWHookshot"
+    ],
+    "plugins": [
+      "OpenMWHookshot.omwscripts"
+    ]
+  },
+  {
+    "name": "Moon Sugar Plantation",
+    "author": "Danjb",
+    "description": "Adds a moon-sugar plantation northwest of Caldera.",
+    "url": "https://www.nexusmods.com/morrowind/mods/52638",
+    "category": "Locations",
+    "dl_url": "",
+    "usage_notes": "No additional mod dependencies are declared by the author.",
+    "compat": 4,
+    "dir": "MoonSugarPlantation",
+    "slug": "moon-sugar-plantation",
+    "date_added": "2026-07-08T00:00:00+00:00",
+    "date_updated": "2026-07-08T00:00:00+00:00",
+    "download_info": [
+      {
+        "direct_download": null,
+        "file_name": "Moon Sugar Plantation",
+        "extract_to": "MoonSugarPlantation",
+        "nexus_file_id": null,
+        "pinned": false,
+        "actions": []
+      }
+    ],
+    "tags": [],
+    "on_lists": [
+      "fetcher-bardcraft"
+    ],
+    "data_paths": [
+      "MoonSugarPlantation"
+    ],
+    "plugins": [
+      "Moon Sugar Plantation.esp"
     ]
   }
 ]

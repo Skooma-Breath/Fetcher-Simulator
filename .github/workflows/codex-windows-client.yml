@@ -66,6 +66,11 @@ on:
         required: false
         default: openmw-client-mods.zip
         type: string
+      include-tester-tools:
+        description: Include Fetcher tester updater/install scripts in the portable client
+        required: true
+        default: false
+        type: boolean
       run-label:
         description: Optional label to make this run easy to find in gh run list
         required: false
@@ -112,4 +117,5 @@ jobs:
       mod-bundle-url: ${{ inputs.mod-bundle-url }}
       mod-bundle-release-tag: ${{ inputs.mod-bundle-release-tag }}
       mod-bundle-asset: ${{ inputs.mod-bundle-asset }}
+      include-tester-tools: ${{ inputs.include-tester-tools }}
     secrets: inherit

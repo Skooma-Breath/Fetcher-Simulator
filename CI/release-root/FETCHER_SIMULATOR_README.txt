@@ -1,28 +1,38 @@
-Fetcher Simulator public test install
-====================================
+Fetcher Simulator test channel
+==============================
 
-This package does not include Bardcraft or its Nexus dependencies. Each player
-must download those files through their own Nexus account.
+The clean Fetcher Simulator release intentionally excludes this updater, its
+BAT/PowerShell helpers, and all test-server gameplay mods. These tools are
+distributed through the separate fetcher-tester-tools prerelease.
 
-Required downloads
-------------------
+Existing clean install
+----------------------
+
+Download and double-click the single Join-Fetcher-Test-Channel.bat asset from:
+
+   https://github.com/Skooma-Breath/Fetcher-Simulator/releases/tag/fetcher-tester-tools
+
+The bootstrap asks for the folder containing openmw.exe, verifies and installs
+the tester tools ZIP, switches the client to the Fetcher-Simulator-Test release
+channel, and starts the updater. Do not manually copy the individual BAT/PS1
+files. After this one-time bootstrap, use Update-Fetcher-Simulator.bat for every
+client, tool, mod, and Bardcraft patch update.
+
+Required game files
+-------------------
 
 1. Morrowind with Tribunal and Bloodmoon.
-2. Tamriel Data. Use the "Tamriel Data (Vanilla)" file unless you already know
-   you want the larger HD package.
-3. Skill Framework.
-4. Stats Window Extender.
-5. Bardcraft (OpenMW): https://www.nexusmods.com/morrowind/mods/56814
 
-Bardcraft's Nexus permissions do not allow reuploading the mod archive to other
-sites. Do not ask another player to send you Bardcraft. Download it from Nexus.
+The updater guides each player through Nexus-hosted downloads using their own
+Nexus account. Nexus-hosted archives are never reuploaded by Fetcher Simulator.
 
 First-time setup
 ----------------
 
 1. Run openmw-wizard.exe from this folder.
 2. Point the wizard at your Morrowind installation and finish its setup.
-3. Return to this folder and run Install-Fetcher-Bardcraft-With-UMO.bat.
+3. Run Join-Fetcher-Test-Channel.bat if this began as a clean client.
+4. Follow the updater/UMO prompts for the required test-server mods.
 
 The Bardcraft installer stops before downloading mods if Morrowind.esm is not
 registered in this portable install's openmw.cfg.
@@ -34,10 +44,10 @@ Close OpenMW and double-click:
 
    Update-Fetcher-Simulator.bat
 
-The updater checks the Fetcher-Simulator Git commit and GitHub release digest.
+The updater checks the Fetcher-Simulator-Test Git commit and GitHub release digest.
 It downloads the full client only when the packaged client changed. It checks
-the Bardcraft multiplayer patch separately, so script-only fixes do not require
-another full client download.
+the tester tools and Bardcraft multiplayer patch separately, so script-only
+fixes do not require another full client download.
 
 Client files are staged, hash-verified, and installed with rollback. The updater
 does not overwrite openmw.cfg, settings.cfg, userdata, saves, screenshots, logs,

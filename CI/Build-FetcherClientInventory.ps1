@@ -33,7 +33,20 @@ function Test-FetcherMutablePath {
         "server-lua-storage.bin",
         "umo.exe",
         "tes3cmd.exe",
-        "update-fetcher-simulator.bat"
+        "apply-fetcher-public-test-config.bat",
+        "apply-fetcher-public-test-config.ps1",
+        "fetcher-bardcraft-umo.json",
+        "fetcher-client-patches.json",
+        "fetcher-tester-tools.json",
+        "fetcher_simulator_readme.txt",
+        "install-fetcher-bardcraft-with-umo.bat",
+        "install-fetcher-bardcraft-with-umo.ps1",
+        "install-fetcher-tester-tools.ps1",
+        "join-fetcher-test-channel.bat",
+        "launch-fetcher-character.bat",
+        "launch-fetcher-character.ps1",
+        "update-fetcher-simulator.bat",
+        "update-fetcher-simulator.ps1"
     )
     if ($exactPaths -contains $path) {
         return $true

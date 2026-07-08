@@ -4,10 +4,16 @@ param(
     [string] $Repository = "Skooma-Breath/Fetcher-Simulator",
     [string] $GitHubApiBaseUrl = "https://api.github.com",
     [string] $GitHubDownloadBaseUrl = "https://github.com",
-    [string] $ClientReleaseTag = "Fetcher-Simulator",
-    [string] $ClientAssetName = "fetcher-simulator.zip",
+    [string] $ClientReleaseTag = "Fetcher-Simulator-Test",
+    [string] $ClientAssetName = "fetcher-simulator-test.zip",
+    [string] $TesterToolsReleaseTag = "fetcher-tester-tools",
+    [string] $TesterToolsAssetName = "fetcher-tester-tools.zip",
+    [string] $TesterToolsArchivePath = "",
     [string] $PatchCatalogPath = "",
+    [string] $UmoInstallerPath = "",
     [switch] $SkipClientUpdate,
+    [switch] $SkipTesterToolsUpdate,
+    [switch] $SkipUmoMods,
     [switch] $SkipModPatches
 )
 
@@ -76,7 +82,20 @@ function Test-FetcherMutablePath {
         "server-lua-storage.bin",
         "umo.exe",
         "tes3cmd.exe",
-        "update-fetcher-simulator.bat"
+        "apply-fetcher-public-test-config.bat",
+        "apply-fetcher-public-test-config.ps1",
+        "fetcher-bardcraft-umo.json",
+        "fetcher-client-patches.json",
+        "fetcher-tester-tools.json",
+        "fetcher_simulator_readme.txt",
+        "install-fetcher-bardcraft-with-umo.bat",
+        "install-fetcher-bardcraft-with-umo.ps1",
+        "install-fetcher-tester-tools.ps1",
+        "join-fetcher-test-channel.bat",
+        "launch-fetcher-character.bat",
+        "launch-fetcher-character.ps1",
+        "update-fetcher-simulator.bat",
+        "update-fetcher-simulator.ps1"
     ) -contains $path) {
         return $true
     }
@@ -203,6 +222,22 @@ function Get-InstalledClientCommit {
         }
     }
     return $null
+}
+
+function Get-InstalledClientChannel {
+    param([Parameter(Mandatory = $true)][string] $Root)
+
+    $path = Join-Path $Root "fetcher-client-channel.json"
+    if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
+        return ""
+    }
+    try {
+        $channel = Get-Content -Raw -LiteralPath $path | ConvertFrom-Json
+        return ([string]$channel.channel).ToLowerInvariant()
+    }
+    catch {
+        return ""
+    }
 }
 
 function Assert-OpenMwStopped {
@@ -501,6 +536,55 @@ function Install-ClientModPatch {
     }
 }
 
+function Install-UmoModList {
+    param([Parameter(Mandatory = $true)][string] $Root)
+
+    $installer = $UmoInstallerPath
+    if ([string]::IsNullOrWhiteSpace($installer)) {
+        $installer = Join-Path $Root "Install-Fetcher-Bardcraft-With-UMO.ps1"
+    }
+    if (-not (Test-Path -LiteralPath $installer -PathType Leaf)) {
+        throw "UMO mod installer was not found: $installer"
+    }
+
+    Assert-OpenMwStopped -Root $Root
+    Write-Host "Checking required Fetcher mods and dependencies through UMO..."
+    & $installer `
+        -UmoBasePath (Join-Path $Root "Data Files") `
+        -ApplyBardcraftMultiplayerPatch $false `
+        -ApplyPublicTestConfig $true
+    if (-not $?) {
+        throw "Fetcher UMO mod installation failed."
+    }
+}
+
+function Install-TesterTools {
+    param([Parameter(Mandatory = $true)][string] $Root)
+
+    $bootstrap = Join-Path $Root "Install-Fetcher-Tester-Tools.ps1"
+    if (-not (Test-Path -LiteralPath $bootstrap -PathType Leaf)) {
+        throw "Fetcher tester tools bootstrap was not found: $bootstrap"
+    }
+
+    Write-Host "Refreshing Fetcher tester tools..."
+    $parameters = @{
+        InstallRoot = $Root
+        Repository = $Repository
+        ReleaseTag = $TesterToolsReleaseTag
+        AssetName = $TesterToolsAssetName
+        GitHubApiBaseUrl = $GitHubApiBaseUrl
+        GitHubDownloadBaseUrl = $GitHubDownloadBaseUrl
+        SkipUpdater = $true
+    }
+    if (-not [string]::IsNullOrWhiteSpace($TesterToolsArchivePath)) {
+        $parameters.ToolsArchivePath = $TesterToolsArchivePath
+    }
+    & $bootstrap @parameters
+    if (-not $?) {
+        throw "Fetcher tester tools refresh failed."
+    }
+}
+
 function Write-UpdateState {
     param(
         [Parameter(Mandatory = $true)][string] $Path,
@@ -587,8 +671,10 @@ try {
         $clientAsset = Get-ReleaseAsset -Release $clientRelease -AssetName $ClientAssetName -ReleaseTag $ClientReleaseTag
         $remoteCommit = Resolve-ReleaseCommit -Release $clientRelease -Tag $ClientReleaseTag
         $localCommit = Get-InstalledClientCommit -Root $root
+        $localChannel = Get-InstalledClientChannel -Root $root
         $knownAssetDigest = if ($clientState.Contains("assetDigest")) { [string]$clientState["assetDigest"] } else { "" }
-        if ($localCommit -ne $remoteCommit -or
+        $knownReleaseTag = if ($clientState.Contains("releaseTag")) { [string]$clientState["releaseTag"] } else { "" }
+        if ($localChannel -ne "test" -or $localCommit -ne $remoteCommit -or $knownReleaseTag -ne $ClientReleaseTag -or
             (-not [string]::IsNullOrWhiteSpace($knownAssetDigest) -and $knownAssetDigest -ne $clientAsset.Digest)) {
             Install-ClientArchive -Root $root -Asset $clientAsset -RemoteCommit $remoteCommit -RunWorkRoot $runWorkRoot
         }
@@ -597,9 +683,19 @@ try {
         }
         $clientState = [ordered]@{
             commit = $remoteCommit
+            releaseTag = $ClientReleaseTag
+            assetName = $ClientAssetName
             assetDigest = $clientAsset.Digest
             checkedAtUtc = [DateTime]::UtcNow.ToString("o")
         }
+    }
+
+    if (-not $SkipTesterToolsUpdate) {
+        Install-TesterTools -Root $root
+    }
+
+    if (-not $SkipUmoMods) {
+        Install-UmoModList -Root $root
     }
 
     if (-not $SkipModPatches) {

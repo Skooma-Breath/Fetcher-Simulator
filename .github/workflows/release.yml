@@ -7,6 +7,12 @@ on:
     tags:
       - openmw-**
   workflow_dispatch:
+    inputs:
+      publish-clean:
+        description: Replace the legacy Fetcher-Simulator prerelease with the clean client after testers migrate
+        required: true
+        default: false
+        type: boolean
 
 permissions:
   contents: write
@@ -21,9 +27,37 @@ jobs:
       - uses: actions/checkout@v4
       - run: cat "${{ github.workspace }}/CI/github.env" >> $GITHUB_ENV
 
-  Windows:
+  Tester-Tools:
+    if: ${{ github.ref == 'refs/heads/main' }}
+    uses: ./.github/workflows/fetcher-tester-tools.yml
+    secrets: inherit
+
+  Windows-Test:
+    if: ${{ github.ref == 'refs/heads/main' }}
     needs:
       - Output-Envs
+      - Tester-Tools
+    uses: ./.github/workflows/windows.yml
+    with:
+      image: "2022"
+      vcpkg-deps-tag: ${{ needs.Output-Envs.outputs.VCPKG_DEPS_TAG }}
+      build-type: RelWithDebInfo
+      package: true
+      release: true
+      release-tag: Fetcher-Simulator-Test
+      release-name: Fetcher Simulator Test Channel
+      release-zip-name: fetcher-simulator-test.zip
+      release-include-installer: false
+      mod-bundle-release-tag: openmw-client-mods-mp-clients
+      mod-bundle-asset: openmw-client-mods.zip
+      include-tester-tools: true
+    secrets: inherit
+
+  Windows-Clean:
+    if: ${{ always() && needs.Output-Envs.result == 'success' && (github.ref != 'refs/heads/main' || (github.event_name == 'workflow_dispatch' && inputs.publish-clean && needs.Windows-Test.result == 'success')) }}
+    needs:
+      - Output-Envs
+      - Windows-Test
     uses: ./.github/workflows/windows.yml
     with:
       image: "2022"
@@ -35,6 +69,5 @@ jobs:
       release-name: ${{ github.ref == 'refs/heads/main' && 'Fetcher-Simulator' || '' }}
       release-zip-name: ${{ github.ref == 'refs/heads/main' && 'fetcher-simulator.zip' || '' }}
       release-include-installer: ${{ github.ref != 'refs/heads/main' }}
-      mod-bundle-release-tag: ${{ github.ref == 'refs/heads/main' && 'openmw-client-mods-mp-clients' || '' }}
-      mod-bundle-asset: openmw-client-mods.zip
+      include-tester-tools: false
     secrets: inherit

@@ -1,0 +1,45 @@
+name: Fetcher tester tools prerelease
+
+on:
+  workflow_dispatch:
+  workflow_call:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: fetcher-tester-tools-release
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build digest-backed tester tools package
+        shell: pwsh
+        run: |
+          .\CI\Build-FetcherTesterTools.ps1 `
+            -OutputDir "${{ github.workspace }}\release-assets" `
+            -SourceCommit "${{ github.sha }}"
+
+      - name: Replace stable tester tools prerelease
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $tag = "fetcher-tester-tools"
+          gh release delete $tag --repo "${{ github.repository }}" --yes --cleanup-tag 2>$null
+          git tag -f $tag "${{ github.sha }}"
+          git push origin "refs/tags/$tag" --force
+          gh release create $tag `
+            "${{ github.workspace }}\release-assets\fetcher-tester-tools.zip" `
+            "${{ github.workspace }}\release-assets\Install-Fetcher-Tester-Tools.ps1" `
+            "${{ github.workspace }}\release-assets\Join-Fetcher-Test-Channel.bat" `
+            "${{ github.workspace }}\release-assets\fetcher-bardcraft-umo.json" `
+            --repo "${{ github.repository }}" `
+            --target "${{ github.sha }}" `
+            --title "Fetcher Simulator Tester Tools" `
+            --notes "Install or refresh the Fetcher test channel without copying individual files. Download and double-click Join-Fetcher-Test-Channel.bat once; subsequent updates are handled by Update-Fetcher-Simulator.bat." `
+            --prerelease

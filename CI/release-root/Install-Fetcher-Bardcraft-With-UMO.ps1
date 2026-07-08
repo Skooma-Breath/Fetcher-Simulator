@@ -3,7 +3,7 @@ param(
     [string] $ModListName = "fetcher-bardcraft",
     [string] $ModListFile = "",
     [string] $ModListAssetName = "fetcher-bardcraft-umo.json",
-    [string] $ModListUrl = "https://github.com/Skooma-Breath/Fetcher-Simulator/releases/download/Fetcher-Simulator/fetcher-bardcraft-umo.json",
+    [string] $ModListUrl = "https://github.com/Skooma-Breath/Fetcher-Simulator/releases/download/fetcher-tester-tools/fetcher-bardcraft-umo.json",
     [string] $UmoBasePath = "",
     [bool] $DownloadUmoIfMissing = $true,
     [string] $Tes3cmdPath = "",
@@ -254,6 +254,105 @@ function Resolve-SevenZipDirectory {
     }
 
     throw "Could not find the full 7z.exe. Install 7-Zip, put 7z.exe on PATH, or run with -SevenZipPath C:\path\to\7z.exe."
+}
+
+function Find-ManualModArchive {
+    param([Parameter(Mandatory = $true)][string] $ArchiveName)
+
+    $candidates = @(
+        (Join-Path $root $ArchiveName),
+        (Join-Path (Join-Path $root "_fetcher_umo\manual-downloads") $ArchiveName),
+        (Join-Path (Join-Path ([Environment]::GetFolderPath("UserProfile")) "Downloads") $ArchiveName)
+    )
+    foreach ($candidate in $candidates) {
+        if (Test-Path -LiteralPath $candidate -PathType Leaf) {
+            return (Resolve-Path -LiteralPath $candidate).Path
+        }
+    }
+    return $null
+}
+
+function Test-ManualModInstalled {
+    param([Parameter(Mandatory = $true)] $Mod)
+
+    $dataRoots = @()
+    foreach ($dataPath in @($Mod.data_paths)) {
+        $candidate = Join-Path (Join-Path (Join-Path $UmoBasePath $ModListName) ([string]$Mod.category)) ([string]$dataPath)
+        if (-not (Test-Path -LiteralPath $candidate -PathType Container)) {
+            return $false
+        }
+        $dataRoots += $candidate
+    }
+    foreach ($plugin in @($Mod.plugins)) {
+        if (-not ($dataRoots | Where-Object { Test-Path -LiteralPath (Join-Path $_ ([string]$plugin)) -PathType Leaf })) {
+            return $false
+        }
+    }
+    return $dataRoots.Count -gt 0
+}
+
+function Install-ManualModDownloads {
+    param(
+        [Parameter(Mandatory = $true)][string] $ListPath,
+        [Parameter(Mandatory = $true)][string] $SevenZipDirectory
+    )
+
+    $sevenZipExecutable = Join-Path $SevenZipDirectory "7z.exe"
+    # Windows PowerShell 5.1 writes a top-level JSON array as one pipeline
+    # object. Enumerate it explicitly so foreach receives each mod entry.
+    $parsedMods = Get-Content -Raw -LiteralPath $ListPath | ConvertFrom-Json
+    $mods = @($parsedMods | ForEach-Object { $_ })
+    foreach ($mod in $mods) {
+        if ([string]$mod.url -notmatch "^https://www\.moddb\.com/") {
+            continue
+        }
+        if (Test-ManualModInstalled -Mod $mod) {
+            Write-Host "$($mod.name) is already installed."
+            continue
+        }
+
+        foreach ($download in @($mod.download_info)) {
+            $archiveName = [string]$download.file_name
+            $archivePath = Find-ManualModArchive -ArchiveName $archiveName
+            if ($null -eq $archivePath) {
+                Write-Host "Opening the official ModDB download page for $($mod.name):"
+                Write-Host "  $($mod.url)"
+                Start-Process ([string]$mod.url)
+                [void](Read-Host "Download $archiveName into your Windows Downloads folder, then press Enter")
+                $archivePath = Find-ManualModArchive -ArchiveName $archiveName
+            }
+            if ($null -eq $archivePath) {
+                throw "Could not find $archiveName. Download it from $($mod.url) and run the installer again."
+            }
+
+            if ($download.PSObject.Properties.Name -contains "sha256") {
+                $expectedHash = ([string]$download.sha256).ToLowerInvariant()
+                $actualHash = (Get-FileHash -LiteralPath $archivePath -Algorithm SHA256).Hash.ToLowerInvariant()
+                if ($actualHash -ne $expectedHash) {
+                    throw "$archiveName checksum mismatch. Expected $expectedHash but got $actualHash."
+                }
+            }
+
+            $listRoot = [IO.Path]::GetFullPath((Join-Path $UmoBasePath $ModListName)).TrimEnd("\") + "\"
+            $targetRoot = [IO.Path]::GetFullPath((Join-Path (Join-Path $listRoot ([string]$mod.category)) ([string]$download.extract_to)))
+            if (-not $targetRoot.StartsWith($listRoot, [StringComparison]::OrdinalIgnoreCase)) {
+                throw "Manual mod extraction path escapes the UMO list root: $targetRoot"
+            }
+            if (Test-Path -LiteralPath $targetRoot) {
+                Remove-Item -LiteralPath $targetRoot -Recurse -Force
+            }
+            New-Item -ItemType Directory -Force -Path $targetRoot | Out-Null
+            Write-Host "Installing $($mod.name) from $archivePath..."
+            & $sevenZipExecutable x $archivePath "-o$targetRoot" -y -aoa | Out-Host
+            if ($LASTEXITCODE -ne 0) {
+                throw "$($mod.name) extraction failed with exit code $LASTEXITCODE."
+            }
+        }
+
+        if (-not (Test-ManualModInstalled -Mod $mod)) {
+            throw "$($mod.name) extracted, but its declared data path or plugin was not found."
+        }
+    }
 }
 
 function Assert-GitHubAssetChecksum {
@@ -601,6 +700,8 @@ Write-Host "Mods will be extracted under: $UmoBasePath\$ModListName"
 Invoke-Checked -Description "umo install $ModListName" -Command {
     & $umo install $ModListName
 }
+
+Install-ManualModDownloads -ListPath $ModListFile -SevenZipDirectory $sevenZipDirectory
 
 if ($ApplyBardcraftMultiplayerPatch) {
     Write-Host ""

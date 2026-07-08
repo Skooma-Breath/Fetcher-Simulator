@@ -5,24 +5,64 @@ $cfgPath = Join-Path $root "openmw.cfg"
 $umoModListName = "fetcher-bardcraft"
 $umoModListPath = Join-Path $root "fetcher-bardcraft-umo.json"
 
-$requiredContent = @(
+$baseContent = @(
     "Morrowind.esm",
     "Tribunal.esm",
-    "Bloodmoon.esm",
-    "Tamriel_Data.esm",
+    "Bloodmoon.esm"
+)
+$fetcherMapContent = @(
     "surf_mesa_mw.omwaddon",
     "surf_utopia_mw.omwaddon",
     "surf_kitsune.omwaddon",
     "surf_kitsune.omwscripts",
     "surf_kitsune2.omwaddon",
-    "mp_phase7_test.omwscripts",
-    "StatsWindow.ESP",
-    "StatsWindow.omwscripts",
-    "SkillFramework.omwscripts",
-    "Bardcraft.ESP",
-    "Bardcraft.omwscripts",
-    "Tamriel_Data.omwscripts"
+    "mp_phase7_test.omwscripts"
 )
+$earlyUmoContent = @(
+    "Tamriel_Data.esm",
+    "Tamriel_Data.omwscripts",
+    "OAAB_Data.esm",
+    "TR_Mainland.esm",
+    "TR_Factions.esp",
+    "tamrielrebuilt.omwscripts"
+)
+
+function Add-UniqueContent {
+    param(
+        [Parameter(Mandatory = $true)] $Target,
+        [Parameter(Mandatory = $true)][string] $Value
+    )
+    if (-not $Target.Contains($Value)) {
+        $Target.Add($Value)
+    }
+}
+
+$umoMods = @()
+if (Test-Path -LiteralPath $umoModListPath -PathType Leaf) {
+    $umoMods = @(Get-Content -Raw -LiteralPath $umoModListPath | ConvertFrom-Json)
+}
+$requiredContentList = New-Object System.Collections.Generic.List[string]
+foreach ($content in $baseContent) {
+    Add-UniqueContent -Target $requiredContentList -Value $content
+}
+foreach ($mod in $umoMods) {
+    foreach ($plugin in @($mod.plugins)) {
+        if ($earlyUmoContent -contains [string]$plugin) {
+            Add-UniqueContent -Target $requiredContentList -Value ([string]$plugin)
+        }
+    }
+}
+foreach ($content in $fetcherMapContent) {
+    Add-UniqueContent -Target $requiredContentList -Value $content
+}
+foreach ($mod in $umoMods) {
+    foreach ($plugin in @($mod.plugins)) {
+        if ($earlyUmoContent -notcontains [string]$plugin) {
+            Add-UniqueContent -Target $requiredContentList -Value ([string]$plugin)
+        }
+    }
+}
+$requiredContent = @($requiredContentList)
 
 if (-not (Test-Path -LiteralPath $cfgPath)) {
     throw "Could not find openmw.cfg next to this script: $cfgPath"

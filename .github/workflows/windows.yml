@@ -45,6 +45,9 @@ on:
       mod-bundle-asset:
         default: "openmw-client-mods.zip"
         type: string
+      include-tester-tools:
+        default: false
+        type: boolean
 
 jobs:
   Windows:
@@ -294,8 +297,8 @@ jobs:
         rm -rf install/bin
         rm -rf install/_deps
 
-    - name: Package bundled client mods
-      if: ${{ inputs.mod-bundle-url != '' || inputs.mod-bundle-release-tag != '' }}
+    - name: Configure portable Fetcher client
+      if: ${{ inputs.package }}
       shell: pwsh
       env:
         GH_TOKEN: ${{ github.token }}
@@ -309,7 +312,8 @@ jobs:
           -ModBundleUrl "${{ inputs.mod-bundle-url }}" `
           -ModBundleReleaseTag "${{ inputs.mod-bundle-release-tag }}" `
           -ModBundleAsset "${{ inputs.mod-bundle-asset }}" `
-          -Repository "${{ github.repository }}"
+          -Repository "${{ github.repository }}" `
+          -IncludeTesterTools ([bool]::Parse("${{ inputs.include-tester-tools }}"))
 
     - name: Generate CI-ID.txt
       shell: bash
@@ -323,7 +327,7 @@ jobs:
         if [ -d SymStore ]; then cp install/CI-ID.txt SymStore/CI-ID.txt; fi
 
     - name: Generate Fetcher client update inventory
-      if: ${{ inputs.package && inputs.release && inputs.release-tag == 'Fetcher-Simulator' }}
+      if: ${{ inputs.package && inputs.release && (inputs.release-tag == 'Fetcher-Simulator' || inputs.release-tag == 'Fetcher-Simulator-Test') }}
       shell: pwsh
       run: |
         ${{ github.workspace }}\CI\Build-FetcherClientInventory.ps1 `
@@ -460,9 +464,6 @@ jobs:
         }
         $zip = Join-Path $assets $zipName
         Compress-Archive -Path "$portableRoot\*" -DestinationPath $zip -CompressionLevel Optimal -Force
-        if ("${{ inputs.release-tag }}" -eq "Fetcher-Simulator") {
-          Copy-Item -LiteralPath (Join-Path $portableRoot "fetcher-bardcraft-umo.json") -Destination $assets -Force
-        }
 
     - name: Create OpenMW client prerelease
       if: ${{ inputs.release }}
