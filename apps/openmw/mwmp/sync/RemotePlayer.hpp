@@ -15,7 +15,7 @@
 namespace mwmp
 {
     // -----------------------------------------------------------------------
-    // RemotePlayer — represents one other connected player in our game world.
+    // RemotePlayer â€” represents one other connected player in our game world.
     //
     // Lifecycle:
     //   1. Constructed when server sends PlayerBaseInfo for a new guid.
@@ -50,7 +50,7 @@ namespace mwmp
 
         // Unreliable per-frame: apply movement/action flags to CharacterController
         // so the vanilla animation system drives locomotion automatically.
-        void onAnimFlagsUpdate   (const BasePlayer& state);
+        void onAnimFlagsUpdate   (const BasePlayer& state, uint32_t sequence = 0);
 
         // Reliable one-shot: explicitly trigger an animation group on the remote NPC.
         void onAnimPlay          (const BasePlayer& state);
@@ -115,7 +115,7 @@ namespace mwmp
         {
             float cx = 0.f, cy = 0.f, cz = 0.f;
             float tx = 0.f, ty = 0.f, tz = 0.f;
-            // Last position received from network — used to cap XY dead-reckoning
+            // Last position received from network â€” used to cap XY dead-reckoning
             // drift so a stale velocity can't walk the target off indefinitely.
             float lastRecvX = 0.f, lastRecvY = 0.f, lastRecvZ = 0.f;
             float crx = 0.f, cry = 0.f, crz = 0.f;
@@ -137,12 +137,15 @@ namespace mwmp
         // CharacterController via a user-value on the NPC base node so that
         // animation rate tracks actual movement instead of stats-based speed.
         float mInterpPlanarSpeed = 0.f;
+        bool mLocomotionVisuallySuppressed = false;
+        float mLastAppliedInterpPos[3] = { 0.f, 0.f, 0.f };
+        bool mHasAppliedInterpPos = false;
 
         // --- anim flag state (last applied, for delta suppression) ---
         AnimFlags mLastAppliedAnimFlags;
         uint32_t mAppliedHitFlags = 0;
 
-        // Edge-detect for MF_JUMP — trigger "jump"/"jump landing" anim once on
+        // Edge-detect for MF_JUMP â€” trigger "jump"/"jump landing" anim once on
         // rising/falling edge.  We never write mPosition[2] for remote players
         // because that feeds handleJump() in PhysicsSystem which imparts a real
         // upward velocity impulse every frame and fights the Z interpolator.
@@ -160,10 +163,39 @@ namespace mwmp
         float mTimeSinceLastPosUpdate = 0.f;
         uint32_t mLastCellChangeSequence = 0;
         uint32_t mLastPositionSequence = 0;
+        uint32_t mLastAnimFlagsSequence = 0;
+        uint64_t mLastPositionReceiveMs = 0;
+        float mMovementDiagTimer = 0.f;
+        std::size_t mMovementDiagFrames = 0;
+        std::size_t mMovementDiagMovingFrames = 0;
+        std::size_t mMovementDiagPackets = 0;
+        std::size_t mMovementDiagChangedPackets = 0;
+        std::size_t mMovementDiagStalePackets = 0;
+        float mMovementDiagDistance = 0.f;
+        float mMovementDiagVisualSpeedMax = 0.f;
+        float mMovementDiagFrameDtMax = 0.f;
+        std::size_t mMovementDiagFrameStalls = 0;
+        std::size_t mMovementDiagZeroSpeedMoveFrames = 0;
+        double mMovementDiagPacketGapTotalMs = 0.0;
+        float mMovementDiagPacketGapMaxMs = 0.f;
+        std::size_t mMovementDiagPacketGapSamples = 0;
+        std::size_t mMovementDiagPacketGapsOver50Ms = 0;
+        std::size_t mMovementDiagPacketGapsOver100Ms = 0;
+        std::size_t mMovementDiagPacketBurstsUnder10Ms = 0;
+        float mMovementDiagReceivedStepTotal = 0.f;
+        float mMovementDiagReceivedStepMax = 0.f;
+        float mMovementDiagTargetErrorTotal = 0.f;
+        float mMovementDiagTargetErrorMax = 0.f;
+        std::size_t mMovementDiagTargetErrorSamples = 0;
+        float mMovementDiagPacketAgeMax = 0.f;
+        std::size_t mMovementDiagApplyMoves = 0;
+        std::size_t mMovementDiagApplySkips = 0;
+        std::size_t mMovementDiagExtrapolationClamps = 0;
+        std::size_t mMovementDiagQuietWindows = 0;
     };
 
     // -----------------------------------------------------------------------
-    // PlayerList — owns all RemotePlayers, drives their update loop.
+    // PlayerList â€” owns all RemotePlayers, drives their update loop.
     // -----------------------------------------------------------------------
     class PlayerList
     {

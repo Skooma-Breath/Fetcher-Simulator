@@ -759,24 +759,12 @@ namespace
         const std::array<mwmp::EquipmentItem, mwmp::BasePlayer::NUM_EQUIPMENT_SLOTS>& incoming,
         const std::array<mwmp::EquipmentItem, mwmp::BasePlayer::NUM_EQUIPMENT_SLOTS>& restored)
     {
-        const std::size_t restoredCount = equippedItemCount(restored);
-        if (restoredCount == 0 || sameEquipmentSnapshot(incoming, restored)
-            || sameCosmeticEquipmentSnapshot(incoming, restored))
-            return false;
-        if (equippedItemCount(incoming) < restoredCount)
-            return true;
-
-        for (int slot = 0; slot < mwmp::BasePlayer::NUM_EQUIPMENT_SLOTS; ++slot)
-        {
-            const mwmp::EquipmentItem& restoredEntry = restored[slot];
-            if (restoredEntry.item.refId.empty() || restoredEntry.item.count <= 0)
-                continue;
-
-            const mwmp::EquipmentItem& incomingEntry = incoming[slot];
-            if (!sameCosmeticItemStack(incomingEntry.item, restoredEntry.item))
-                return true;
-        }
-        return false;
+        // Until the client echoes the restored snapshot, every slot is server
+        // authoritative, including intentionally empty slots.  Treating a
+        // superset as valid allowed OpenMW's startup auto-equip pass to fill those
+        // empty slots and immediately overwrite the database snapshot.
+        return !sameEquipmentSnapshot(incoming, restored)
+            && !sameCosmeticEquipmentSnapshot(incoming, restored);
     }
 
     void applyContainerDelta(std::vector<mwmp::ContainerItem>& items,
@@ -1655,8 +1643,12 @@ void MPServer::run()
         mLua.drainOutbound();
         syncLuaSnapshot();
 
-        // 20 Hz server tick
-        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        // Keep the network relay responsive independently of simulation/Lua
+        // cadence.  At 50 ms, busy actor cells let actor traffic accumulate in
+        // front of player movement and turn a single receive pass into 100-250 ms
+        // bursts.  tick() is elapsed-time based and Lua owns its own 60 Hz thread,
+        // so polling at 5 ms reduces relay latency without speeding game time.
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
     }
 
     shutdown();
@@ -1731,14 +1723,43 @@ void MPServer::processIncomingMessages()
     ISteamNetworkingMessage* msgs[MAX_MSGS];
 
     int n = mInterface->ReceiveMessagesOnPollGroup(mPollGroup, msgs, MAX_MSGS);
+
+    // Actor-heavy cells can fill a receive batch with replaceable NPC state.
+    // Preserve order within each class, but handle system/player/chat traffic
+    // before actor and world traffic so gameplay packets never wait behind an
+    // entire ActorSync batch.
+    auto packetPriority = [](const ISteamNetworkingMessage* msg)
+    {
+        PacketHeader header;
+        if (!BasePacket::peekHeader(static_cast<const uint8_t*>(msg->m_pData),
+                static_cast<std::size_t>(msg->m_cbSize), header))
+            return 4;
+
+        const auto type = static_cast<PacketType>(header.type);
+        if (header.type <= static_cast<uint16_t>(PacketType::CharacterSelectError)
+            || type == PacketType::Challenge
+            || type == PacketType::ChallengeResponse)
+            return 0;
+        if (header.type >= static_cast<uint16_t>(PacketType::PlayerBaseInfo)
+            && header.type <= static_cast<uint16_t>(PacketType::ChatMessage))
+            return 1;
+        if (header.type >= static_cast<uint16_t>(PacketType::ActorList)
+            && header.type <= static_cast<uint16_t>(PacketType::ActorAttackV2))
+            return 3;
+        return 2;
+    };
+    std::stable_sort(msgs, msgs + n, [&](const auto* lhs, const auto* rhs) {
+        return packetPriority(lhs) < packetPriority(rhs);
+    });
+
     for (int i = 0; i < n; ++i)
     {
         auto* msg = msgs[i];
-        auto  it  = mClients.find(msg->m_conn);
+        auto it = mClients.find(msg->m_conn);
         if (it != mClients.end())
             onClientMessage(it->second,
-                            static_cast<const uint8_t*>(msg->m_pData),
-                            static_cast<size_t>(msg->m_cbSize));
+                static_cast<const uint8_t*>(msg->m_pData),
+                static_cast<std::size_t>(msg->m_cbSize));
         msg->Release();
     }
 }
@@ -1758,6 +1779,16 @@ void MPServer::onClientConnected(HSteamNetConnection conn)
     mClients.emplace(conn, client);
 
     mInterface->SetConnectionPollGroup(conn, mPollGroup);
+    // Lane 0 carries player/chat/system traffic. Lane 1 carries ActorSync.
+    // Strict lane priority prevents large reliable actor baselines from adding
+    // hundreds of milliseconds of head-of-line delay to PlayerPosition.
+    const int lanePriorities[2] = { 0, 1 };
+    const uint16 laneWeights[2] = { 1, 1 };
+    const EResult laneResult = mInterface->ConfigureConnectionLanes(
+        conn, 2, lanePriorities, laneWeights);
+    if (laneResult != k_EResultOK)
+        Log(Debug::Warning) << "[Server] Failed to configure network lanes conn=" << conn
+                            << " result=" << static_cast<int>(laneResult);
     Log(Debug::Info) << "[Server] Client connected, conn=" << conn;
 }
 
@@ -2626,23 +2657,46 @@ bool MPServer::validateActorUpdate(const ConnectedClient& c, const ActorList& ac
 
 MPServer::ActorRegistryRecord* MPServer::findTrackedActor(CellActorState& cellState,
     const BaseActor& actor,
-    const ConnectedClient& sender,
+    ConnectedClient& sender,
     const char* packetName)
 {
     const auto it = cellState.actors.find(makeActorKey(actor));
     if (it != cellState.actors.end())
         return &it->second;
 
-    std::ostringstream message;
-    message << "[Server] Ignoring late " << packetName
-            << " from " << sender.name
-            << " for unknown actor refId=" << actor.refId
-            << " refNum=" << actor.refNum
-            << " mpNum=" << actor.mpNum
-            << " cell=" << actor.cellId;
     const bool noisyPacket = std::strcmp(packetName, "ActorPosition") == 0
         || std::strcmp(packetName, "ActorAttack") == 0;
-    Log(noisyPacket ? Debug::Verbose : Debug::Info) << message.str();
+    if (noisyPacket)
+    {
+        Log(Debug::Verbose) << "[Server] Ignoring late " << packetName
+                            << " from " << sender.name
+                            << " for unknown actor refId=" << actor.refId
+                            << " refNum=" << actor.refNum
+                            << " mpNum=" << actor.mpNum
+                            << " cell=" << actor.cellId;
+        return nullptr;
+    }
+
+    // Unknown reliable actor updates can repeat every frame when an old client
+    // keeps a dead/removed vanilla actor in its authority scan.  Keep the first
+    // diagnostic useful without turning that condition into synchronous log I/O
+    // hundreds of times per second.
+    const std::string logKey = std::string(packetName) + '\n' + actor.cellId + '\n' + makeActorKey(actor);
+    const uint64_t nowMs = currentServerTimeMs();
+    if (sender.lastUnknownActorLogMs.size() >= 1024
+        && sender.lastUnknownActorLogMs.find(logKey) == sender.lastUnknownActorLogMs.end())
+        sender.lastUnknownActorLogMs.clear();
+    uint64_t& lastLogMs = sender.lastUnknownActorLogMs[logKey];
+    if (lastLogMs == 0 || nowMs - lastLogMs >= 2000)
+    {
+        lastLogMs = nowMs;
+        Log(Debug::Info) << "[Server] Ignoring late " << packetName
+                         << " from " << sender.name
+                         << " for unknown actor refId=" << actor.refId
+                         << " refNum=" << actor.refNum
+                         << " mpNum=" << actor.mpNum
+                         << " cell=" << actor.cellId;
+    }
     return nullptr;
 }
 
@@ -3362,7 +3416,9 @@ void MPServer::broadcastActorPresentationV2ToCell(
         PacketActorPresentationV2 pkt;
         pkt.setPresentationList(&presentationList);
         const std::vector<uint8_t> encoded = pkt.encode();
-        sendTo(conn, encoded, /*reliable=*/true);
+        // Presentation snapshots are superseded by newer sequence numbers. Do
+        // not place them ahead of chat/player edges on the reliable stream.
+        sendTo(conn, encoded, /*reliable=*/false);
         client.actorV2PresentationSentWindow += presentationList.snapshots.size();
         client.actorV2PresentationBytesSentWindow += encoded.size();
     }
@@ -4921,6 +4977,7 @@ void MPServer::handlePlayerPosition(ConnectedClient& c, const uint8_t* data, siz
     PacketPlayerPosition pkt;
     pkt.setPlayer(&proposed);
     if (!pkt.decode(data, size)) return;
+
     bool forceReliableTeleportRelay = false;
 
     if (c.pendingScriptedTeleportAck)
@@ -5518,7 +5575,7 @@ void MPServer::handleActorList(ConnectedClient& c, const uint8_t* data, size_t s
 
     std::unordered_set<uint32_t> currentSpawnedActorMpNums;
     std::unordered_set<std::string> migratedActorCells;
-    std::unordered_set<std::string> canonicalDeadVanillaCellsToResend;
+    std::unordered_map<std::string, std::vector<BaseActor>> canonicalDeadVanillaCorrections;
     std::size_t staleDeadVanillaCorrections = 0;
     std::size_t missingIdentityDropped = 0;
     std::size_t ambiguousIdentityNormalized = 0;
@@ -5605,8 +5662,8 @@ void MPServer::handleActorList(ConnectedClient& c, const uint8_t* data, size_t s
                 {
                     lastResendMs = nowMs;
                     ++staleDeadVanillaCorrections;
-                    canonicalDeadVanillaCellsToResend.insert(deadCellId);
-                    Log(Debug::Info) << "[Server] ActorList suppressed stale live vanilla actor for canonical corpse"
+                    canonicalDeadVanillaCorrections[deadCellId].push_back(deadRecord->actor);
+                    Log(Debug::Verbose) << "[Server] ActorList suppressed stale live vanilla actor for canonical corpse"
                                      << " from=" << c.name
                                      << " refId=" << deadRecord->actor.refId
                                      << " refNum=" << deadRecord->actor.refNum
@@ -5953,19 +6010,42 @@ void MPServer::handleActorList(ConnectedClient& c, const uint8_t* data, size_t s
     broadcastActorAuthorityLeasesForCell(incoming.cellId, cellState);
     if (staleDeadVanillaCorrections != 0)
     {
-        Log(Debug::Info) << "[Server] ActorList replaying canonical dead vanilla state"
-                         << " staleLiveReports=" << staleDeadVanillaCorrections
-                         << " cells=" << canonicalDeadVanillaCellsToResend.size()
-                         << " sourceCell=" << incoming.cellId
-                         << " count=" << staleDeadVanillaCorrections;
+        Log(Debug::Verbose) << "[Server] ActorList correcting stale live canonical corpse"
+                            << " staleLiveReports=" << staleDeadVanillaCorrections
+                            << " cells=" << canonicalDeadVanillaCorrections.size()
+                            << " sourceCell=" << incoming.cellId
+                            << " count=" << staleDeadVanillaCorrections;
     }
-    for (const std::string& deadCellId : canonicalDeadVanillaCellsToResend)
+    for (auto& [deadCellId, deadActors] : canonicalDeadVanillaCorrections)
     {
-        Log(Debug::Verbose) << "[Server] ActorList resending canonical corpse cell"
+        const auto deadCellIt = mWorld.actorCells.find(deadCellId);
+        CellActorState* deadCellState
+            = deadCellIt != mWorld.actorCells.end() ? &deadCellIt->second : nullptr;
+
+        ActorList correction;
+        correction.cellId = deadCellId;
+        correction.isAuthority = false;
+        correction.authorityGuid = deadCellState ? deadCellState->authorityGuid : 0;
+        correction.authorityGeneration = deadCellState ? deadCellState->authorityGeneration : 0;
+        correction.snapshotSequence = deadCellState ? deadCellState->nextSnapshotSequence++ : 0;
+        correction.serverTimestamp = incoming.serverTimestamp;
+        correction.actors.reserve(deadActors.size());
+        for (BaseActor& actor : deadActors)
+        {
+            actor.isDead = true;
+            actor.isInstantDeath = true;
+            actor.cellId = deadCellId;
+            actor.dynamicStats.health.current = std::min(0.f, actor.dynamicStats.health.current);
+            correction.actors.push_back(std::move(actor));
+        }
+
+        PacketActorDeath deathPacket;
+        deathPacket.setActorList(&correction);
+        sendTo(c.conn, deathPacket.encode());
+        Log(Debug::Verbose) << "[Server] ActorList sent targeted canonical corpse correction"
                             << " cell=" << deadCellId
                             << " sourceCell=" << incoming.cellId
-                            << " staleLiveReports=" << staleDeadVanillaCorrections;
-        sendActorStateToInterestedClients(deadCellId);
+                            << " actors=" << correction.actors.size();
     }
 }
 
@@ -9612,6 +9692,40 @@ void MPServer::syncLuaAuthorityState()
 }
 
 // ---------------------------------------------------------------------------
+EResult MPServer::sendPacketOnConfiguredLane(HSteamNetConnection conn,
+                                              const std::vector<uint8_t>& data,
+                                              int flags)
+{
+    if (data.empty())
+        return k_EResultInvalidParam;
+
+    PacketHeader header;
+    const bool hasHeader = BasePacket::peekHeader(data.data(), data.size(), header);
+    const bool actorPacket = hasHeader
+        && header.type >= static_cast<uint16_t>(PacketType::ActorList)
+        && header.type <= static_cast<uint16_t>(PacketType::ActorAttackV2);
+
+    if (!actorPacket)
+    {
+        return mInterface->SendMessageToConnection(
+            conn, data.data(), static_cast<uint32_t>(data.size()), flags, nullptr);
+    }
+
+    SteamNetworkingMessage_t* message = SteamNetworkingUtils()->AllocateMessage(
+        static_cast<int>(data.size()));
+    if (!message)
+        return k_EResultFail;
+    std::memcpy(message->m_pData, data.data(), data.size());
+    message->m_conn = conn;
+    message->m_nFlags = flags;
+    message->m_idxLane = 1;
+
+    int64 result = 0;
+    mInterface->SendMessages(1, &message, &result);
+    return result < 0 ? static_cast<EResult>(-result) : k_EResultOK;
+}
+
+// ---------------------------------------------------------------------------
 void MPServer::broadcastToAll(const std::vector<uint8_t>& data,
                               HSteamNetConnection except, bool reliable)
 {
@@ -9620,8 +9734,7 @@ void MPServer::broadcastToAll(const std::vector<uint8_t>& data,
     for (auto& [conn, client] : mClients)
     {
         if (conn == except || !client.charSelectComplete) continue;
-        mInterface->SendMessageToConnection(
-            conn, data.data(), static_cast<uint32_t>(data.size()), flags, nullptr);
+        sendPacketOnConfiguredLane(conn, data, flags);
     }
 }
 
@@ -9630,8 +9743,7 @@ void MPServer::sendTo(HSteamNetConnection conn,
 {
     int flags = reliable ? k_nSteamNetworkingSend_Reliable
                          : k_nSteamNetworkingSend_UnreliableNoDelay;
-    mInterface->SendMessageToConnection(
-        conn, data.data(), static_cast<uint32_t>(data.size()), flags, nullptr);
+    sendPacketOnConfiguredLane(conn, data, flags);
 }
 
 void MPServer::broadcastToCell(const std::string& cellId,
@@ -9645,8 +9757,7 @@ void MPServer::broadcastToCell(const std::string& cellId,
     {
         if (conn == except || !client.charSelectComplete) continue;
         if (!cellMatches(client.player.cell, cellId)) continue;
-        mInterface->SendMessageToConnection(
-            conn, data.data(), static_cast<uint32_t>(data.size()), flags, nullptr);
+        sendPacketOnConfiguredLane(conn, data, flags);
     }
 }
 
@@ -9660,8 +9771,7 @@ void MPServer::broadcastActorToCell(const std::string& cellId,
     for (auto& [conn, client] : mClients)
     {
         if (conn == except || !clientHasActorCellLoaded(client, cellId)) continue;
-        mInterface->SendMessageToConnection(
-            conn, data.data(), static_cast<uint32_t>(data.size()), flags, nullptr);
+        sendPacketOnConfiguredLane(conn, data, flags);
     }
 }
 

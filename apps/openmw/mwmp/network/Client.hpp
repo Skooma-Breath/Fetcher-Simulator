@@ -93,6 +93,7 @@ namespace mwmp
         void onConnectionStatusChanged(SteamNetConnectionStatusChangedCallback_t* info);
         void processIncomingMessages();
         void setState(ConnectionState newState);
+        EResult sendOnConfiguredLane(const std::vector<uint8_t>& data, int flags);
 
         ISteamNetworkingSockets* mInterface    = nullptr;
         HSteamNetConnection      mConnection   = k_HSteamNetConnection_Invalid;

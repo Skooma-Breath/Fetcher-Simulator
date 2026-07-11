@@ -2974,6 +2974,21 @@ namespace MWMechanics
                 }
             }
 
+#ifdef BUILD_MULTIPLAYER
+            // Remote player NPCs are kinematic network puppets. Their movement
+            // settings above still select and advance the vanilla locomotion
+            // animation, but RemotePlayer owns world translation through its
+            // interpolated authoritative position. Letting CharacterController
+            // also queue physical motion double-drives the proxy; rough collision
+            // (notably Sandriver) then alternately blocks and releases it, producing
+            // the visible quarter-second stop/start "flipbook" effect.
+            const bool isNetworkPlayerPuppet = !isPlayer && cls.isActor()
+                && cls.getCreatureStats(mPtr).getMovementFlag(
+                    MWMechanics::CreatureStats::Flag_NetworkPlayerNpc);
+            if (isNetworkPlayerPuppet)
+                movement = osg::Vec3f();
+#endif
+
             movement.x() *= scale;
             movement.y() *= scale;
             world->queueMovement(mPtr, movement);

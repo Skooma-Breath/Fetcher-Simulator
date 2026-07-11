@@ -5843,12 +5843,15 @@ namespace mwmp
 
             const float prevHealth = (prevIt != cell.actors.end())
                 ? prevIt->second.state.dynamicStats.health.current : actor.dynamicStats.health.base;
-            // Send stats whenever health changes by more than 0.5 HP or on first send.
+            // The full ActorList baseline already carries dynamic stats for a
+            // newly observed actor.  Only send the separate reliable stats packet
+            // for a change from a tracked baseline.  Sending it for firstSeen made
+            // actors that flicker in and out of an authority scan (notably dead
+            // vanilla actors) emit an ActorStatsDynamic packet every scan.
             const float healthDelta = std::abs(actor.dynamicStats.health.current - prevHealth);
-            if (healthDelta > 0.5f || prevIt == cell.actors.end())
+            if (prevIt != cell.actors.end() && healthDelta > 0.5f)
             {
-                const bool firstSeen = prevIt == cell.actors.end();
-                const bool importantHealthChange = !firstSeen && healthDelta > 0.5f
+                const bool importantHealthChange = healthDelta > 0.5f
                     && (actor.mpNum != 0 || actor.ai.type == BaseActor::AIAction::Type::Combat
                         || actor.isAttackingOrCasting);
                 Log(importantHealthChange ? Debug::Info : Debug::Verbose)
@@ -5857,7 +5860,7 @@ namespace mwmp
                     << " prev=" << prevHealth
                     << " cur=" << actor.dynamicStats.health.current
                     << " dead=" << actor.isDead
-                    << " firstSeen=" << firstSeen;
+                    << " firstSeen=0";
                 statsUpdate.actors.push_back(actor);
             }
 
@@ -6216,7 +6219,10 @@ namespace mwmp
         {
             PacketActorPresentationV2 presentationPacket;
             presentationPacket.setPresentationList(&presentationUpdate);
-            mClient.sendReliable(presentationPacket.encode());
+            // Presentation is replaceable sequenced state, not an event. Keeping
+            // it on the reliable stream lets busy NPC cells head-of-line block
+            // chat and reliable player movement edges.
+            mClient.sendUnreliable(presentationPacket.encode());
             mActorV2PresentationSentWindow += presentationUpdate.snapshots.size();
         }
 

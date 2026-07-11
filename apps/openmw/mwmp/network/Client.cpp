@@ -3,8 +3,10 @@
 
 #include <iostream>
 #include <stdexcept>
+#include <cstring>
 
 #include <components/debug/debuglog.hpp>
+#include <components/openmw-mp/Packets/BasePacket.hpp>
 
 namespace mwmp
 {
@@ -115,9 +117,7 @@ namespace mwmp
         if (mState != ConnectionState::Connected || data.empty())
             return;
 
-        auto result = mInterface->SendMessageToConnection(
-            mConnection, data.data(), static_cast<uint32_t>(data.size()),
-            k_nSteamNetworkingSend_Reliable, nullptr);
+        auto result = sendOnConfiguredLane(data, k_nSteamNetworkingSend_Reliable);
 
         if (result == k_EResultOK)
         {
@@ -134,9 +134,7 @@ namespace mwmp
         if (mState != ConnectionState::Connected || data.empty())
             return;
 
-        auto result = mInterface->SendMessageToConnection(
-            mConnection, data.data(), static_cast<uint32_t>(data.size()),
-            k_nSteamNetworkingSend_UnreliableNoDelay, nullptr);
+        auto result = sendOnConfiguredLane(data, k_nSteamNetworkingSend_UnreliableNoDelay);
 
         if (result == k_EResultOK)
         {
@@ -164,6 +162,34 @@ namespace mwmp
 
             msg->Release();
         }
+    }
+
+    // -----------------------------------------------------------------------
+    EResult NetworkClient::sendOnConfiguredLane(const std::vector<uint8_t>& data, int flags)
+    {
+        PacketHeader header;
+        const bool actorPacket = BasePacket::peekHeader(data.data(), data.size(), header)
+            && header.type >= static_cast<uint16_t>(PacketType::ActorList)
+            && header.type <= static_cast<uint16_t>(PacketType::ActorAttackV2);
+
+        if (!actorPacket)
+        {
+            return mInterface->SendMessageToConnection(
+                mConnection, data.data(), static_cast<uint32_t>(data.size()), flags, nullptr);
+        }
+
+        SteamNetworkingMessage_t* message = SteamNetworkingUtils()->AllocateMessage(
+            static_cast<int>(data.size()));
+        if (!message)
+            return k_EResultFail;
+        std::memcpy(message->m_pData, data.data(), data.size());
+        message->m_conn = mConnection;
+        message->m_nFlags = flags;
+        message->m_idxLane = 1;
+
+        int64 result = 0;
+        mInterface->SendMessages(1, &message, &result);
+        return result < 0 ? static_cast<EResult>(-result) : k_EResultOK;
     }
 
     // -----------------------------------------------------------------------
@@ -195,8 +221,16 @@ namespace mwmp
                 break;
 
             case k_ESteamNetworkingConnectionState_Connected:
+            {
+                const int lanePriorities[2] = { 0, 1 };
+                const uint16 laneWeights[2] = { 1, 1 };
+                const EResult laneResult = mInterface->ConfigureConnectionLanes(
+                    mConnection, 2, lanePriorities, laneWeights);
+                if (laneResult != k_EResultOK)
+                    Log(Debug::Warning) << "[MP] ConfigureConnectionLanes failed: " << laneResult;
                 setState(ConnectionState::Connected);
                 break;
+            }
 
             case k_ESteamNetworkingConnectionState_ClosedByPeer:
             case k_ESteamNetworkingConnectionState_ProblemDetectedLocally:

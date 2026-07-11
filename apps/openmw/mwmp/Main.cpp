@@ -4,6 +4,7 @@
 #include "sha256.hpp"
 #include <algorithm>
 #include <cctype>
+#include <chrono>
 #include <cstdio>
 #include <cstring>
 #include <fstream>
@@ -265,12 +266,12 @@ void Main::frame(float dt)
     if (mNetworkBridge && mClient->isConnected())
         mNetworkBridge->drainOutgoing(*mClient);
 
-    // Handle unexpected server disconnect — return player to main menu.
+    // Handle unexpected server disconnect Ã¢â‚¬â€ return player to main menu.
     if (mUnexpectedDisconnect)
     {
         mUnexpectedDisconnect = false;
         mCharGenWatching = false;
-        Log(Debug::Warning) << "[MP] Unexpected disconnect — returning to main menu";
+        Log(Debug::Warning) << "[MP] Unexpected disconnect Ã¢â‚¬â€ returning to main menu";
         MWBase::Environment::get().getStateManager()->returnToMainMenu();
         return;
     }
@@ -290,7 +291,7 @@ void Main::frame(float dt)
     mChatWindow->update(dt);
     pollChargenAppearance(dt);
 
-    // ── Chargen completion watcher ──────────────────────────────────────────
+    // Ã¢â€â‚¬Ã¢â€â‚¬ Chargen completion watcher Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
     // Fires once when the player is in a cell after chargen dialogs are shown.
     if (mCharGenWatching && mIsNewCharacter)
     {
@@ -305,7 +306,7 @@ void Main::frame(float dt)
                 mCharGenWatching = false;
                 mIsNewCharacter  = false;
 
-                Log(Debug::Info) << "[MP] Chargen complete — notifying server";
+                Log(Debug::Info) << "[MP] Chargen complete Ã¢â‚¬â€ notifying server";
 
                 sendChargenUpdate(true, "complete", true);
 
@@ -437,7 +438,7 @@ void Main::pollChargenAppearance(float dt)
 // ---------------------------------------------------------------------------
 void Main::onConnected()
 {
-    Log(Debug::Info) << "[MP] Connected — sending handshake";
+    Log(Debug::Info) << "[MP] Connected Ã¢â‚¬â€ sending handshake";
 
     // Build and send handshake
     PacketHandshake hs;
@@ -500,7 +501,7 @@ void Main::onDisconnected()
 {
     Log(Debug::Warning) << "[MP] Disconnected from server";
     // If we were already in-world, request a main-menu return on the next frame.
-    // Do NOT touch engine state here — this fires inside mClient->update() and
+    // Do NOT touch engine state here Ã¢â‚¬â€ this fires inside mClient->update() and
     // must remain engine-API-free to stay thread-safe.
     if (mWorldReady)
         mUnexpectedDisconnect = true;
@@ -830,7 +831,7 @@ void Main::registerProtocolHandlers()
             // mWorldReady is set when PacketCharacterList arrives.
         });
 
-    // --- Ed25519 challenge — server sends 32-byte nonce, we sign and respond ---
+    // --- Ed25519 challenge Ã¢â‚¬â€ server sends 32-byte nonce, we sign and respond ---
     proto.registerHandler(PacketType::Challenge,
         [this](const uint8_t* data, size_t size)
         {
@@ -857,7 +858,7 @@ void Main::registerProtocolHandlers()
     Log(Debug::Info) << "[MP] Challenge handler registered, type="
                      << static_cast<int>(PacketType::Challenge);
 
-// --- Character list — arrives immediately after accepted handshake ---
+// --- Character list Ã¢â‚¬â€ arrives immediately after accepted handshake ---
     proto.registerHandler(PacketType::CharacterList,
         [this](const uint8_t* data, size_t size)
         {
@@ -882,7 +883,7 @@ void Main::registerProtocolHandlers()
             tryAutoSelectCharacter();
         });
 
-    // --- Character select error — server rejected the CharacterSelect request ---
+    // --- Character select error Ã¢â‚¬â€ server rejected the CharacterSelect request ---
     proto.registerHandler(PacketType::CharacterSelectError,
         [this](const uint8_t* data, size_t size)
         {
@@ -910,7 +911,7 @@ void Main::registerProtocolHandlers()
                              << " char='" << rsp.charName << "'"
                              << (rsp.success ? "" : " error=" + rsp.error);
         });
-// --- Character data — arrives after client sends PacketCharacterSelect ---
+// --- Character data Ã¢â‚¬â€ arrives after client sends PacketCharacterSelect ---
     proto.registerHandler(PacketType::CharacterData,
         [this](const uint8_t* data, size_t size)
         {
@@ -992,7 +993,7 @@ void Main::registerProtocolHandlers()
             }
             // NOTE: do NOT call forceFullSync() here for returning players.
             // At this point world->getPlayerPtr() still has the blank template
-            // NPC record — setPlayerRace() has not been called yet.
+            // NPC record Ã¢â‚¬â€ setPlayerRace() has not been called yet.
             // CharacterSelectDialog::startReturningPlayer() calls forceFullSync()
             // *after* setPlayerRace() so the BaseInfo packet carries the real
             // race/head/hair. New characters use the chargen-complete watcher.
@@ -1047,7 +1048,7 @@ void Main::registerProtocolHandlers()
             if (tmp.guid == 0)
             {
                 Log(Debug::Warning) << "[MP] BaseInfo received with guid=0 for player '"
-                                    << tmp.name << "' — ignoring (stale pre-handshake packet)";
+                                    << tmp.name << "' Ã¢â‚¬â€ ignoring (stale pre-handshake packet)";
                 return;
             }
 
@@ -1065,7 +1066,7 @@ void Main::registerProtocolHandlers()
                 mPlayerList->addPlayer(tmp.guid, tmp.name);
                 Log(Debug::Info) << "[MP] Player joined: " << tmp.name
                                  << " (guid=" << tmp.guid << ")";
-                // Populate appearance on the new RemotePlayer immediately —
+                // Populate appearance on the new RemotePlayer immediately Ã¢â‚¬â€
                 // addPlayer() only sets the name; race/head/hair live in onBaseInfoUpdate.
                 rp = mPlayerList->getPlayer(tmp.guid);
             }
@@ -1229,7 +1230,7 @@ void Main::registerProtocolHandlers()
             if (tmp.guid == mPlayerSync->localPlayer().guid) return;
 
             auto* rp = mPlayerList->getPlayer(tmp.guid);
-            if (rp) rp->onAnimFlagsUpdate(tmp);
+            if (rp) rp->onAnimFlagsUpdate(tmp, pkt.getSequence());
         });
 
     // --- Remote player one-shot animation ---
@@ -1301,18 +1302,39 @@ void Main::registerProtocolHandlers()
     proto.registerHandler(PacketType::PlayerInventory,
         [this](const uint8_t* data, size_t size)
         {
+            using Clock = std::chrono::steady_clock;
+            const auto started = Clock::now();
+
             BasePlayer tmp;
             PacketPlayerInventory pkt;
             pkt.setPlayer(&tmp);
             if (!pkt.decode(data, size)) return;
-            if (tmp.guid == mPlayerSync->localPlayer().guid)
-            {
+            const auto decoded = Clock::now();
+
+            const bool localInventory = tmp.guid == mPlayerSync->localPlayer().guid;
+            if (localInventory)
                 mPlayerSync->queueAuthoritativeInventory(tmp);
-                return;
+            else
+            {
+                auto* rp = mPlayerList->getPlayer(tmp.guid);
+                if (rp) rp->onInventoryUpdate(tmp);
             }
 
-            auto* rp = mPlayerList->getPlayer(tmp.guid);
-            if (rp) rp->onInventoryUpdate(tmp);
+            const auto finished = Clock::now();
+            const double totalMs = std::chrono::duration<double, std::milli>(finished - started).count();
+            if (totalMs >= 8.0)
+            {
+                Log(totalMs >= 50.0 ? Debug::Warning : Debug::Info)
+                    << "[MPDIAG] PlayerInventory handler breakdown"
+                    << " guid=" << tmp.guid
+                    << " local=" << localInventory
+                    << " action=" << static_cast<int>(tmp.inventoryChanges.action)
+                    << " items=" << tmp.inventoryChanges.items.size()
+                    << " bytes=" << size
+                    << " decodeMs=" << std::chrono::duration<double, std::milli>(decoded - started).count()
+                    << " applyMs=" << std::chrono::duration<double, std::milli>(finished - decoded).count()
+                    << " totalMs=" << totalMs;
+            }
         });
 
     proto.registerHandler(PacketType::PlayerDeath,

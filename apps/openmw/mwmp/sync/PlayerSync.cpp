@@ -337,6 +337,10 @@ void PlayerSync::forceFullSync(bool includeInventoryAndEquipment)
     snapshotEquipment();
     snapshotInventory();
     snapshotDynamicStats();
+    // PlayerAnimFlags is not part of the full-sync packet set.  Arm an
+    // immediate baseline for the next update so newly joined observers do not
+    // wait for the periodic refresh before receiving an explicit idle/move state.
+    mAnimRefreshTimer = ANIM_REFRESH_RATE;
     Log(Debug::Info) << "[MP] PlayerSync: full sync sent (guid=" << mLocal.guid << ")";
 }
 
@@ -399,6 +403,10 @@ void PlayerSync::applyServerPositionCorrection(const BasePlayer& auth)
     mLocal.velocity = auth.velocity;
     mSmoothedVz = 0.f;
     snapshotPosition();
+    // The receiver clears locomotion when it hard-snaps this teleport.  Send a
+    // fresh post-teleport baseline on our next update even if our input state did
+    // not cross an animation delta threshold.
+    mAnimRefreshTimer = ANIM_REFRESH_RATE;
 
     Log(Debug::Info) << "[MP] Applied server position correction -> ("
                      << auth.position.pos[0] << ", "
@@ -456,6 +464,7 @@ void PlayerSync::applyServerCellChange(const BasePlayer& auth)
     mSmoothedVz = 0.f;
     snapshotCell();
     snapshotPosition();
+    mAnimRefreshTimer = ANIM_REFRESH_RATE;
 
     Log(Debug::Info) << "[MP] Applied server cell correction";
 }
@@ -1937,6 +1946,7 @@ void PlayerSync::applyPendingAuthoritativeState(const MWWorld::Ptr& player)
     const MWWorld::ESMStore& store = world->getStore();
     bool applied = false;
     bool inventoryRestoreApplied = false;
+    bool equipmentRestoreApplied = false;
 
     if (mPendingInventoryRestore)
     {
@@ -2082,6 +2092,7 @@ void PlayerSync::applyPendingAuthoritativeState(const MWWorld::Ptr& player)
         }
         mPendingEquipmentRestore = false;
         applied = true;
+        equipmentRestoreApplied = true;
 
         Log(Debug::Verbose) << "[MP] PlayerSync: applied authoritative equipment"
                             << " equipped=" << equippedItemCount(mAuthoritativeEquipment)
@@ -2097,6 +2108,13 @@ void PlayerSync::applyPendingAuthoritativeState(const MWWorld::Ptr& player)
         captureEquipment(player);
         snapshotInventory();
         snapshotEquipment();
+
+        // Echo the applied snapshot as an acknowledgement.  The server keeps all
+        // equipment slots authoritative during its startup guard until it sees
+        // this exact state, preventing a later engine auto-equip pass from being
+        // mistaken for the player's intended equipment selection.
+        if (equipmentRestoreApplied && mLocal.guid != 0 && mClient.isConnected())
+            sendEquipment();
 
         Log(Debug::Verbose) << "[MP] PlayerSync: local authoritative restore snapshot"
                             << " liveInventoryStacks=" << inventoryStackCount(mLocal.inventoryChanges.items)

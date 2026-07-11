@@ -71,6 +71,7 @@ struct ConnectedClient
     Position            scriptedTeleportTarget;
     uint64_t            scriptedTeleportGuardUntilMs = 0;
     uint64_t            lastScriptedTeleportRejectLogMs = 0;
+    std::unordered_map<std::string, uint64_t> lastUnknownActorLogMs;
 
     // Ed25519 challenge-response state (valid between receiving PacketHandshake
     // with a publicKey and receiving PacketChallengeResponse)
@@ -314,6 +315,9 @@ private:
                               const std::vector<uint8_t>& data,
                               HSteamNetConnection except = k_HSteamNetConnection_Invalid,
                               bool reliable = true);
+    EResult sendPacketOnConfiguredLane(HSteamNetConnection conn,
+                                       const std::vector<uint8_t>& data,
+                                       int flags);
 
     // ── Validation ────────────────────────────────────────────────────────
     bool validateMovement(const ConnectedClient& c, const BasePlayer& proposed) const;
@@ -433,7 +437,7 @@ private:
     // ── State ─────────────────────────────────────────────────────────────
     ActorRegistryRecord* findTrackedActor(CellActorState& cellState,
         const BaseActor& actor,
-        const ConnectedClient& sender,
+        ConnectedClient& sender,
         const char* packetName);
     std::optional<ActorRegistryRecord> removeActorFromOtherCells(
         const BaseActor& actor,
