@@ -5,6 +5,7 @@
 
 #include <components/esm3/loadbook.hpp>
 #include <components/esm3/loadsoun.hpp>
+#include <components/misc/strings/algorithm.hpp>
 
 #include "../mwbase/environment.hpp"
 #include "../mwbase/windowmanager.hpp"
@@ -25,6 +26,23 @@
 
 #include "classmodel.hpp"
 #include "nameorid.hpp"
+
+namespace
+{
+    bool isStarwindDatapad(const MWWorld::ConstPtr& book)
+    {
+        if (book.isEmpty() || book.getType() != ESM::REC_BOOK)
+            return false;
+
+        const ESM::Book* record = book.get<ESM::Book>()->mBase;
+        if (!record || !Misc::StringUtils::ciStartsWith(record->mId.serializeText(), "sw_"))
+            return false;
+
+        return Misc::StringUtils::ciFind(record->mModel, "datapad.nif") != std::string_view::npos
+            || Misc::StringUtils::ciFind(record->mIcon, "datapad") != std::string_view::npos
+            || Misc::StringUtils::ciFind(record->mName, "datapad") != std::string_view::npos;
+    }
+}
 
 namespace MWClass
 {
@@ -86,14 +104,16 @@ namespace MWClass
 
     const ESM::RefId& Book::getUpSoundId(const MWWorld::ConstPtr& ptr) const
     {
-        static auto var = ESM::RefId::stringRefId("Item Book Up");
-        return var;
+        static const ESM::RefId bookSound = ESM::RefId::stringRefId("Item Book Up");
+        static const ESM::RefId datapadSound = ESM::RefId::stringRefId("SW_Datapad Open");
+        return isStarwindDatapad(ptr) ? datapadSound : bookSound;
     }
 
     const ESM::RefId& Book::getDownSoundId(const MWWorld::ConstPtr& ptr) const
     {
-        static auto var = ESM::RefId::stringRefId("Item Book Down");
-        return var;
+        static const ESM::RefId bookSound = ESM::RefId::stringRefId("Item Book Down");
+        static const ESM::RefId datapadSound = ESM::RefId::stringRefId("SW_Datapad Close");
+        return isStarwindDatapad(ptr) ? datapadSound : bookSound;
     }
 
     const std::string& Book::getInventoryIcon(const MWWorld::ConstPtr& ptr) const

@@ -12,6 +12,7 @@
 
 #include <osg/Texture2D>
 
+#include <components/esm3/loadbook.hpp>
 #include <components/misc/strings/algorithm.hpp>
 
 #include <components/myguiplatform/myguitexture.hpp>
@@ -49,6 +50,20 @@
 
 namespace
 {
+
+    bool isStarwindDatapad(const MWWorld::Ptr& book)
+    {
+        if (book.isEmpty() || book.getType() != ESM::REC_BOOK)
+            return false;
+
+        const ESM::Book* record = book.get<ESM::Book>()->mBase;
+        if (!record || !Misc::StringUtils::ciStartsWith(record->mId.serializeText(), "sw_"))
+            return false;
+
+        return Misc::StringUtils::ciFind(record->mModel, "datapad.nif") != std::string_view::npos
+            || Misc::StringUtils::ciFind(record->mIcon, "datapad") != std::string_view::npos
+            || Misc::StringUtils::ciFind(record->mName, "datapad") != std::string_view::npos;
+    }
 
     bool isRightHandWeapon(const MWWorld::Ptr& item)
     {
@@ -678,7 +693,7 @@ namespace MWGui
             if (type == ESM::Potion::sRecordId || type == ESM::Ingredient::sRecordId)
                 mDragAndDrop->update();
             else if (!willEquip)
-                mDragAndDrop->drop(mTradeModel, mItemView);
+                mDragAndDrop->drop(mTradeModel, mItemView, !isStarwindDatapad(ptr));
             else
                 mDragAndDrop->finish();
         }

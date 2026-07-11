@@ -1,7 +1,12 @@
 #include "scrollwindow.hpp"
 
+#include <MyGUI_ImageBox.h>
 #include <MyGUI_ScrollView.h>
 
+#include <algorithm>
+#include <cctype>
+
+#include <components/debug/debuglog.hpp>
 #include <components/esm3/loadbook.hpp>
 #include <components/esm4/loadbook.hpp>
 #include <components/widgets/imagebutton.hpp>
@@ -17,6 +22,38 @@
 
 #include "formatting.hpp"
 
+namespace
+{
+    std::string scrollLowerCopy(std::string value)
+    {
+        std::transform(value.begin(), value.end(), value.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+        return value;
+    }
+
+    bool scrollContainsCaseInsensitive(const std::string& value, const std::string& needle)
+    {
+        return scrollLowerCopy(value).find(needle) != std::string::npos;
+    }
+
+    bool isStarwindDatapadScroll(const MWWorld::Ptr& scroll)
+    {
+        if (scroll.isEmpty() || scroll.getType() != ESM::REC_BOOK)
+            return false;
+
+        const ESM::Book* record = scroll.get<ESM::Book>()->mBase;
+        if (!record)
+            return false;
+
+        const std::string id = scrollLowerCopy(record->mId.serializeText());
+        if (id.rfind("sw_", 0) != 0)
+            return false;
+
+        return scrollContainsCaseInsensitive(record->mModel, "datapad.nif")
+            || scrollContainsCaseInsensitive(record->mIcon, "datapad")
+            || scrollContainsCaseInsensitive(record->mName, "datapad");
+    }
+}
+
 namespace MWGui
 {
 
@@ -26,6 +63,7 @@ namespace MWGui
         , mTakeButtonAllowed(true)
     {
         getWidget(mTextView, "TextView");
+        getWidget(mScrollImage, "ScrollImage");
 
         getWidget(mCloseButton, "CloseButton");
         mCloseButton->eventMouseButtonClick += MyGUI::newDelegate(this, &ScrollWindow::onCloseButtonClicked);
@@ -51,6 +89,20 @@ namespace MWGui
         if (scroll.isEmpty() || (scroll.getType() != ESM::REC_BOOK && scroll.getType() != ESM::REC_BOOK4))
             throw std::runtime_error("Invalid argument in ScrollWindow::setPtr");
         mScroll = scroll;
+
+        const bool starwindDatapad = isStarwindDatapadScroll(scroll);
+        const char* scrollTexture = starwindDatapad ? "textures\\starwind_compat\\tablet_reader.dds" : "textures\\scroll.dds";
+        if (scroll.getType() == ESM::REC_BOOK)
+        {
+            const ESM::Book* debugRecord = scroll.get<ESM::Book>()->mBase;
+            Log(Debug::Info) << "[StarwindDatapad] ScrollWindow::setPtr id=" << debugRecord->mId.serializeText()
+                             << " name=" << debugRecord->mName
+                             << " model=" << debugRecord->mModel
+                             << " icon=" << debugRecord->mIcon
+                             << " isDatapad=" << (starwindDatapad ? "true" : "false")
+                             << " texture=" << scrollTexture;
+        }
+        mScrollImage->setImageTexture(scrollTexture);
 
         MWWorld::Ptr player = MWMechanics::getPlayer();
         bool showTakeButton = scroll.getContainerStore() != &player.getClass().getContainerStore(player);
@@ -113,7 +165,7 @@ namespace MWGui
 
     void ScrollWindow::onTakeButtonClicked(MyGUI::Widget* /*sender*/)
     {
-        MWBase::Environment::get().getWindowManager()->playSound(ESM::RefId::stringRefId("Item Book Up"));
+        MWBase::Environment::get().getWindowManager()->playSound(mScroll.getClass().getUpSoundId(mScroll));
 
         MWWorld::ActionTake take(mScroll);
         take.execute(MWMechanics::getPlayer());

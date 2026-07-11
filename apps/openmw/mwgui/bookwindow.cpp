@@ -1,8 +1,13 @@
 #include "bookwindow.hpp"
 
 #include <MyGUI_InputManager.h>
+#include <MyGUI_ImageBox.h>
 #include <MyGUI_TextBox.h>
 
+#include <algorithm>
+#include <cctype>
+
+#include <components/debug/debuglog.hpp>
 #include <components/esm3/loadbook.hpp>
 #include <components/esm4/loadbook.hpp>
 
@@ -15,6 +20,39 @@
 #include "../mwworld/class.hpp"
 
 #include "formatting.hpp"
+
+
+namespace
+{
+    std::string lowerCopy(std::string value)
+    {
+        std::transform(value.begin(), value.end(), value.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+        return value;
+    }
+
+    bool containsCaseInsensitive(const std::string& value, const std::string& needle)
+    {
+        return lowerCopy(value).find(needle) != std::string::npos;
+    }
+
+    bool isStarwindDatapad(const MWWorld::Ptr& book)
+    {
+        if (book.isEmpty() || book.getType() != ESM::REC_BOOK)
+            return false;
+
+        const ESM::Book* record = book.get<ESM::Book>()->mBase;
+        if (!record)
+            return false;
+
+        const std::string id = lowerCopy(record->mId.serializeText());
+        if (id.rfind("sw_", 0) != 0)
+            return false;
+
+        return containsCaseInsensitive(record->mModel, "datapad.nif")
+            || containsCaseInsensitive(record->mIcon, "datapad")
+            || containsCaseInsensitive(record->mName, "datapad");
+    }
+}
 
 namespace MWGui
 {
@@ -42,6 +80,7 @@ namespace MWGui
 
         getWidget(mLeftPage, "LeftPage");
         getWidget(mRightPage, "RightPage");
+        getWidget(mBookImage, "JImage");
 
         adjustButton("CloseButton");
         adjustButton("TakeButton");
@@ -91,6 +130,25 @@ namespace MWGui
         if (book.isEmpty() || (book.getType() != ESM::REC_BOOK && book.getType() != ESM::REC_BOOK4))
             throw std::runtime_error("Invalid argument in BookWindow::setPtr");
         mBook = book;
+        const bool starwindDatapad = isStarwindDatapad(book);
+        const char* bookTexture = starwindDatapad ? "textures\\starwind_compat\\tablet_reader.dds" : "textures\\tx_menubook.dds";
+        if (book.getType() == ESM::REC_BOOK)
+        {
+            const ESM::Book* debugRecord = book.get<ESM::Book>()->mBase;
+            Log(Debug::Info) << "[StarwindDatapad] BookWindow::setPtr id=" << debugRecord->mId.serializeText()
+                             << " name=" << debugRecord->mName
+                             << " model=" << debugRecord->mModel
+                             << " icon=" << debugRecord->mIcon
+                             << " isDatapad=" << (starwindDatapad ? "true" : "false")
+                             << " texture=" << bookTexture;
+        }
+        else
+        {
+            Log(Debug::Info) << "[StarwindDatapad] BookWindow::setPtr non-ESM3 type=" << book.getType()
+                             << " isDatapad=" << (starwindDatapad ? "true" : "false")
+                             << " texture=" << bookTexture;
+        }
+        mBookImage->setImageTexture(bookTexture);
 
         MWWorld::Ptr player = MWMechanics::getPlayer();
         bool showTakeButton = book.getContainerStore() != &player.getClass().getContainerStore(player);
@@ -143,7 +201,7 @@ namespace MWGui
 
     void BookWindow::onTakeButtonClicked(MyGUI::Widget* /*sender*/)
     {
-        MWBase::Environment::get().getWindowManager()->playSound(ESM::RefId::stringRefId("Item Book Up"));
+        MWBase::Environment::get().getWindowManager()->playSound(mBook.getClass().getUpSoundId(mBook));
 
         MWWorld::ActionTake take(mBook);
         take.execute(MWMechanics::getPlayer());

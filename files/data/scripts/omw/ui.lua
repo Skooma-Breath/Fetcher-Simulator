@@ -3,6 +3,7 @@ local util = require('openmw.util')
 local self = require('openmw.self')
 local core = require('openmw.core')
 local ambient = require('openmw.ambient')
+local types = require('openmw.types')
 
 local MODE = ui._getAllUiModes()
 local WINDOW = ui._getAllWindowIds()
@@ -98,6 +99,28 @@ local function removeMode(mode)
     end
 end
 
+local scrollWasDatapad = false
+
+local function isStarwindDatapad(book)
+    if not book or not types.Book.objectIsInstance(book) then
+        return false
+    end
+    local record = types.Book.record(book)
+    if not record or not record.id then
+        return false
+    end
+    local id = record.id:lower()
+    if id:sub(1, 3) ~= 'sw_' then
+        return false
+    end
+    local model = (record.model or ''):lower()
+    local icon = (record.icon or ''):lower()
+    local name = (record.name or ''):lower()
+    return model:find('datapad.nif', 1, true) ~= nil
+        or icon:find('datapad', 1, true) ~= nil
+        or name:find('datapad', 1, true) ~= nil
+end
+
 local oldMode = nil
 local function onUiModeChanged(changedByLua, arg)
     local newStack = ui._getUiModeStack()
@@ -148,8 +171,22 @@ local function onUiModeChangedEvent(data)
         if not ambient.isSoundPlaying('item book up') then
             ambient.playSound('book close', {scale = false})
         end
-    elseif data.newMode == MODE.Scroll or data.oldMode == MODE.Scroll then
-        if not ambient.isSoundPlaying('item book up') then
+    elseif data.newMode == MODE.Scroll then
+        scrollWasDatapad = isStarwindDatapad(data.arg)
+        if scrollWasDatapad then
+            if not ambient.isSoundPlaying('sw_datapad open') then
+                ambient.playSound('sw_datapad open', {scale = false})
+            end
+        elseif not ambient.isSoundPlaying('item book up') then
+            ambient.playSound('scroll', {scale = false})
+        end
+    elseif data.oldMode == MODE.Scroll then
+        if scrollWasDatapad then
+            if not ambient.isSoundPlaying('sw_datapad open') then
+                ambient.playSound('sw_datapad close', {scale = false})
+            end
+            scrollWasDatapad = false
+        elseif not ambient.isSoundPlaying('item book up') then
             ambient.playSound('scroll', {scale = false})
         end
     end

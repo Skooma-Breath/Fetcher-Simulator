@@ -7,6 +7,11 @@
 
 #include <components/widgets/imagebutton.hpp>
 
+namespace MyGUI
+{
+    class ImageBox;
+}
+
 namespace MWGui
 {
     class BookWindow : public BookWindowBase
@@ -57,6 +62,7 @@ namespace MWGui
         Pages mPages;
 
         MWWorld::Ptr mBook;
+        MyGUI::ImageBox* mBookImage;
 
         bool mTakeButtonShow;
         bool mTakeButtonAllowed;
