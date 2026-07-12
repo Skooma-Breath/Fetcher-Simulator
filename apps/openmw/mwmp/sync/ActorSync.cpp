@@ -4294,8 +4294,10 @@ namespace mwmp
         // Match TES3MP's 25 ms actor update cadence. A 50 ms render buffer
         // produces a visible one-frame hold after every reliable cell commit,
         // even when the destination authority resumes immediately.
-        static constexpr double kInterpolationDelayMs = 25.0;
-        static constexpr double kMaxExtrapolationMs = 120.0;
+        // Keep two 25 ms active snapshots buffered so ordinary arrival jitter does
+        // not alternate between movement and one-snapshot holds (tiny-step motion).
+        static constexpr double kInterpolationDelayMs = 50.0;
+        static constexpr double kMaxExtrapolationMs = 40.0;
 
         const double latestTimestamp = static_cast<double>(actor.snapshots.back().serverTimestamp);
         const double estimatedServerNow = latestTimestamp + (std::max(0.f, actor.latestSnapshotAge) * 1000.0);
@@ -4312,14 +4314,29 @@ namespace mwmp
             actor.interpolationRenderTimestamp = earliestTimestamp;
             actor.hasInterpolationRenderTimestamp = true;
         }
-        else if (targetRenderTimestamp > actor.interpolationRenderTimestamp)
-        {
-            actor.interpolationRenderTimestamp = std::min(
-                actor.interpolationRenderTimestamp + (std::max(0.f, dt) * 1000.0),
-                targetRenderTimestamp);
-        }
         else
-            actor.interpolationRenderTimestamp = targetRenderTimestamp;
+        {
+            const double deltaMs = targetRenderTimestamp - actor.interpolationRenderTimestamp;
+            if (deltaMs > 0.0)
+            {
+                // Advance monotonically and catch up faster only when binding or a
+                // delivery stall left a real backlog. Directly following the target
+                // exposes small packet-timestamp corrections as visible flicker.
+                double catchupRate = 1.1;
+                if (deltaMs > 150.0)
+                    catchupRate = 4.0;
+                else if (deltaMs > 50.0)
+                    catchupRate = 2.0;
+                actor.interpolationRenderTimestamp += std::min(
+                    deltaMs, std::max(0.f, dt) * 1000.0 * catchupRate);
+            }
+            else if (deltaMs < -120.0)
+            {
+                // A large backwards discontinuity represents an authority/timeline
+                // reset rather than ordinary arrival jitter.
+                actor.interpolationRenderTimestamp = targetRenderTimestamp;
+            }
+        }
 
         const double renderTimestamp = actor.interpolationRenderTimestamp;
         while (actor.snapshots.size() >= 2
@@ -4363,7 +4380,12 @@ namespace mwmp
             const BufferedSnapshot& latest = actor.snapshots.back();
             const bool movementInputActive = std::abs(latest.animFwd) > 0.1f
                 || std::abs(latest.animSide) > 0.1f;
-            if (latest.isMoving && movementInputActive)
+            // Non-combat AI turns and stops frequently. Extrapolating wander/travel
+            // motion makes the first stop snapshot visibly rewind the proxy. At the
+            // 25 ms active cadence interpolation is sufficient; retain a short cap
+            // only for latency-sensitive combat movement.
+            if (latest.isMoving && movementInputActive
+                && actor.state.ai.type == BaseActor::AIAction::Type::Combat)
                 target = extrapolatePosition(actor.snapshots.back().position, actor.snapshots.back().velocity,
                     extrapolationMs);
             else
@@ -5509,7 +5531,7 @@ namespace mwmp
 
         cell.positionSendTimer += dt;
         cell.positionDiagnosticsTimer += std::max(0.f, dt);
-        if (cell.positionSendTimer >= 0.05f)
+        if (cell.positionSendTimer >= 0.025f)
         {
             cell.positionSendTimer = 0.f;
 
@@ -7245,7 +7267,6 @@ namespace mwmp
         const float fwdMag  = std::abs(actor.state.animFlags.animFwd);
         const float sideMag = std::abs(actor.state.animFlags.animSide);
         const bool suppressAttackLocomotion = actor.attackLocomotionHoldTimer > 0.f || actor.pendingAttack;
-        const bool hasAuthoredLocomotionAxes = fwdMag > 0.1f || sideMag > 0.1f;
         const bool currentGroupIsSpecialIdle = isIdleAnimGroup(actor.state.animFlags.currentAnimGroup)
             && !isBaseIdleAnimGroup(actor.state.animFlags.currentAnimGroup);
         bool nodeHasSyncedSpecialIdle = false;
@@ -7264,14 +7285,33 @@ namespace mwmp
         const bool hasVisualLocomotion = !suppressVisualLocomotionFallback && visualPlanarSpeed > 8.f;
         float drivenSide = actor.state.animFlags.animSide;
         float drivenFwd = actor.state.animFlags.animFwd;
-        if (!hasAuthoredLocomotionAxes && hasVisualLocomotion)
+        // Drive the animation from the displacement actually rendered on this
+        // client. Authority AI axes can lag a turn or survive an AI transition,
+        // producing strafing/backpedal animations while the proxy moves forward.
+        // Retain authored axes only for the first/near-stationary frame where no
+        // reliable visual direction exists yet.
+        if (hasVisualLocomotion)
         {
-            const float yaw = actor.boundActor.getRefData().getPosition().rot[2];
-            const float invLen = 1.f / std::max(std::sqrt((visualDeltaX * visualDeltaX) + (visualDeltaY * visualDeltaY)), 0.001f);
-            const float dirX = visualDeltaX * invLen;
-            const float dirY = visualDeltaY * invLen;
-            drivenFwd = std::clamp(dirX * std::sin(-yaw) + dirY * std::cos(-yaw), -1.f, 1.f);
-            drivenSide = std::clamp(dirX * std::cos(-yaw) - dirY * std::sin(-yaw), -1.f, 1.f);
+            // Vanilla non-combat AI turns before advancing and does not strafe or
+            // backpedal. Snapshot rotation can lead the interpolated displacement
+            // during that turn, so projecting the old travel vector through the
+            // new yaw briefly selects a side/back animation. Combat is the only AI
+            // mode where directional locomotion must be preserved.
+            if (actor.state.ai.type != BaseActor::AIAction::Type::Combat)
+            {
+                drivenFwd = 1.f;
+                drivenSide = 0.f;
+            }
+            else
+            {
+                const float yaw = actor.boundActor.getRefData().getPosition().rot[2];
+                const float invLen = 1.f / std::max(
+                    std::sqrt((visualDeltaX * visualDeltaX) + (visualDeltaY * visualDeltaY)), 0.001f);
+                const float dirX = visualDeltaX * invLen;
+                const float dirY = visualDeltaY * invLen;
+                drivenFwd = std::clamp(dirX * std::sin(-yaw) + dirY * std::cos(-yaw), -1.f, 1.f);
+                drivenSide = std::clamp(dirX * std::cos(-yaw) - dirY * std::sin(-yaw), -1.f, 1.f);
+            }
         }
         const bool shouldDriveLocomotion = !actor.state.isDead
             && !suppressAttackLocomotion

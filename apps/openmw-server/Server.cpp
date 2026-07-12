@@ -1779,13 +1779,14 @@ void MPServer::onClientConnected(HSteamNetConnection conn)
     mClients.emplace(conn, client);
 
     mInterface->SetConnectionPollGroup(conn, mPollGroup);
-    // Lane 0 carries player/chat/system traffic. Lane 1 carries ActorSync.
-    // Strict lane priority prevents large reliable actor baselines from adding
-    // hundreds of milliseconds of head-of-line delay to PlayerPosition.
-    const int lanePriorities[2] = { 0, 1 };
-    const uint16 laneWeights[2] = { 1, 1 };
+    // Lane 0 carries player/chat/system traffic, lane 1 carries real-time actor
+    // snapshots/events, and lane 2 carries reliable ActorSync bootstrap traffic.
+    // Weighted peers prevent starvation without allowing bulk identity/list data
+    // to head-of-line block wandering actors.
+    const int lanePriorities[3] = { 0, 0, 0 };
+    const uint16 laneWeights[3] = { 4, 4, 2 };
     const EResult laneResult = mInterface->ConfigureConnectionLanes(
-        conn, 2, lanePriorities, laneWeights);
+        conn, 3, lanePriorities, laneWeights);
     if (laneResult != k_EResultOK)
         Log(Debug::Warning) << "[Server] Failed to configure network lanes conn=" << conn
                             << " result=" << static_cast<int>(laneResult);
@@ -3221,8 +3222,8 @@ void MPServer::broadcastActorPositionV2ToCell(
     {
         switch (tier)
         {
-            case 0: return 50;
-            case 1: return 50;
+            case 0: return 25;
+            case 1: return 25;
             case 2: return 250;
             case 3: return 1000;
             default: return 0;
@@ -9718,7 +9719,19 @@ EResult MPServer::sendPacketOnConfiguredLane(HSteamNetConnection conn,
     std::memcpy(message->m_pData, data.data(), data.size());
     message->m_conn = conn;
     message->m_nFlags = flags;
-    message->m_idxLane = 1;
+    const PacketType type = static_cast<PacketType>(header.type);
+    const bool realtimeActorPacket = type == PacketType::ActorPosition
+        || type == PacketType::ActorAnimFlags
+        || type == PacketType::ActorAnimPlay
+        || type == PacketType::ActorAttack
+        || type == PacketType::ActorCast
+        || type == PacketType::ActorDeath
+        || type == PacketType::ActorSpeech
+        || type == PacketType::ActorCombatRequest
+        || type == PacketType::ActorPositionV2
+        || type == PacketType::ActorPresentationV2
+        || type == PacketType::ActorAttackV2;
+    message->m_idxLane = realtimeActorPacket ? 1 : 2;
 
     int64 result = 0;
     mInterface->SendMessages(1, &message, &result);

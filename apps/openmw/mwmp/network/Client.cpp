@@ -185,7 +185,19 @@ namespace mwmp
         std::memcpy(message->m_pData, data.data(), data.size());
         message->m_conn = mConnection;
         message->m_nFlags = flags;
-        message->m_idxLane = 1;
+        const PacketType type = static_cast<PacketType>(header.type);
+        const bool realtimeActorPacket = type == PacketType::ActorPosition
+            || type == PacketType::ActorAnimFlags
+            || type == PacketType::ActorAnimPlay
+            || type == PacketType::ActorAttack
+            || type == PacketType::ActorCast
+            || type == PacketType::ActorDeath
+            || type == PacketType::ActorSpeech
+            || type == PacketType::ActorCombatRequest
+            || type == PacketType::ActorPositionV2
+            || type == PacketType::ActorPresentationV2
+            || type == PacketType::ActorAttackV2;
+        message->m_idxLane = realtimeActorPacket ? 1 : 2;
 
         int64 result = 0;
         mInterface->SendMessages(1, &message, &result);
@@ -222,10 +234,13 @@ namespace mwmp
 
             case k_ESteamNetworkingConnectionState_Connected:
             {
-                const int lanePriorities[2] = { 0, 1 };
-                const uint16 laneWeights[2] = { 1, 1 };
+                // Keep latency-sensitive ActorSync snapshots/events out of the
+                // ordered reliable bootstrap lane. Weighted peers ensure all three
+                // lanes make progress without reintroducing head-of-line blocking.
+                const int lanePriorities[3] = { 0, 0, 0 };
+                const uint16 laneWeights[3] = { 4, 4, 2 };
                 const EResult laneResult = mInterface->ConfigureConnectionLanes(
-                    mConnection, 2, lanePriorities, laneWeights);
+                    mConnection, 3, lanePriorities, laneWeights);
                 if (laneResult != k_EResultOK)
                     Log(Debug::Warning) << "[MP] ConfigureConnectionLanes failed: " << laneResult;
                 setState(ConnectionState::Connected);

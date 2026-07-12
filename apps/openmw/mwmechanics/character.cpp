@@ -2323,8 +2323,11 @@ namespace MWMechanics
         // no turn-left/right animations, no NPC smooth-movement slowdown. This
         // matches what the sender's CC did when they were in first-person and
         // avoids the 3rd-person move360.lua input-rotation artefacts on the receiver.
+        const bool isNetworkPlayerPuppet = !isPlayer && cls.isActor()
+            && cls.getCreatureStats(mPtr).getMovementFlag(
+                MWMechanics::CreatureStats::Flag_NetworkPlayerNpc);
         bool isFirstPersonPlayer = (isPlayer && MWBase::Environment::get().getWorld()->isFirstPerson())
-            || (cls.isActor() && cls.getCreatureStats(mPtr).getMovementFlag(MWMechanics::CreatureStats::Flag_NetworkPlayerNpc));
+            || isNetworkPlayerPuppet;
         bool godmode = isPlayer && MWBase::Environment::get().getWorld()->getGodModeState();
 
         float scale = mPtr.getCellRef().getScale();
@@ -2367,7 +2370,22 @@ namespace MWMechanics
                     flying = mpFly;
             }
 #endif
-            bool solid = world->isActorCollisionEnabled(mPtr);
+            // Network player puppets intentionally have physical actor collision
+            // disabled. Treat them as animation-solid only while a synchronized
+            // jump or its short forced-grounded landing phase is active; otherwise
+            // their non-colliding body would look permanently airborne.
+            bool networkJumpVisual = false;
+            if (isNetworkPlayerPuppet)
+            {
+                networkJumpVisual = cls.getCreatureStats(mPtr).getMovementFlag(
+                    MWMechanics::CreatureStats::Flag_ForceJump);
+                if (!networkJumpVisual)
+                {
+                    if (auto* bn = mPtr.getRefData().getBaseNode())
+                        bn->getUserValue("mp_force_grounded", networkJumpVisual);
+                }
+            }
+            bool solid = world->isActorCollisionEnabled(mPtr) || networkJumpVisual;
             // Can't run and sneak while flying (see speed formula in Npc/Creature::getSpeed)
             bool sneak
                 = cls.getCreatureStats(mPtr).getStance(MWMechanics::CreatureStats::Stance_Sneak) && !flying && !inwater;
@@ -2982,9 +3000,6 @@ namespace MWMechanics
             // also queue physical motion double-drives the proxy; rough collision
             // (notably Sandriver) then alternately blocks and releases it, producing
             // the visible quarter-second stop/start "flipbook" effect.
-            const bool isNetworkPlayerPuppet = !isPlayer && cls.isActor()
-                && cls.getCreatureStats(mPtr).getMovementFlag(
-                    MWMechanics::CreatureStats::Flag_NetworkPlayerNpc);
             if (isNetworkPlayerPuppet)
                 movement = osg::Vec3f();
 #endif
