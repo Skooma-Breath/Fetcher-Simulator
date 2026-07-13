@@ -11,6 +11,26 @@
       "applierPattern": "Apply-Fetcher-Bardcraft-MPPatch.ps1",
       "targetParameter": "BardcraftDataRoot",
       "markerFile": "fetcher-bardcraft-mp-patch.json"
+    },
+    {
+      "id": "starwind-vanilla-mp-v2",
+      "name": "Fetcher Starwind vanilla/multiplayer compatibility",
+      "releaseTag": "fetcher-starwind-compat-patch-v2",
+      "assetName": "fetcher-starwind-compat-patch-v2.zip",
+      "targetPlugin": "StarwindRemasteredV1.15.esm",
+      "requiredSubdirectory": "Meshes",
+      "applierPattern": "Apply-Fetcher-Starwind-CompatibilityPatch.ps1",
+      "targetParameter": "StarwindDataRoot",
+      "installRootParameter": "InstallRoot",
+      "manifestName": "fetcher-starwind-compat-patch.json",
+      "markerFile": "fetcher-starwind-compat-patch.json",
+      "dataPaths": [
+        "Data Files/fetcher-starwind-compat/Starwind Vanilla Compat",
+        "Data Files/fetcher-starwind-compat/Data Files"
+      ],
+      "plugins": [
+        "StarwindVanillaCompat.omwscripts"
+      ]
     }
   ]
 }

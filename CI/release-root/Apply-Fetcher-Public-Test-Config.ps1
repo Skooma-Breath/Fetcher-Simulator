@@ -4,6 +4,7 @@ $root = Split-Path -Parent $MyInvocation.MyCommand.Path
 $cfgPath = Join-Path $root "openmw.cfg"
 $umoModListName = "fetcher-bardcraft"
 $umoModListPath = Join-Path $root "fetcher-bardcraft-umo.json"
+$patchCatalogPath = Join-Path $root "fetcher-client-patches.json"
 
 $baseContent = @(
     "Morrowind.esm",
@@ -18,13 +19,18 @@ $fetcherMapContent = @(
     "surf_kitsune2.omwaddon",
     "mp_phase7_test.omwscripts"
 )
-$earlyUmoContent = @(
+$earlyContentOrder = @(
+    "StarwindRemasteredV1.15.esm",
+    "StarwindRemasteredPatch.esm",
+    "StarwindVanillaCompat.omwscripts",
     "Tamriel_Data.esm",
     "Tamriel_Data.omwscripts",
+    "Tamriel Data Races Playable 25.05.ESP",
     "OAAB_Data.esm",
     "TR_Mainland.esm",
     "TR_Factions.esp",
-    "tamrielrebuilt.omwscripts"
+    "tamrielrebuilt.omwscripts",
+    "Cyr_Main.esm"
 )
 
 function Add-UniqueContent {
@@ -37,19 +43,63 @@ function Add-UniqueContent {
     }
 }
 
+function Get-OptionalPropertyValues {
+    param(
+        [Parameter(Mandatory = $true)] $Object,
+        [Parameter(Mandatory = $true)][string] $Name
+    )
+    $property = $Object.PSObject.Properties[$Name]
+    if ($null -ne $property -and $null -ne $property.Value) {
+        foreach ($value in @($property.Value)) {
+            $value
+        }
+    }
+}
+
 $umoMods = @()
 if (Test-Path -LiteralPath $umoModListPath -PathType Leaf) {
     $umoMods = @(Get-Content -Raw -LiteralPath $umoModListPath | ConvertFrom-Json)
 }
+$patches = @()
+if (Test-Path -LiteralPath $patchCatalogPath -PathType Leaf) {
+    $patchCatalog = Get-Content -Raw -LiteralPath $patchCatalogPath | ConvertFrom-Json
+    if ([int]$patchCatalog.schemaVersion -ne 1) {
+        throw "Unsupported Fetcher client patch catalog schema: $($patchCatalog.schemaVersion)"
+    }
+    $patches = @($patchCatalog.patches)
+}
+
+$availableUmoContent = New-Object System.Collections.Generic.HashSet[string]([StringComparer]::OrdinalIgnoreCase)
+foreach ($mod in $umoMods) {
+    foreach ($plugin in @($mod.plugins)) {
+        [void]$availableUmoContent.Add([string]$plugin)
+    }
+}
+$availablePatchContent = New-Object System.Collections.Generic.HashSet[string]([StringComparer]::OrdinalIgnoreCase)
+foreach ($patch in $patches) {
+    $allPatchPathsExist = $true
+    foreach ($dataPath in @(Get-OptionalPropertyValues -Object $patch -Name "dataPaths")) {
+        if (-not (Test-Path -LiteralPath (Join-Path $root ([string]$dataPath)))) {
+            $allPatchPathsExist = $false
+            break
+        }
+    }
+    if ($allPatchPathsExist) {
+        foreach ($plugin in @(Get-OptionalPropertyValues -Object $patch -Name "plugins")) {
+            if (-not [string]::IsNullOrWhiteSpace([string]$plugin)) {
+                [void]$availablePatchContent.Add([string]$plugin)
+            }
+        }
+    }
+}
+
 $requiredContentList = New-Object System.Collections.Generic.List[string]
 foreach ($content in $baseContent) {
     Add-UniqueContent -Target $requiredContentList -Value $content
 }
-foreach ($mod in $umoMods) {
-    foreach ($plugin in @($mod.plugins)) {
-        if ($earlyUmoContent -contains [string]$plugin) {
-            Add-UniqueContent -Target $requiredContentList -Value ([string]$plugin)
-        }
+foreach ($content in $earlyContentOrder) {
+    if ($availableUmoContent.Contains($content) -or $availablePatchContent.Contains($content)) {
+        Add-UniqueContent -Target $requiredContentList -Value $content
     }
 }
 foreach ($content in $fetcherMapContent) {
@@ -57,7 +107,15 @@ foreach ($content in $fetcherMapContent) {
 }
 foreach ($mod in $umoMods) {
     foreach ($plugin in @($mod.plugins)) {
-        if ($earlyUmoContent -notcontains [string]$plugin) {
+        if ($earlyContentOrder -notcontains [string]$plugin) {
+            Add-UniqueContent -Target $requiredContentList -Value ([string]$plugin)
+        }
+    }
+}
+foreach ($patch in $patches) {
+    foreach ($plugin in @(Get-OptionalPropertyValues -Object $patch -Name "plugins")) {
+        if (-not [string]::IsNullOrWhiteSpace([string]$plugin) -and
+            $availablePatchContent.Contains([string]$plugin) -and $earlyContentOrder -notcontains [string]$plugin) {
             Add-UniqueContent -Target $requiredContentList -Value ([string]$plugin)
         }
     }
@@ -158,6 +216,26 @@ function Get-UmoDataPathEntries {
     }
 }
 
+function Get-PatchDataPathEntries {
+    $entries = New-Object System.Collections.Generic.List[object]
+    foreach ($patch in $patches) {
+        foreach ($dataPath in @(Get-OptionalPropertyValues -Object $patch -Name "dataPaths")) {
+            if ([string]::IsNullOrWhiteSpace([string]$dataPath)) {
+                continue
+            }
+            $relativePath = Join-ConfigPath @([string]$dataPath)
+            $entries.Add([pscustomobject]@{
+                ModName = [string]$patch.name
+                ConfigPath = $relativePath
+                AbsolutePath = Join-Path $root ([string]$dataPath)
+            })
+        }
+    }
+    foreach ($entry in $entries) {
+        $entry
+    }
+}
+
 $existingDataLines = @{}
 foreach ($line in $filteredLines) {
     $trimmed = $line.Trim()
@@ -167,14 +245,16 @@ foreach ($line in $filteredLines) {
 }
 
 $umoDataEntries = @(Get-UmoDataPathEntries)
-$existingUmoDataEntries = @($umoDataEntries | Where-Object { Test-Path -LiteralPath $_.AbsolutePath })
+$patchDataEntries = @(Get-PatchDataPathEntries)
+$existingManagedDataEntries = @(@($umoDataEntries) + @($patchDataEntries) |
+    Where-Object { Test-Path -LiteralPath $_.AbsolutePath })
 
 $newLines = New-Object System.Collections.Generic.List[string]
 $newLines.AddRange([string[]]$filteredLines)
-if ($existingUmoDataEntries.Count -gt 0) {
+if ($existingManagedDataEntries.Count -gt 0) {
     $newLines.Add("")
     $newLines.Add($dataBeginMarker)
-    foreach ($entry in $existingUmoDataEntries) {
+    foreach ($entry in $existingManagedDataEntries) {
         $dataLine = "data=$($entry.ConfigPath)"
         if (-not $existingDataLines.ContainsKey($dataLine.ToLowerInvariant())) {
             $newLines.Add($dataLine)
@@ -257,9 +337,9 @@ foreach ($content in $requiredContent) {
 Write-Host "Updated: $cfgPath"
 Write-Host "Backup:  $backupPath"
 Write-Host ""
-if ($existingUmoDataEntries.Count -gt 0) {
-    Write-Host "UMO data paths added from ${umoModListName}:"
-    foreach ($entry in $existingUmoDataEntries) {
+if ($existingManagedDataEntries.Count -gt 0) {
+    Write-Host "Fetcher-managed data paths added:"
+    foreach ($entry in $existingManagedDataEntries) {
         Write-Host "  data=$($entry.ConfigPath)"
     }
     Write-Host ""

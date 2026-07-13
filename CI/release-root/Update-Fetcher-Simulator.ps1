@@ -433,6 +433,19 @@ function Find-OpenMwPluginDataRoot {
 
     $candidates = New-Object System.Collections.Generic.List[string]
     $seen = New-Object System.Collections.Generic.HashSet[string]([StringComparer]::OrdinalIgnoreCase)
+    $managedRoot = [IO.Path]::GetFullPath((Join-Path $Root "Data Files\fetcher-bardcraft")).TrimEnd("\", "/") + "\"
+
+    function Select-ManagedCandidate {
+        param([Parameter(Mandatory = $true)] $Paths)
+        $managed = @($Paths | Where-Object {
+            [IO.Path]::GetFullPath([string]$_).StartsWith($managedRoot, [StringComparison]::OrdinalIgnoreCase)
+        })
+        if ($managed.Count -eq 1) {
+            return $managed[0]
+        }
+        return $null
+    }
+
     $configPath = Join-Path $Root "openmw.cfg"
     if (Test-Path -LiteralPath $configPath -PathType Leaf) {
         foreach ($line in Get-Content -LiteralPath $configPath) {
@@ -453,6 +466,12 @@ function Find-OpenMwPluginDataRoot {
         return $candidates[0]
     }
     if ($candidates.Count -gt 1) {
+        $managedCandidate = Select-ManagedCandidate -Paths $candidates
+        if ($null -ne $managedCandidate) {
+            Write-Host "Using updater-managed $Plugin installation:"
+            Write-Host "  $managedCandidate"
+            return $managedCandidate
+        }
         throw "Multiple active data paths contain $Plugin. Remove duplicate data= entries before updating."
     }
 
@@ -470,6 +489,10 @@ function Find-OpenMwPluginDataRoot {
         return $candidates[0]
     }
     if ($candidates.Count -gt 1) {
+        $managedCandidate = Select-ManagedCandidate -Paths $candidates
+        if ($null -ne $managedCandidate) {
+            return $managedCandidate
+        }
         throw "Found multiple installations of $Plugin. Add the intended folder to openmw.cfg and remove stale duplicate data= entries."
     }
     return $null
@@ -516,13 +539,23 @@ function Install-ClientModPatch {
         throw "Expected one $($Patch.applierPattern) in $($Patch.assetName), found $($appliers.Count)."
     }
 
-    $manifestPath = Join-Path $extractRoot "fetcher-bardcraft-mp-patch.json"
+    $manifestName = "fetcher-bardcraft-mp-patch.json"
+    $manifestNameProperty = $Patch.PSObject.Properties["manifestName"]
+    if ($null -ne $manifestNameProperty -and -not [string]::IsNullOrWhiteSpace([string]$manifestNameProperty.Value)) {
+        $manifestName = [string]$manifestNameProperty.Value
+    }
+    $manifestPath = Join-Path $extractRoot $manifestName
     if (-not (Test-Path -LiteralPath $manifestPath -PathType Leaf)) {
         throw "$($Patch.assetName) does not contain its patch manifest."
     }
     $manifest = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
     $invokeParameters = @{}
     $invokeParameters[[string]$Patch.targetParameter] = $targetRoot
+    $installRootProperty = $Patch.PSObject.Properties["installRootParameter"]
+    if ($null -ne $installRootProperty -and
+        -not [string]::IsNullOrWhiteSpace([string]$installRootProperty.Value)) {
+        $invokeParameters[[string]$installRootProperty.Value] = $Root
+    }
     Write-Host "Applying $($Patch.name) to:"
     Write-Host "  $targetRoot"
     & $appliers[0].FullName @invokeParameters
@@ -714,6 +747,16 @@ try {
         }
         else {
             Write-Warning "Client patch catalog was not found: $PatchCatalogPath"
+        }
+
+        $publicConfigScript = Join-Path $root "Apply-Fetcher-Public-Test-Config.ps1"
+        if (-not (Test-Path -LiteralPath $publicConfigScript -PathType Leaf)) {
+            throw "Public test configuration script was not found: $publicConfigScript"
+        }
+        Write-Host "Regenerating openmw.cfg after compatibility patches..."
+        & $publicConfigScript
+        if (-not $?) {
+            throw "Fetcher public test configuration regeneration failed."
         }
     }
 

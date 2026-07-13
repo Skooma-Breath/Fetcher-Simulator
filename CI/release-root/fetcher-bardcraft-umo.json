@@ -471,5 +471,770 @@
     "plugins": [
       "Moon Sugar Plantation.esp"
     ]
+  },
+  {
+    "name": "Morrowind Optimization Patch",
+    "author": "MOP Team",
+    "description": "Optimizes vanilla meshes, improves performance, and fixes mesh errors.",
+    "url": "https://www.nexusmods.com/morrowind/mods/45384",
+    "category": "Performance",
+    "dl_url": "",
+    "usage_notes": "",
+    "compat": 4,
+    "dir": "MorrowindOptimizationPatch",
+    "slug": "morrowind-optimization-patch",
+    "date_added": "2026-07-12T00:00:00+00:00",
+    "date_updated": "2026-07-12T00:00:00+00:00",
+    "download_info": [
+      {
+        "direct_download": null,
+        "file_name": "Morrowind Optimization Patch",
+        "extract_to": "MorrowindOptimizationPatch",
+        "nexus_file_id": null,
+        "pinned": false,
+        "actions": []
+      }
+    ],
+    "tags": [
+      "tes3mp-graphics"
+    ],
+    "on_lists": [
+      "fetcher-bardcraft"
+    ],
+    "data_paths": [
+      "MorrowindOptimizationPatch/00 Core"
+    ],
+    "plugins": []
+  },
+  {
+    "name": "Project Atlas",
+    "author": "Project Atlas Team",
+    "description": "Reduces draw calls by atlasing frequently used vanilla meshes and textures.",
+    "url": "https://www.nexusmods.com/morrowind/mods/45399",
+    "category": "Performance",
+    "dl_url": "",
+    "usage_notes": "Installs the core module and its required vanilla texture atlases. Optional mesh and compatibility variants are excluded.",
+    "compat": 4,
+    "dir": "ProjectAtlas",
+    "slug": "project-atlas",
+    "date_added": "2026-07-12T00:00:00+00:00",
+    "date_updated": "2026-07-12T00:00:00+00:00",
+    "download_info": [
+      {
+        "direct_download": null,
+        "file_name": "Project Atlas",
+        "extract_to": "ProjectAtlas",
+        "nexus_file_id": null,
+        "pinned": false,
+        "actions": []
+      }
+    ],
+    "tags": [
+      "atlased-textures",
+      "tes3mp-graphics"
+    ],
+    "on_lists": [
+      "fetcher-bardcraft"
+    ],
+    "data_paths": [
+      "ProjectAtlas/00 Core",
+      "ProjectAtlas/01 Textures - Vanilla"
+    ],
+    "plugins": []
+  },
+  {
+    "name": "Character Sound Overhaul",
+    "author": "Anumaril21",
+    "description": "Provides the character movement and equipment sounds used by openmw-footsteps.",
+    "url": "https://www.nexusmods.com/morrowind/mods/49654",
+    "category": "Audio",
+    "dl_url": "",
+    "usage_notes": "Required sound assets for openmw-footsteps. Installs both the main archive and the optional higher-bitrate sounds.",
+    "compat": 4,
+    "dir": "CharacterSoundOverhaul",
+    "slug": "character-sound-overhaul",
+    "date_added": "2026-07-12T00:00:00+00:00",
+    "date_updated": "2026-07-12T00:00:00+00:00",
+    "download_info": [
+      {
+        "direct_download": null,
+        "file_name": "Character Sound Overhaul",
+        "extract_to": "CharacterSoundOverhaul",
+        "nexus_file_id": null,
+        "pinned": false,
+        "actions": []
+      },
+      {
+        "direct_download": null,
+        "file_name": "Higher Bitrate Sounds",
+        "extract_to": "CharacterSoundOverhaul/Higher Bitrate Sounds",
+        "nexus_file_id": null,
+        "pinned": false,
+        "actions": []
+      }
+    ],
+    "tags": [],
+    "on_lists": [
+      "fetcher-bardcraft"
+    ],
+    "data_paths": [
+      "CharacterSoundOverhaul",
+      "CharacterSoundOverhaul/Higher Bitrate Sounds"
+    ],
+    "plugins": []
+  },
+  {
+    "name": "openmw-footsteps",
+    "author": "fallchildren and contributors",
+    "description": "Adds material-, race-, speed-, and armor-aware footsteps to OpenMW using Character Sound Overhaul assets.",
+    "url": "https://gitlab.com/modding-openmw/openmw-footsteps",
+    "category": "Audio",
+    "dl_url": "",
+    "usage_notes": "Downloaded for future compatibility, but not enabled: this revision throws repeated animation-key Lua errors when no matching sound files are enumerated.",
+    "compat": 4,
+    "dir": "OpenMWFootsteps",
+    "slug": "openmw-footsteps",
+    "date_added": "2026-07-12T00:00:00+00:00",
+    "date_updated": "2026-07-12T00:00:00+00:00",
+    "download_info": [
+      {
+        "direct_download": "https://gitlab.com/modding-openmw/openmw-footsteps/-/archive/master/openmw-footsteps-master.zip",
+        "file_name": "openmw-footsteps-master.zip",
+        "extract_to": "OpenMWFootsteps",
+        "nexus_file_id": null,
+        "pinned": false,
+        "actions": []
+      }
+    ],
+    "tags": [
+      "openmw-lua"
+    ],
+    "on_lists": [
+      "fetcher-bardcraft"
+    ],
+    "data_paths": [
+      "OpenMWFootsteps"
+    ],
+    "plugins": []
+  },
+  {
+    "name": "Zerkish ModUtils (OpenMW)",
+    "author": "Zerkish",
+    "description": "Shared OpenMW Lua utility and UI library required by Zerkish Hotkeys Improved.",
+    "url": "https://www.nexusmods.com/morrowind/mods/56795",
+    "category": "ModdingResources",
+    "dl_url": "",
+    "usage_notes": "",
+    "compat": 4,
+    "dir": "ZerkishModUtils",
+    "slug": "zerkish-modutils-openmw",
+    "date_added": "2026-07-12T00:00:00+00:00",
+    "date_updated": "2026-07-12T00:00:00+00:00",
+    "download_info": [
+      {
+        "direct_download": null,
+        "file_name": "ZModUtils",
+        "extract_to": "ZerkishModUtils",
+        "nexus_file_id": null,
+        "pinned": false,
+        "actions": []
+      }
+    ],
+    "tags": [
+      "openmw-lua"
+    ],
+    "on_lists": [
+      "fetcher-bardcraft"
+    ],
+    "data_paths": [
+      "ZerkishModUtils/ZModUtils"
+    ],
+    "plugins": [
+      "ZModUtils.omwscripts"
+    ]
+  },
+  {
+    "name": "Halo Combat Evolved Energy Sword",
+    "author": "Karsten Snyder",
+    "description": "Adds the Halo: Combat Evolved energy sword as a usable Morrowind weapon.",
+    "url": "https://www.nexusmods.com/morrowind/mods/49112",
+    "category": "Weapons",
+    "dl_url": "",
+    "usage_notes": "",
+    "compat": 4,
+    "dir": "HaloEnergySword",
+    "slug": "halo-combat-evolved-energy-sword",
+    "date_added": "2026-07-12T00:00:00+00:00",
+    "date_updated": "2026-07-12T00:00:00+00:00",
+    "download_info": [
+      {
+        "direct_download": null,
+        "file_name": "Halo CE Energy Sword",
+        "extract_to": "HaloEnergySword",
+        "nexus_file_id": null,
+        "pinned": false,
+        "actions": []
+      }
+    ],
+    "tags": [],
+    "on_lists": [
+      "fetcher-bardcraft"
+    ],
+    "data_paths": [
+      "HaloEnergySword/halo energy sword"
+    ],
+    "plugins": [
+      "KS_ENERGYSWORD.ESP"
+    ]
+  },
+  {
+    "name": "Halo 3 Gravity Hammer",
+    "author": "Karsten Snyder",
+    "description": "Adds the Halo 3 gravity hammer as a usable Morrowind weapon.",
+    "url": "https://www.nexusmods.com/morrowind/mods/49017",
+    "category": "Weapons",
+    "dl_url": "",
+    "usage_notes": "",
+    "compat": 4,
+    "dir": "HaloGravityHammer",
+    "slug": "halo-3-gravity-hammer",
+    "date_added": "2026-07-12T00:00:00+00:00",
+    "date_updated": "2026-07-12T00:00:00+00:00",
+    "download_info": [
+      {
+        "direct_download": null,
+        "file_name": "Halo 3 Gravity Hammer for Morrowind",
+        "extract_to": "HaloGravityHammer",
+        "nexus_file_id": null,
+        "pinned": false,
+        "actions": []
+      }
+    ],
+    "tags": [],
+    "on_lists": [
+      "fetcher-bardcraft"
+    ],
+    "data_paths": [
+      "HaloGravityHammer/h3gravityhammer"
+    ],
+    "plugins": [
+      "halo 3 gravity hammer.ESP"
+    ]
+  },
+  {
+    "name": "The Red Tower - Red Mountain Terrain Overhaul",
+    "author": "SaintJ",
+    "description": "Overhauls Red Mountain terrain and improves the walkable route toward Dagoth Ur.",
+    "url": "https://www.nexusmods.com/morrowind/mods/57476",
+    "category": "Landscape",
+    "dl_url": "",
+    "usage_notes": "Uses version 1.5, which removed the former Dr_Data and OAAB_Data dependencies.",
+    "compat": 4,
+    "dir": "RedTower",
+    "slug": "the-red-tower-red-mountain-terrain-overhaul",
+    "date_added": "2026-07-12T00:00:00+00:00",
+    "date_updated": "2026-07-12T00:00:00+00:00",
+    "download_info": [
+      {
+        "direct_download": null,
+        "file_name": "The Red Tower",
+        "extract_to": "RedTower",
+        "nexus_file_id": null,
+        "pinned": false,
+        "actions": []
+      }
+    ],
+    "tags": [],
+    "on_lists": [
+      "fetcher-bardcraft"
+    ],
+    "data_paths": [
+      "RedTower"
+    ],
+    "plugins": [
+      "The Red Tower.esp"
+    ]
+  },
+  {
+    "name": "Master Chief Armor",
+    "author": "Tehr4p3",
+    "description": "Adds several Halo Mjolnir armor color sets and an ODST-style helmet.",
+    "url": "https://www.nexusmods.com/morrowind/mods/58342",
+    "category": "Armour",
+    "dl_url": "",
+    "usage_notes": "",
+    "compat": 4,
+    "dir": "MasterChiefArmor",
+    "slug": "master-chief-armor",
+    "date_added": "2026-07-12T00:00:00+00:00",
+    "date_updated": "2026-07-12T00:00:00+00:00",
+    "download_info": [
+      {
+        "direct_download": null,
+        "file_name": "Master Chief Armor",
+        "extract_to": "MasterChiefArmor",
+        "nexus_file_id": null,
+        "pinned": false,
+        "actions": []
+      }
+    ],
+    "tags": [],
+    "on_lists": [
+      "fetcher-bardcraft"
+    ],
+    "data_paths": [
+      "MasterChiefArmor/Data Files"
+    ],
+    "plugins": [
+      "master_chief.esp"
+    ]
+  },
+  {
+    "name": "Welcome to McDagoth's",
+    "author": "Ignatious",
+    "description": "Adds a McDagoth's restaurant in Balmora with food, ingredients, armor, and characters.",
+    "url": "https://www.nexusmods.com/morrowind/mods/49248",
+    "category": "Locations",
+    "dl_url": "",
+    "usage_notes": "",
+    "compat": 4,
+    "dir": "McDagoths",
+    "slug": "welcome-to-mcdagoths",
+    "date_added": "2026-07-12T00:00:00+00:00",
+    "date_updated": "2026-07-12T00:00:00+00:00",
+    "download_info": [
+      {
+        "direct_download": null,
+        "file_name": "McDagoths",
+        "extract_to": "McDagoths",
+        "nexus_file_id": null,
+        "pinned": false,
+        "actions": []
+      }
+    ],
+    "tags": [],
+    "on_lists": [
+      "fetcher-bardcraft"
+    ],
+    "data_paths": [
+      "McDagoths/McDagoths"
+    ],
+    "plugins": [
+      "McDs.ESP"
+    ]
+  },
+  {
+    "name": "Zerkish Hotkeys Improved (For OpenMW)",
+    "author": "Zerkish",
+    "description": "Adds additional hotbars, improved hotkey interfaces, and an optional configurable hotbar HUD.",
+    "url": "https://www.nexusmods.com/morrowind/mods/56583",
+    "category": "UserInterface",
+    "dl_url": "",
+    "usage_notes": "Requires Zerkish ModUtils, loaded first.",
+    "compat": 4,
+    "dir": "ZerkishHotkeysImproved",
+    "slug": "zerkish-hotkeys-improved-for-openmw",
+    "date_added": "2026-07-12T00:00:00+00:00",
+    "date_updated": "2026-07-12T00:00:00+00:00",
+    "download_info": [
+      {
+        "direct_download": null,
+        "file_name": "Hotkeys Improved Main File",
+        "extract_to": "ZerkishHotkeysImproved",
+        "nexus_file_id": null,
+        "pinned": false,
+        "actions": []
+      }
+    ],
+    "tags": [
+      "openmw-lua"
+    ],
+    "on_lists": [
+      "fetcher-bardcraft"
+    ],
+    "data_paths": [
+      "ZerkishHotkeysImproved/ZerkishHotkeysImproved"
+    ],
+    "plugins": [
+      "ZerkishHotkeysImproved.omwscripts"
+    ]
+  },
+  {
+    "name": "Balmora Underworld",
+    "author": "Fulgore",
+    "description": "Adds sewers, markets, criminal factions, caves, quests, and a Dwemer ruin beneath Balmora.",
+    "url": "https://www.nexusmods.com/morrowind/mods/42448",
+    "category": "Locations",
+    "dl_url": "",
+    "usage_notes": "",
+    "compat": 4,
+    "dir": "BalmoraUnderworld",
+    "slug": "balmora-underworld",
+    "date_added": "2026-07-12T00:00:00+00:00",
+    "date_updated": "2026-07-12T00:00:00+00:00",
+    "download_info": [
+      {
+        "direct_download": null,
+        "file_name": "Balmora_Underworld",
+        "extract_to": "BalmoraUnderworld",
+        "nexus_file_id": null,
+        "pinned": false,
+        "actions": []
+      }
+    ],
+    "tags": [],
+    "on_lists": [
+      "fetcher-bardcraft"
+    ],
+    "data_paths": [
+      "BalmoraUnderworld/Balmora Underworld V1.1"
+    ],
+    "plugins": [
+      "FLG - Balmora's Underworld V1.1.esp"
+    ]
+  },
+  {
+    "name": "Imperial Billiards - Playable Pool Tables",
+    "author": "Dillonn241",
+    "description": "Adds playable five-ball billiards tables and AI opponents at locations across Vvardenfell.",
+    "url": "https://www.nexusmods.com/morrowind/mods/58660",
+    "category": "Gameplay",
+    "dl_url": "",
+    "usage_notes": "Installs the all-in-one Vvardenfell file. The optional Project Cyrodiil addon is excluded. Requires Tamriel Data.",
+    "compat": 4,
+    "dir": "ImperialBilliards",
+    "slug": "imperial-billiards-playable-pool-tables",
+    "date_added": "2026-07-12T00:00:00+00:00",
+    "date_updated": "2026-07-12T00:00:00+00:00",
+    "download_info": [
+      {
+        "direct_download": null,
+        "file_name": "Imperial Billiards",
+        "extract_to": "ImperialBilliards",
+        "nexus_file_id": null,
+        "pinned": false,
+        "actions": []
+      }
+    ],
+    "tags": [],
+    "on_lists": [
+      "fetcher-bardcraft"
+    ],
+    "data_paths": [
+      "ImperialBilliards"
+    ],
+    "plugins": [
+      "Imperial Billiards.esp"
+    ]
+  },
+  {
+    "name": "Nifty Spell Pack (OpenMW)",
+    "author": "Ralts",
+    "description": "Adds astral projection, death reversal, pocket dimensions, contingencies, and other OpenMW magic effects.",
+    "url": "https://www.nexusmods.com/morrowind/mods/58691",
+    "category": "Magic",
+    "dl_url": "",
+    "usage_notes": "Downloaded for future compatibility, but not enabled: this Fetcher OpenMW build does not yet expose the mutable magic-effect content API required by the mod. Magic Window Extender is optional.",
+    "compat": 4,
+    "dir": "NiftySpellPack",
+    "slug": "nifty-spell-pack-openmw",
+    "date_added": "2026-07-12T00:00:00+00:00",
+    "date_updated": "2026-07-12T00:00:00+00:00",
+    "download_info": [
+      {
+        "direct_download": null,
+        "file_name": "Nifty Spell Pack",
+        "extract_to": "NiftySpellPack",
+        "nexus_file_id": null,
+        "pinned": false,
+        "actions": []
+      }
+    ],
+    "tags": [
+      "openmw-lua"
+    ],
+    "on_lists": [
+      "fetcher-bardcraft"
+    ],
+    "data_paths": [
+      "NiftySpellPack"
+    ],
+    "plugins": []
+  },
+  {
+    "name": "Glider and Shield Surfing",
+    "author": "blurpandra",
+    "description": "Adds shield surfing and unlockable hang gliders for OpenMW.",
+    "url": "https://www.nexusmods.com/morrowind/mods/58596",
+    "category": "Gameplay",
+    "dl_url": "",
+    "usage_notes": "Installs the standard Dwemer Glider variant alongside the required core.",
+    "compat": 4,
+    "dir": "GliderAndShieldSurfing",
+    "slug": "glider-and-shield-surfing",
+    "date_added": "2026-07-12T00:00:00+00:00",
+    "date_updated": "2026-07-12T00:00:00+00:00",
+    "download_info": [
+      {
+        "direct_download": null,
+        "file_name": "ErnGlider Main",
+        "extract_to": "GliderAndShieldSurfing",
+        "nexus_file_id": null,
+        "pinned": false,
+        "actions": []
+      }
+    ],
+    "tags": [
+      "openmw-lua"
+    ],
+    "on_lists": [
+      "fetcher-bardcraft"
+    ],
+    "data_paths": [
+      "GliderAndShieldSurfing/ErnGlider-main/00 Core",
+      "GliderAndShieldSurfing/ErnGlider-main/01 Dwemer Glider"
+    ],
+    "plugins": [
+      "ErnGlider.omwaddon",
+      "ErnGlider.omwscripts"
+    ]
+  },
+  {
+    "name": "Yul Marshee and the Visage of Mzund",
+    "author": "The Provincial Privateers",
+    "description": "Adds exploration quests, dungeons, treasures, and a buildable Dwemer airship.",
+    "url": "https://www.nexusmods.com/morrowind/mods/51936",
+    "category": "Quests",
+    "dl_url": "",
+    "usage_notes": "Requires Tamriel Data and OAAB Data, which are already installed earlier in this list.",
+    "compat": 4,
+    "dir": "YulMarshee",
+    "slug": "yul-marshee-and-the-visage-of-mzund",
+    "date_added": "2026-07-12T00:00:00+00:00",
+    "date_updated": "2026-07-12T00:00:00+00:00",
+    "download_info": [
+      {
+        "direct_download": null,
+        "file_name": "Yul Marshee and the Visage of Mzund",
+        "extract_to": "YulMarshee",
+        "nexus_file_id": null,
+        "pinned": false,
+        "actions": []
+      }
+    ],
+    "tags": [],
+    "on_lists": [
+      "fetcher-bardcraft"
+    ],
+    "data_paths": [
+      "YulMarshee/00 Core"
+    ],
+    "plugins": [
+      "Yul Marshee and the Visage of Mzund.ESP"
+    ]
+  },
+  {
+    "name": "Yul Marshee and the Visage of Mzund - OpenMW Patch",
+    "author": "PexCom",
+    "description": "Makes Yul Marshee's airship and final sequence work in OpenMW.",
+    "url": "https://www.nexusmods.com/morrowind/mods/58988",
+    "category": "Patches",
+    "dl_url": "",
+    "usage_notes": "Requires and must load after the original Yul Marshee and the Visage of Mzund mod.",
+    "compat": 4,
+    "dir": "YulMarsheeOpenMWPatch",
+    "slug": "yul-marshee-and-the-visage-of-mzund-openmw-patch",
+    "date_added": "2026-07-12T00:00:00+00:00",
+    "date_updated": "2026-07-12T00:00:00+00:00",
+    "download_info": [
+      {
+        "direct_download": null,
+        "file_name": "Yul Marshee And The Visage Of Mzund   OpenMW Patch",
+        "extract_to": "YulMarsheeOpenMWPatch",
+        "nexus_file_id": null,
+        "pinned": false,
+        "actions": []
+      }
+    ],
+    "tags": [
+      "openmw-lua"
+    ],
+    "on_lists": [
+      "fetcher-bardcraft"
+    ],
+    "data_paths": [
+      "YulMarsheeOpenMWPatch"
+    ],
+    "plugins": [
+      "Yul Marshee and the Visage of Mzund.omwaddon",
+      "Yul Marshee and the Visage of Mzund.omwscripts"
+    ]
+  },
+  {
+    "name": "Project Cyrodiil",
+    "author": "Project Cyrodiil Team",
+    "description": "Adds the province of Cyrodiil to Morrowind as part of Project Tamriel.",
+    "url": "https://www.nexusmods.com/morrowind/mods/44922",
+    "category": "Landmasses",
+    "dl_url": "",
+    "usage_notes": "Requires Tamriel Data. Download the Cyr_Main main file.",
+    "compat": 4,
+    "dir": "ProjectCyrodiil",
+    "slug": "project-cyrodiil",
+    "date_added": "2026-07-12T00:00:00+00:00",
+    "date_updated": "2026-07-12T00:00:00+00:00",
+    "download_info": [
+      {
+        "direct_download": null,
+        "file_name": "Cyr_Main",
+        "extract_to": "ProjectCyrodiil",
+        "nexus_file_id": null,
+        "pinned": false,
+        "actions": []
+      }
+    ],
+    "tags": [
+      "tamriel-data"
+    ],
+    "on_lists": [
+      "fetcher-bardcraft"
+    ],
+    "data_paths": [
+      "ProjectCyrodiil/00 Core"
+    ],
+    "plugins": [
+      "Cyr_Main.esm"
+    ]
+  },
+  {
+    "name": "Starwind v3.1 - A Star Wars Conversion",
+    "author": "Starwind Team",
+    "description": "A total conversion that brings a Star Wars campaign, worlds, equipment, and characters to OpenMW.",
+    "url": "https://www.nexusmods.com/morrowind/mods/48909",
+    "category": "TotalConversions",
+    "dl_url": "",
+    "usage_notes": "Download the Nexus main file named Starwind Version 3.1. The Fetcher updater applies the separate vanilla/multiplayer compatibility release afterward.",
+    "compat": 4,
+    "dir": "Starwindv3AStarWarsConversion",
+    "slug": "starwind-v3-1-a-star-wars-conversion",
+    "date_added": "2026-07-12T00:00:00+00:00",
+    "date_updated": "2026-07-12T00:00:00+00:00",
+    "download_info": [
+      {
+        "direct_download": null,
+        "file_name": "Starwind Version 3.1",
+        "extract_to": "Starwindv3AStarWarsConversion",
+        "nexus_file_id": null,
+        "pinned": false,
+        "actions": []
+      }
+    ],
+    "tags": [
+      "openmw",
+      "total-conversion"
+    ],
+    "on_lists": [
+      "fetcher-bardcraft"
+    ],
+    "data_paths": [
+      "Starwindv3AStarWarsConversion/Starwind3.1/Data Files"
+    ],
+    "plugins": [
+      "StarwindRemasteredV1.15.esm",
+      "StarwindRemasteredPatch.esm"
+    ]
+  },
+  {
+    "name": "Westly Race Bundle",
+    "author": "Westly and Danae123",
+    "description": "A modular bundle of twelve playable race mods by Westly.",
+    "url": "https://www.nexusmods.com/morrowind/mods/53118",
+    "category": "Races",
+    "dl_url": "",
+    "usage_notes": "Requires Tribunal and Bloodmoon. Fetcher installs 00 Core and race modules 01 through 12; the alternate 13 EXTRA nude Halfling module is excluded.",
+    "compat": 4,
+    "dir": "WestlyRaceBundle",
+    "slug": "westly-race-bundle",
+    "date_added": "2026-07-12T00:00:00+00:00",
+    "date_updated": "2026-07-12T00:00:00+00:00",
+    "download_info": [
+      {
+        "direct_download": null,
+        "file_name": "Westly Race Bundle",
+        "extract_to": "WestlyRaceBundle",
+        "nexus_file_id": null,
+        "pinned": false,
+        "actions": []
+      }
+    ],
+    "tags": [],
+    "on_lists": [
+      "fetcher-bardcraft"
+    ],
+    "data_paths": [
+      "WestlyRaceBundle/00 Core",
+      "WestlyRaceBundle/01 Khajiit Diversity",
+      "WestlyRaceBundle/02 M'harjaan",
+      "WestlyRaceBundle/03 Sarek",
+      "WestlyRaceBundle/04 Aureals",
+      "WestlyRaceBundle/05 Half Races",
+      "WestlyRaceBundle/06 Halfling",
+      "WestlyRaceBundle/07 Half troll",
+      "WestlyRaceBundle/08 MangChu",
+      "WestlyRaceBundle/09 Tahnuk",
+      "WestlyRaceBundle/10 Saxhleel",
+      "WestlyRaceBundle/11 The Sidhe and Darklings",
+      "WestlyRaceBundle/12 Altaran"
+    ],
+    "plugins": [
+      "New Khajiit Diversity(BEAST)X.esp",
+      "Westly Presents-M'harjaan.esp",
+      "Westly Presents-Sarek.esp",
+      "Westly Presents_Aureals.esp",
+      "Westly Presents_Half Races of Tamriel_X.esp",
+      "Westly Presents_Halflings (UNDERWEAR).esp",
+      "Westly Presents_Half-Troll.esp",
+      "Westly_Presents_Tang Mo_People of the Waters.esp",
+      "Westly Presents_Tahnuk_Races.esp",
+      "Westly_Presents_The_Saxhleel.esp",
+      "Westly_Presents_The_Sidhe_and_Darklings.esp",
+      "Westly Presents-Altaran.esp"
+    ]
+  },
+  {
+    "name": "Tamriel Data Races Playable (Continued)",
+    "author": "Jetroid",
+    "description": "Makes the Tamriel Data 25.05 races playable, including Ayleids, Duadri, and Ogres.",
+    "url": "https://www.nexusmods.com/morrowind/mods/58881",
+    "category": "Races",
+    "dl_url": "",
+    "usage_notes": "Requires Tamriel Data 25.05. Fetcher activates the Ogre version and leaves the mutually exclusive no-Ogre ESP disabled.",
+    "compat": 4,
+    "dir": "TamrielDataRacesPlayableContinued",
+    "slug": "tamriel-data-races-playable-continued",
+    "date_added": "2026-07-12T00:00:00+00:00",
+    "date_updated": "2026-07-12T00:00:00+00:00",
+    "download_info": [
+      {
+        "direct_download": null,
+        "file_name": "Tamriel Data Races Playable Continued 25.05",
+        "extract_to": "TamrielDataRacesPlayableContinued",
+        "nexus_file_id": null,
+        "pinned": false,
+        "actions": []
+      }
+    ],
+    "tags": [
+      "tamriel-data"
+    ],
+    "on_lists": [
+      "fetcher-bardcraft"
+    ],
+    "data_paths": [
+      "TamrielDataRacesPlayableContinued"
+    ],
+    "plugins": [
+      "Tamriel Data Races Playable 25.05.ESP"
+    ]
   }
 ]
