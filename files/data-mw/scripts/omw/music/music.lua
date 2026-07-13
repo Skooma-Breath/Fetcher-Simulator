@@ -62,6 +62,10 @@ local function onCombatTargetsChanged(eventData)
     end
 end
 
+local function isCombatMusicActive()
+    return musicSettings:get("CombatMusicEnabled") and helpers.isInCombat(fightingActors)
+end
+
 local function playerDied()
     ambient.streamMusic("music/special/mw_death.mp3")
 end
@@ -119,7 +123,7 @@ local function onFrame(dt)
 	local musicPlaying = ambient.isMusicPlaying()
 	if types.Actor.isDead(self) and musicPlaying then return end
 
-    local combatMusicEnabled = musicSettings:get("CombatMusicEnabled") and helpers.isInCombat(fightingActors)
+    local combatMusicEnabled = isCombatMusicActive()
     setPlaylistActive("battle", combatMusicEnabled)
 
     local newPlaylist = helpers.getActivePlaylistByPriority(registeredPlaylists)
@@ -156,5 +160,31 @@ return {
     eventHandlers = {
         Died = playerDied,
         OMWMusicCombatTargetsChanged = onCombatTargetsChanged
-    }
+    },
+    interfaceName = 'Music',
+    ---
+    -- @module Music
+    -- @context player
+    -- @usage require('openmw.interfaces').Music
+    interface = {
+        --- Interface version.
+        -- @field [parent=#Music] #number version
+        version = 1,
+
+        --- Register or replace a music playlist.
+        -- @function [parent=#Music] registerPlaylist
+        -- @param #table playlist Playlist definition. `id` and `priority` are required.
+        registerPlaylist = registerPlaylist,
+
+        --- Activate or deactivate a registered playlist.
+        -- @function [parent=#Music] setPlaylistActive
+        -- @param #string id Playlist identifier.
+        -- @param #boolean state Whether the playlist is active.
+        setPlaylistActive = setPlaylistActive,
+
+        --- Return whether the built-in combat-music condition is active.
+        -- @function [parent=#Music] isCombatMusicActive
+        -- @return #boolean
+        isCombatMusicActive = isCombatMusicActive,
+    },
 }

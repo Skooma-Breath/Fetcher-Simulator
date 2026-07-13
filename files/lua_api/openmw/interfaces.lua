@@ -37,6 +37,9 @@
 -- @field [parent=#interfaces] scripts.omw.crimes#scripts.omw.crimes Crimes
 
 ---
+-- @field [parent=#interfaces] scripts.omw.music.music#Music Music
+
+---
 -- @function [parent=#interfaces] __index
 -- @param #interfaces self
 -- @param #string key

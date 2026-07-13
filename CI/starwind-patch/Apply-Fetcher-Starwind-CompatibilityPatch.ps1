@@ -113,11 +113,52 @@ $transactionId = [Guid]::NewGuid().ToString("N")
 $stagePath = Join-Path $dataFilesRoot (".fetcher-starwind-compat-stage-{0}" -f $transactionId)
 $backupPath = Join-Path $dataFilesRoot (".fetcher-starwind-compat-backup-{0}" -f $transactionId)
 
+$starwindMusicPath = Join-Path $sourcePath "Music"
+$musicQuarantinePath = Join-Path $installPath "_fetcher_update\quarantine\starwind-music\Music"
+Assert-PathInside -Parent $installPath -Child $starwindMusicPath -Description "Starwind source music directory"
+Assert-PathInside -Parent $installPath -Child $musicQuarantinePath -Description "Starwind music quarantine directory"
+
+if (Test-Path -LiteralPath $starwindMusicPath -PathType Container) {
+    $musicImportPath = $starwindMusicPath
+}
+elseif (Test-Path -LiteralPath $musicQuarantinePath -PathType Container) {
+    $musicImportPath = $musicQuarantinePath
+}
+else {
+    throw "Could not find Starwind's Music directory in its data root or Fetcher quarantine."
+}
+foreach ($musicCategory in @("Battle", "Explore", "Special")) {
+    if (-not (Test-Path -LiteralPath (Join-Path $musicImportPath $musicCategory) -PathType Container)) {
+        throw "Starwind's soundtrack is missing its $musicCategory directory: $musicImportPath"
+    }
+}
+$starwindMusicFiles = @(Get-ChildItem -LiteralPath $musicImportPath -Recurse -File | Where-Object {
+    $_.Extension -match '^(?i:\.flac|\.mp3|\.ogg|\.wav)$'
+})
+if ($starwindMusicFiles.Count -eq 0) {
+    throw "Starwind's soundtrack contains no supported audio files: $musicImportPath"
+}
+
 try {
     New-Item -ItemType Directory -Path $stagePath | Out-Null
     Copy-Item -LiteralPath (Join-Path $payloadRoot "Data Files") -Destination $stagePath -Recurse
     Copy-Item -LiteralPath (Join-Path $payloadRoot "Starwind Vanilla Compat") -Destination $stagePath -Recurse
     Copy-Item -LiteralPath $manifestPath -Destination (Join-Path $stagePath "fetcher-starwind-compat-patch.json")
+
+    $managedMusicPath = Join-Path $stagePath "Starwind Vanilla Compat\Music\Starwind"
+    New-Item -ItemType Directory -Force -Path $managedMusicPath | Out-Null
+    foreach ($musicItem in Get-ChildItem -LiteralPath $musicImportPath -Force) {
+        Copy-Item -LiteralPath $musicItem.FullName -Destination $managedMusicPath -Recurse -Force
+    }
+    foreach ($musicFile in $starwindMusicFiles) {
+        $relativeMusicPath = $musicFile.FullName.Substring($musicImportPath.Length + 1)
+        $managedMusicFile = Join-Path $managedMusicPath $relativeMusicPath
+        if (-not (Test-Path -LiteralPath $managedMusicFile -PathType Leaf) -or
+            $musicFile.Length -ne (Get-Item -LiteralPath $managedMusicFile).Length -or
+            (Get-Sha256 $musicFile.FullName) -ne (Get-Sha256 $managedMusicFile)) {
+            throw "Managed Starwind soundtrack verification failed: $relativeMusicPath"
+        }
+    }
 
     if (Test-Path -LiteralPath $targetPath) {
         Move-Item -LiteralPath $targetPath -Destination $backupPath
@@ -143,6 +184,29 @@ finally {
 
 Write-Host "Installed Starwind compatibility patch $($manifest.patchVersion):"
 Write-Host "  $targetPath"
+
+if (Test-Path -LiteralPath $starwindMusicPath -PathType Container) {
+    $musicQuarantineParent = Split-Path -Parent $musicQuarantinePath
+    New-Item -ItemType Directory -Force -Path $musicQuarantineParent | Out-Null
+    $musicQuarantineBackup = Join-Path $musicQuarantineParent ("Music-backup-{0}" -f [Guid]::NewGuid().ToString("N"))
+    Assert-PathInside -Parent $installPath -Child $musicQuarantineBackup -Description "Starwind music quarantine backup"
+    if (Test-Path -LiteralPath $musicQuarantinePath) {
+        Move-Item -LiteralPath $musicQuarantinePath -Destination $musicQuarantineBackup
+    }
+    try {
+        Move-Item -LiteralPath $starwindMusicPath -Destination $musicQuarantinePath
+    }
+    catch {
+        if (Test-Path -LiteralPath $musicQuarantineBackup) {
+            Move-Item -LiteralPath $musicQuarantineBackup -Destination $musicQuarantinePath
+        }
+        throw
+    }
+    if (Test-Path -LiteralPath $musicQuarantineBackup) {
+        Remove-Item -LiteralPath $musicQuarantineBackup -Recurse -Force
+    }
+}
+Write-Host "Relocated $($starwindMusicFiles.Count) Starwind soundtrack file(s) to the managed Music/Starwind namespace."
 
 $starwindTexturesPath = Join-Path $sourcePath "Textures"
 $uiQuarantinePath = Join-Path $installPath "_fetcher_update\quarantine\starwind-ui\Textures"

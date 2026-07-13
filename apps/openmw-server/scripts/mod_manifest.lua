@@ -6,7 +6,7 @@ return {
     { filename = "Bloodmoon.esm", sha256 = "bd27090d0e6ad4c1bf1abc83f1a2dac56fcc82cae7bfe8263c413fb301801357" },
     { filename = "StarwindRemasteredV1.15.esm", sha256 = "8ef65cc559f864403757025708f0af55a2ebe1605886a7a1abe880a0af95deb2" },
     { filename = "StarwindRemasteredPatch.esm", sha256 = "9a021648ed3edf87f265d626570dd36edfa0238e29694ec662bbf4b0973f8342" },
-    { filename = "StarwindVanillaCompat.omwscripts", sha256 = "5cc27fa3536491c6cbeac65924df2da2e4e064e27af4ce5528210628b7ba7b0c" },
+    { filename = "StarwindVanillaCompat.omwscripts", sha256 = "a2b2ea0cf8ad04a186c48afc087b44d86b39b1d934f7e84dcfe396f850aa2d08" },
     { filename = "Tamriel_Data.esm", sha256 = "10ff97449f55db61b065979c57ba0de8adc3ebde852ae80c462dfcee917d9df0" },
     { filename = "Tamriel_Data.omwscripts", sha256 = "3dd0f48c4651655f920b90cef906713769a671470832b6a1c04795ceda74fb29" },
     { filename = "Tamriel Data Races Playable 25.05.ESP", sha256 = "6133e3397de66739094f17501eb0be74a7ccc9d17f72fe144243d1031885a06e" },

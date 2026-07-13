@@ -2,7 +2,7 @@
 param(
     [Parameter(Mandatory = $true)][string] $CompatibilityBuildRoot,
     [Parameter(Mandatory = $true)][string] $OutputDirectory,
-    [string] $PatchVersion = "2.0.1",
+    [string] $PatchVersion = "2.1.0",
     [string] $SourceCommit = ""
 )
 
@@ -10,10 +10,14 @@ $ErrorActionPreference = "Stop"
 $sourceRoot = (Resolve-Path -LiteralPath $CompatibilityBuildRoot).Path
 $sourceDataFiles = Join-Path $sourceRoot "Data Files"
 $sourceOverlay = Join-Path $sourceRoot "Starwind Vanilla Compat"
+$musicRouterSource = Join-Path $PSScriptRoot "StarwindMusicRouter.lua"
+$musicCellsSource = Join-Path $PSScriptRoot "StarwindMusicCells.lua"
 foreach ($required in @(
     (Join-Path $sourceDataFiles "StarwindRemasteredV1.15.esm"),
     (Join-Path $sourceDataFiles "StarwindRemasteredPatch.esm"),
-    $sourceOverlay
+    $sourceOverlay,
+    $musicRouterSource,
+    $musicCellsSource
 )) {
     if (-not (Test-Path -LiteralPath $required)) {
         throw "Required compatibility build output is missing: $required"
@@ -70,7 +74,31 @@ try {
     New-Item -ItemType Directory -Force -Path $payloadDataFiles | Out-Null
     Copy-Item -LiteralPath (Join-Path $sourceDataFiles "StarwindRemasteredV1.15.esm") -Destination $payloadDataFiles
     Copy-Item -LiteralPath (Join-Path $sourceDataFiles "StarwindRemasteredPatch.esm") -Destination $payloadDataFiles
-    Copy-Item -LiteralPath $sourceOverlay -Destination $payloadRoot -Recurse
+    $payloadOverlay = Join-Path $payloadRoot "Starwind Vanilla Compat"
+    New-Item -ItemType Directory -Force -Path $payloadOverlay | Out-Null
+    foreach ($overlayItem in Get-ChildItem -LiteralPath $sourceOverlay -Force) {
+        if ($overlayItem.Name -ieq "Music") {
+            continue
+        }
+        Copy-Item -LiteralPath $overlayItem.FullName -Destination $payloadOverlay -Recurse -Force
+    }
+    $payloadScripts = Join-Path $payloadOverlay "scripts\starwind-compat"
+    New-Item -ItemType Directory -Force -Path $payloadScripts | Out-Null
+    Copy-Item -LiteralPath $musicRouterSource -Destination (Join-Path $payloadScripts "starwind-music-router.lua") -Force
+    Copy-Item -LiteralPath $musicCellsSource -Destination (Join-Path $payloadScripts "starwind-music-cells.lua") -Force
+
+    $descriptorPath = Join-Path $payloadOverlay "StarwindVanillaCompat.omwscripts"
+    if (-not (Test-Path -LiteralPath $descriptorPath -PathType Leaf)) {
+        throw "StarwindVanillaCompat.omwscripts is missing from the compatibility overlay."
+    }
+    $musicScriptRegistration = "PLAYER: scripts/starwind-compat/starwind-music-router.lua"
+    if (-not (Get-Content -LiteralPath $descriptorPath | Where-Object { $_.Trim() -eq $musicScriptRegistration })) {
+        [IO.File]::AppendAllText(
+            $descriptorPath,
+            [Environment]::NewLine + $musicScriptRegistration + [Environment]::NewLine,
+            [Text.UTF8Encoding]::new($false)
+        )
+    }
     Copy-Item -LiteralPath (Join-Path $PSScriptRoot "Apply-Fetcher-Starwind-CompatibilityPatch.ps1") -Destination $stageRoot
 
     $files = @(
