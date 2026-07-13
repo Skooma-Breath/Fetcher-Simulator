@@ -1,5 +1,7 @@
 #include "race.hpp"
 
+#include <algorithm>
+
 #include <MyGUI_Gui.h>
 #include <MyGUI_ImageBox.h>
 #include <MyGUI_ListBox.h>
@@ -10,6 +12,7 @@
 
 #include <components/debug/debuglog.hpp>
 #include <components/esm3/loadbody.hpp>
+#include <components/esm3/loadnpc.hpp>
 #include <components/esm3/loadrace.hpp>
 #include <components/myguiplatform/myguitexture.hpp>
 #include <components/settings/values.hpp>
@@ -324,29 +327,82 @@ namespace MWGui
     void RaceDialog::getBodyParts(int part, std::vector<ESM::RefId>& out)
     {
         out.clear();
-        const MWWorld::Store<ESM::BodyPart>& store = MWBase::Environment::get().getESMStore()->get<ESM::BodyPart>();
+        const MWWorld::ESMStore& esmStore = *MWBase::Environment::get().getESMStore();
+        const MWWorld::Store<ESM::BodyPart>& store = esmStore.get<ESM::BodyPart>();
+
+        const auto isSelectablePart = [&](const ESM::BodyPart& bodypart) {
+            if (bodypart.mData.mFlags & ESM::BodyPart::BPF_NotPlayable)
+                return false;
+            if (bodypart.mData.mType != ESM::BodyPart::MT_Skin)
+                return false;
+            if (bodypart.mData.mPart != static_cast<ESM::BodyPart::MeshPart>(part))
+                return false;
+            if (mGenderIndex != static_cast<size_t>(bodypart.mData.mFlags & ESM::BodyPart::BPF_Female))
+                return false;
+            return !ESM::isFirstPersonBodyPart(bodypart);
+        };
 
         for (const ESM::BodyPart& bodypart : store)
         {
-            if (bodypart.mData.mFlags & ESM::BodyPart::BPF_NotPlayable)
-                continue;
-            if (bodypart.mData.mType != ESM::BodyPart::MT_Skin)
-                continue;
-            if (bodypart.mData.mPart != static_cast<ESM::BodyPart::MeshPart>(part))
-                continue;
-            if (mGenderIndex != (bodypart.mData.mFlags & ESM::BodyPart::BPF_Female))
-                continue;
-            if (ESM::isFirstPersonBodyPart(bodypart))
-                continue;
-            if (bodypart.mRace == mCurrentRaceId)
+            if (bodypart.mRace == mCurrentRaceId && isSelectablePart(bodypart))
                 out.push_back(bodypart.mId);
         }
+
+        if (!out.empty())
+            return;
+
+        // Some conversion mods define an alias race that deliberately reuses another race's heads and hair. In that
+        // case the BODY records do not belong to the selected race, even though NPCs of that race validly use them.
+        // Derive the available choices from those NPC appearances rather than retaining the previously selected race's
+        // body part.
+        const MWWorld::Store<ESM::NPC>& npcs = esmStore.get<ESM::NPC>();
+        for (const ESM::NPC& npc : npcs)
+        {
+            if (npc.mRace != mCurrentRaceId || npc.isMale() != (mGenderIndex == 0))
+                continue;
+
+            const ESM::RefId& bodyPartId = part == ESM::BodyPart::MP_Head ? npc.mHead : npc.mHair;
+            if (bodyPartId.empty() || std::find(out.begin(), out.end(), bodyPartId) != out.end())
+                continue;
+
+            const ESM::BodyPart* bodypart = store.search(bodyPartId);
+            if (bodypart && isSelectablePart(*bodypart))
+                out.push_back(bodyPartId);
+        }
+
+        if (!out.empty())
+            Log(Debug::Info) << "Race menu derived " << out.size() << " "
+                             << (part == ESM::BodyPart::MP_Head ? "head" : "hair") << " choice(s) for alias race '"
+                             << mCurrentRaceId << "' from NPC appearances";
     }
 
     void RaceDialog::recountParts()
     {
         getBodyParts(ESM::BodyPart::MP_Hair, mAvailableHairs);
         getBodyParts(ESM::BodyPart::MP_Head, mAvailableHeads);
+
+        if (mAvailableHeads.empty())
+        {
+            const size_t previousGenderIndex = mGenderIndex;
+            std::vector<ESM::RefId> previousHairs = std::move(mAvailableHairs);
+            std::vector<ESM::RefId> previousHeads = std::move(mAvailableHeads);
+
+            mGenderIndex = wrap(mGenderIndex, 2, 1);
+            getBodyParts(ESM::BodyPart::MP_Hair, mAvailableHairs);
+            getBodyParts(ESM::BodyPart::MP_Head, mAvailableHeads);
+
+            if (mAvailableHeads.empty())
+            {
+                mGenderIndex = previousGenderIndex;
+                mAvailableHairs = std::move(previousHairs);
+                mAvailableHeads = std::move(previousHeads);
+            }
+            else
+            {
+                Log(Debug::Info) << "Race menu switched to the supported gender for single-gender race '"
+                                 << mCurrentRaceId << "'";
+            }
+        }
 
         mFaceIndex = 0;
         mHairIndex = 0;
@@ -360,11 +416,9 @@ namespace MWGui
         record.mRace = mCurrentRaceId;
         record.setIsMale(mGenderIndex == 0);
 
-        if (mFaceIndex < mAvailableHeads.size())
-            record.mHead = mAvailableHeads[mFaceIndex];
+        record.mHead = mFaceIndex < mAvailableHeads.size() ? mAvailableHeads[mFaceIndex] : ESM::RefId();
 
-        if (mHairIndex < mAvailableHairs.size())
-            record.mHair = mAvailableHairs[mHairIndex];
+        record.mHair = mHairIndex < mAvailableHairs.size() ? mAvailableHairs[mHairIndex] : ESM::RefId();
 
         try
         {
@@ -389,7 +443,30 @@ namespace MWGui
             if (!playable) // Only display playable races
                 continue;
 
-            items.emplace_back(race.mId, race.mName);
+            std::string displayName = race.mName;
+            if (race.mId == ESM::RefId::stringRefId("ImperialMario"))
+                displayName = "Plumber";
+            else if (race.mId == ESM::RefId::stringRefId("Goblin_bruiser_race"))
+                displayName = "Goblin Bruiser";
+            else if (race.mId == ESM::RefId::stringRefId("Goblin_warchief_race"))
+                displayName = "Goblin Warchief";
+
+            items.emplace_back(race.mId, std::move(displayName));
+        }
+
+        std::vector<bool> duplicateNames(items.size(), false);
+        for (size_t i = 0; i < items.size(); ++i)
+        {
+            for (size_t j = i + 1; j < items.size(); ++j)
+            {
+                if (items[i].second == items[j].second)
+                    duplicateNames[i] = duplicateNames[j] = true;
+            }
+        }
+        for (size_t i = 0; i < items.size(); ++i)
+        {
+            if (duplicateNames[i])
+                items[i].second += " (" + items[i].first.serialize() + ")";
         }
         std::sort(items.begin(), items.end(), sortRaces);
 

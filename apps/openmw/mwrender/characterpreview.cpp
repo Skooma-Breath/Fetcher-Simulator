@@ -4,6 +4,7 @@
 
 #include <osg/BlendFunc>
 #include <osg/Camera>
+#include <osg/ComputeBoundsVisitor>
 #include <osg/Fog>
 #include <osg/LightModel>
 #include <osg/LightSource>
@@ -557,9 +558,10 @@ namespace MWRender
     class UpdateCameraCallback : public SceneUtil::NodeCallback<UpdateCameraCallback, CharacterPreviewRTTNode*>
     {
     public:
-        UpdateCameraCallback(
-            osg::ref_ptr<const osg::Node> nodeToFollow, const osg::Vec3& posOffset, const osg::Vec3& lookAtOffset)
+        UpdateCameraCallback(osg::ref_ptr<const osg::Node> nodeToFollow, osg::ref_ptr<osg::Node> previewRoot,
+            const osg::Vec3& posOffset, const osg::Vec3& lookAtOffset)
             : mNodeToFollow(std::move(nodeToFollow))
+            , mPreviewRoot(std::move(previewRoot))
             , mPosOffset(posOffset)
             , mLookAtOffset(lookAtOffset)
         {
@@ -577,13 +579,39 @@ namespace MWRender
             osg::Matrix worldMat = osg::computeLocalToWorld(nodepaths[0]);
             osg::Vec3 headOffset = worldMat.getTrans();
 
-            auto viewMatrix
-                = osg::Matrixf::lookAt(headOffset + mPosOffset, headOffset + mLookAtOffset, osg::Vec3(0, 0, 1));
+            osg::Vec3 cameraPosition = headOffset + mPosOffset;
+            osg::Vec3 lookAt = headOffset + mLookAtOffset;
+
+            // Custom-race heads can be much larger than vanilla heads or offset substantially from Bip01 Head.
+            // Frame the actual visible geometry when possible, while retaining the vanilla head-bone camera as a
+            // fallback for models whose bounds are missing or invalid.
+            osg::ComputeBoundsVisitor boundsVisitor;
+            boundsVisitor.setTraversalMask(~(Mask_ParticleSystem | Mask_Effect));
+            mPreviewRoot->accept(boundsVisitor);
+            const osg::BoundingBox& bounds = boundsVisitor.getBoundingBox();
+            if (bounds.valid())
+            {
+                const float fovYRadians = osg::DegreesToRadians(12.3f);
+                constexpr float frameMargin = 1.15f;
+                constexpr float minimumHalfExtent = 4.f;
+
+                const osg::Vec3 center = bounds.center();
+                const float halfWidth = std::max(minimumHalfExtent, (bounds.xMax() - bounds.xMin()) * 0.5f);
+                const float halfHeight = std::max(minimumHalfExtent, (bounds.zMax() - bounds.zMin()) * 0.5f);
+                const float framingHalfExtent = std::max(halfWidth, halfHeight);
+                const float distance = framingHalfExtent / std::tan(fovYRadians * 0.5f) * frameMargin;
+
+                lookAt = center;
+                cameraPosition = center + osg::Vec3(0.f, distance, 0.f);
+            }
+
+            auto viewMatrix = osg::Matrixf::lookAt(cameraPosition, lookAt, osg::Vec3(0, 0, 1));
             node->setViewMatrix(viewMatrix);
         }
 
     private:
         osg::ref_ptr<const osg::Node> mNodeToFollow;
+        osg::ref_ptr<osg::Node> mPreviewRoot;
         osg::Vec3 mPosOffset;
         osg::Vec3 mLookAtOffset;
     };
@@ -601,7 +629,7 @@ namespace MWRender
         const osg::Node* head = mAnimation->getNode("Bip01 Head");
         if (head)
         {
-            mUpdateCameraCallback = new UpdateCameraCallback(head, mPosition, mLookAt);
+            mUpdateCameraCallback = new UpdateCameraCallback(head, mNode, mPosition, mLookAt);
             mRTTNode->addUpdateCallback(mUpdateCameraCallback);
         }
         else
