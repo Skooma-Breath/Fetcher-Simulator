@@ -84,6 +84,7 @@ function Test-FetcherMutablePath {
         "tes3cmd.exe",
         "apply-fetcher-public-test-config.bat",
         "apply-fetcher-public-test-config.ps1",
+        "apply-fetcher-zhi-compatibility.ps1",
         "fetcher-bardcraft-umo.json",
         "fetcher-client-patches.json",
         "fetcher-tester-tools.json",
@@ -729,6 +730,14 @@ try {
 
     if (-not $SkipUmoMods) {
         Install-UmoModList -Root $root
+    }
+
+    $zhiCompatibilityScript = Join-Path $root "Apply-Fetcher-ZHI-Compatibility.ps1"
+    if (Test-Path -LiteralPath $zhiCompatibilityScript -PathType Leaf) {
+        & $zhiCompatibilityScript -InstallRoot $root
+        if (-not $?) {
+            throw "Zerkish Hotkeys Improved compatibility fix failed."
+        }
     }
 
     if (-not $SkipModPatches) {

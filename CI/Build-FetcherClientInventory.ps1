@@ -35,6 +35,7 @@ function Test-FetcherMutablePath {
         "tes3cmd.exe",
         "apply-fetcher-public-test-config.bat",
         "apply-fetcher-public-test-config.ps1",
+        "apply-fetcher-zhi-compatibility.ps1",
         "fetcher-bardcraft-umo.json",
         "fetcher-client-patches.json",
         "fetcher-tester-tools.json",

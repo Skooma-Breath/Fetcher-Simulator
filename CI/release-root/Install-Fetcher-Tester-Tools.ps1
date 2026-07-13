@@ -122,6 +122,13 @@ finally {
 }
 
 Write-Host "Fetcher tester tools installed to: $root"
+$zhiCompatibilityScript = Join-Path $root "Apply-Fetcher-ZHI-Compatibility.ps1"
+if (Test-Path -LiteralPath $zhiCompatibilityScript -PathType Leaf) {
+    & $zhiCompatibilityScript -InstallRoot $root
+    if (-not $?) {
+        throw "Zerkish Hotkeys Improved compatibility fix failed."
+    }
+}
 if (-not $SkipUpdater) {
     & (Join-Path $root "Update-Fetcher-Simulator.ps1") -InstallRoot $root
 }

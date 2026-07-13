@@ -31,6 +31,18 @@
       "plugins": [
         "StarwindVanillaCompat.omwscripts"
       ]
+    },
+    {
+      "id": "zhi-chargen-popup-v1",
+      "name": "Fetcher Zerkish Hotkeys Improved multiplayer compatibility",
+      "releaseTag": "fetcher-zhi-compat-patch-v1",
+      "assetName": "fetcher-zhi-compat-patch-v1.zip",
+      "targetPlugin": "ZerkishHotkeysImproved.omwscripts",
+      "requiredSubdirectory": "scripts/ZerkishHotkeysImproved",
+      "applierPattern": "Apply-Fetcher-ZHI-Compatibility.ps1",
+      "targetParameter": "ZhiDataRoot",
+      "manifestName": "fetcher-zhi-compat-patch.json",
+      "markerFile": "fetcher-zhi-compat-patch.json"
     }
   ]
 }

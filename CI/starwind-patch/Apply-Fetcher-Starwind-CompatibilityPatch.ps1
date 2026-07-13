@@ -150,8 +150,19 @@ Assert-PathInside -Parent $installPath -Child $uiQuarantinePath -Description "St
 $quarantinedUiFiles = 0
 if (Test-Path -LiteralPath $starwindTexturesPath -PathType Container) {
     New-Item -ItemType Directory -Force -Path $uiQuarantinePath | Out-Null
+    $datapadTexturePath = Join-Path $starwindTexturesPath "JMenuScreen.dds"
+    $quarantinedDatapadTexturePath = Join-Path $uiQuarantinePath "JMenuScreen.dds"
+    if (Test-Path -LiteralPath $quarantinedDatapadTexturePath -PathType Leaf) {
+        if (-not (Test-Path -LiteralPath $datapadTexturePath -PathType Leaf)) {
+            Move-Item -LiteralPath $quarantinedDatapadTexturePath -Destination $datapadTexturePath -Force
+            Write-Host "Restored Starwind datapad screen texture: JMenuScreen.dds"
+        }
+        else {
+            Remove-Item -LiteralPath $quarantinedDatapadTexturePath -Force
+        }
+    }
     foreach ($uiTexture in Get-ChildItem -LiteralPath $starwindTexturesPath -File | Where-Object {
-        $_.Name -match '^(?i:JMenuScreen|menu_|tx_menu|scroll|cursor).*\.dds$'
+        $_.Name -match '^(?i:menu_|tx_menu|scroll|cursor).*\.dds$'
     }) {
         Move-Item -LiteralPath $uiTexture.FullName -Destination (Join-Path $uiQuarantinePath $uiTexture.Name) -Force
         ++$quarantinedUiFiles

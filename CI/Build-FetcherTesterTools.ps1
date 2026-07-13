@@ -14,6 +14,7 @@ if ([string]::IsNullOrWhiteSpace($SourceDir)) {
 $files = @(
     "Apply-Fetcher-Public-Test-Config.bat",
     "Apply-Fetcher-Public-Test-Config.ps1",
+    "Apply-Fetcher-ZHI-Compatibility.ps1",
     "fetcher-bardcraft-umo.json",
     "fetcher-client-patches.json",
     "FETCHER_SIMULATOR_README.txt",
