@@ -1,6 +1,8 @@
 local mp = require("mp")
 local config = require("config")
 local speechData = require("speech_data")
+local starwindSpeechData = require("starwind_speech_data")
+local customSpeechData = require("custom_speech_data")
 
 local M = {}
 
@@ -31,6 +33,8 @@ local lastSpeechAtByGuid = {}
 local lastCooldownNoticeAtByGuid = {}
 
 local TYPE_ALIASES = {
+    alarm = "alarm",
+    alr = "alarm",
     atk = "attack",
     attack = "attack",
     cratk = "crattack",
@@ -43,6 +47,8 @@ local TYPE_ALIASES = {
     hello = "hello",
     hlo = "hello",
     hit = "hit",
+    hurt = "hit",
+    pain = "hit",
     idle = "idle",
     idl = "idle",
     intruder = "intruder",
@@ -55,6 +61,11 @@ local TYPE_ALIASES = {
     thf = "thief",
     uniform = "uniform",
     uni = "uniform",
+}
+
+local EXTENDED_SPEECH_DATA = {
+    starwindSpeechData,
+    customSpeechData,
 }
 
 local COLLECTION_ALIASES = {
@@ -174,11 +185,7 @@ local function clientVoicePath(path)
         return normalized
     end
 
-    if string.lower(normalized):sub(1, 3) == "vo\\" then
-        return "Sound\\" .. normalized
-    end
-
-    return normalized
+    return "Sound\\" .. normalized
 end
 
 local function parsePositiveInteger(value)
@@ -318,7 +325,23 @@ local function resolveSpeechPath(player, speechInput, speechIndex)
         and raceData[collection][gender]
         and raceData[collection][gender][speechType]
 
-    return entryPathById(entries, speechIndex)
+    local path = entryPathById(entries, speechIndex)
+    if path or collection ~= "default" then
+        return path
+    end
+
+    for _, data in ipairs(EXTENDED_SPEECH_DATA) do
+        local extendedRaceData = data.races and data.races[race]
+        local extendedEntries = extendedRaceData
+            and extendedRaceData[gender]
+            and extendedRaceData[gender][speechType]
+        path = entryPathById(extendedEntries, speechIndex)
+        if path then
+            return path
+        end
+    end
+
+    return nil
 end
 
 local function compactRanges(numbers)
@@ -375,17 +398,12 @@ local function describeEntries(entries, positional)
     return description
 end
 
-local function appendCollectionHelp(parts, raceData, gender, collection)
-    local genderData = raceData
-        and raceData[collection]
-        and raceData[collection][gender]
-
+local function appendGenderHelp(parts, genderData, prefix)
     if not genderData then
         return
     end
 
     local seen = {}
-    local prefix = collection == "default" and "" or (collection .. "_")
 
     for _, speechType in ipairs(TYPE_ORDER) do
         local description = describeEntries(genderData[speechType], false)
@@ -405,6 +423,14 @@ local function appendCollectionHelp(parts, raceData, gender, collection)
     end
 end
 
+local function appendCollectionHelp(parts, raceData, gender, collection)
+    local genderData = raceData
+        and raceData[collection]
+        and raceData[collection][gender]
+    local prefix = collection == "default" and "" or (collection .. "_")
+    appendGenderHelp(parts, genderData, prefix)
+end
+
 local function printableValidList(player)
     local raceData = speechData.races[playerRace(player)]
     local gender = playerGender(player)
@@ -412,6 +438,12 @@ local function printableValidList(player)
 
     for _, collection in ipairs(COLLECTION_ORDER) do
         appendCollectionHelp(parts, raceData, gender, collection)
+    end
+
+    local race = playerRace(player)
+    for _, data in ipairs(EXTENDED_SPEECH_DATA) do
+        local extendedRaceData = data.races and data.races[race]
+        appendGenderHelp(parts, extendedRaceData and extendedRaceData[gender], "")
     end
 
     local misc = describeEntries(speechData.global.misc, true)
@@ -472,18 +504,22 @@ function M.handleChat(player, data, env)
         return false
     end
 
+    return M.playPath(player, path, "speech")
+end
+
+function M.playPath(player, path, logTag)
     if not canPlaySpeechNow(player) then
         return false
     end
 
     local soundPath = clientVoicePath(path)
-    if not mp.playSpeech(player.guid, soundPath) then
+    if not soundPath or not mp.playSpeech(player.guid, soundPath) then
         player:sendMessage("Could not play speech for your character right now.")
         return false
     end
 
     markSpeechPlayed(player)
-    mp.log(string.format("[speech] %s played %s", player.name, soundPath))
+    mp.log(string.format("[%s] %s played %s", logTag or "speech", player.name, soundPath))
     return false
 end
 

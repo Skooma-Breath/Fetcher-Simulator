@@ -79,6 +79,30 @@ local COMMANDS = {
         summary = "List valid speech types and indexes.",
     },
     {
+        id = "swspeech",
+        category = "Voice",
+        usage = "/swspeech <type> <index>",
+        summary = "Play a Starwind race voice line on your character.",
+    },
+    {
+        id = "swspeechhelp",
+        category = "Voice",
+        usage = "/swspeechhelp",
+        summary = "List Starwind voice types and indexes for your race.",
+    },
+    {
+        id = "customspeech",
+        category = "Voice",
+        usage = "/customspeech <type> <index>",
+        summary = "Play a non-Starwind custom-race voice line.",
+    },
+    {
+        id = "customspeechhelp",
+        category = "Voice",
+        usage = "/customspeechhelp",
+        summary = "List custom-race voice types and indexes for your race.",
+    },
+    {
         id = "bcperf",
         category = "Bardcraft",
         usage = "/bcperf list|join|play|playpart|instruments|stop",

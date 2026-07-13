@@ -1564,6 +1564,16 @@ local function handleChat(player, data)
             return speechHandled
         end
 
+        -- Keep this require local to dispatch: handleChat is already at Lua 5.1's
+        -- upvalue limit, and require caches the module after the first command.
+        local extendedSpeechHandled = require("extended_speech_commands").handleChat(player, data, {
+            commandPrefix = COMMAND_PREFIX,
+            parseCommandArgs = parseCommandArgs,
+        })
+        if extendedSpeechHandled ~= nil then
+            return extendedSpeechHandled
+        end
+
         local surfHandled = surfCommands.handleChat(player, data, {
             commandPrefix = COMMAND_PREFIX,
             findPlayerByName = findPlayerByName,
