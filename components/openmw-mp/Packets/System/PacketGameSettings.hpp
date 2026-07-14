@@ -6,10 +6,17 @@
 
 namespace mwmp
 {
+    enum class GuardArrestMode : std::uint8_t
+    {
+        Dialogue = 0,
+        Combat = 1,
+    };
+
     class PacketGameSettings : public BasePacket
     {
     public:
         SurfPhysicsSettings settings;
+        GuardArrestMode guardArrestMode = GuardArrestMode::Combat;
 
         PacketGameSettings()
             : BasePacket(PacketType::GameSettings)
@@ -31,6 +38,7 @@ namespace mwmp
             ws.write(settings.rampAngle);
             ws.write(settings.impactOverbounce);
             ws.write(settings.impactVelocityThreshold);
+            ws.write(static_cast<std::uint8_t>(guardArrestMode));
         }
 
         void unpack(ReadStream& rs) override
@@ -47,6 +55,16 @@ namespace mwmp
             rs.read(settings.rampAngle);
             rs.read(settings.impactOverbounce);
             rs.read(settings.impactVelocityThreshold);
+            // Optional tail field keeps new clients compatible with servers
+            // that predate the configurable multiplayer arrest policy.
+            if (!rs.eof())
+            {
+                std::uint8_t rawGuardArrestMode = 0;
+                rs.read(rawGuardArrestMode);
+                guardArrestMode = rawGuardArrestMode == static_cast<std::uint8_t>(GuardArrestMode::Dialogue)
+                    ? GuardArrestMode::Dialogue
+                    : GuardArrestMode::Combat;
+            }
         }
     };
 }

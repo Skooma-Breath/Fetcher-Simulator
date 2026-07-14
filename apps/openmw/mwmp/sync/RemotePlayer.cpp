@@ -1086,7 +1086,13 @@ namespace mwmp
         mNameplate.reset();
 
         MWBase::World* world = MWBase::Environment::get().getWorld();
-        if (world && !mNpcPtr.isEmpty())
+        // A disconnect can return to the main menu and unload the remote NPC's
+        // cell before Main destroys its PlayerList. In that state mNpcPtr still
+        // looks non-empty but points into a released CellStore, so deleteObject
+        // would dereference freed RefData during shutdown.
+        const bool cellStillActive = world
+            && findActiveCell(*static_cast<MWWorld::World*>(world), mState.cell) != nullptr;
+        if (cellStillActive && !mNpcPtr.isEmpty())
         {
             try
             {

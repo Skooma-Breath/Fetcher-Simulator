@@ -516,6 +516,7 @@ void Main::onDisconnected()
     mAutoEnterAllowNewCharacterUi = false;
     mIsLinked       = false;
     mLocalPublicKey.clear();
+    mGuardArrestMode = GuardArrestMode::Combat;
     MWPhysics::resetSurfPhysicsSettings();
     // Clear all per-session actor/cell tracking so that stale MWWorld::Ptr
     // references from the now-dying game world are never accessed on reconnect.
@@ -1141,14 +1142,17 @@ void Main::registerProtocolHandlers()
         });
 
     proto.registerHandler(PacketType::GameSettings,
-        [](const uint8_t* data, size_t size)
+        [this](const uint8_t* data, size_t size)
         {
             PacketGameSettings pkt;
             if (!pkt.decode(data, size)) return;
 
             MWPhysics::setSurfPhysicsSettings(pkt.settings);
+            mGuardArrestMode = pkt.guardArrestMode;
             Log(Debug::Info) << "[MP] Applied surf settings for cell=" << pkt.settings.cellId
-                             << " enabled=" << (pkt.settings.enabled ? "true" : "false");
+                             << " enabled=" << (pkt.settings.enabled ? "true" : "false")
+                             << " guardArrestMode="
+                             << (mGuardArrestMode == GuardArrestMode::Dialogue ? "dialogue" : "combat");
         });
 
     // --- World weather ---

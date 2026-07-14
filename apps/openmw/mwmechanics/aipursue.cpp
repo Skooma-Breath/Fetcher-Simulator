@@ -14,6 +14,10 @@
 #include "creaturestats.hpp"
 #include "npcstats.hpp"
 
+#ifdef BUILD_MULTIPLAYER
+#include "../mwmp/Main.hpp"
+#endif
+
 namespace MWMechanics
 {
 
@@ -67,6 +71,18 @@ namespace MWMechanics
         {
             if (!MWBase::Environment::get().getWorld()->getLOS(target, actor))
                 return false;
+
+#ifdef BUILD_MULTIPLAYER
+            // Multiplayer does not pause the simulation while dialogue is
+            // open. Servers can therefore replace the modal arrest choice
+            // with an immediate resist-arrest outcome.
+            if (mwmp::Main::isInitialised()
+                && mwmp::Main::get().getGuardArrestMode() == mwmp::GuardArrestMode::Combat)
+            {
+                MWBase::Environment::get().getMechanicsManager()->startCombat(actor, target, nullptr);
+                return true;
+            }
+#endif
 
             MWBase::WindowManager* windowManager = MWBase::Environment::get().getWindowManager();
             if (windowManager->containsMode(MWGui::GM_Dialogue))

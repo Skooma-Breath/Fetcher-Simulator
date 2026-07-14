@@ -3562,15 +3562,43 @@ namespace MWMechanics
     void CharacterController::playSwishSound() const
     {
         static ESM::RefId weaponSwish = ESM::RefId::stringRefId("Weapon Swish");
+        static ESM::RefId saberSingleScript = ESM::RefId::stringRefId("SW_SaberSingleSoundsScr");
+        static ESM::RefId saberDoubleScript = ESM::RefId::stringRefId("SW_SaberDoubleSoundsScr");
+        static ESM::RefId saberSingle = ESM::RefId::stringRefId("SaberSingle");
+        static ESM::RefId saberDouble = ESM::RefId::stringRefId("SaberDouble");
+
         const ESM::RefId* soundId = &weaponSwish;
         float volume = 0.98f + mAttackStrength * 0.02f;
         float pitch = 0.75f + mAttackStrength * 0.4f;
 
         const MWWorld::Class& cls = mPtr.getClass();
-        if (cls.isNpc() && cls.getNpcStats(mPtr).isWerewolf())
+        MWBase::World* world = MWBase::Environment::get().getWorld();
+        const MWWorld::ESMStore& store = world->getStore();
+
+        // Starwind's remastered lightsabers replace Weapon Swish from an
+        // equipped-item script. Container item scripts only run for the local
+        // player, however, so a multiplayer proxy otherwise keeps the vanilla
+        // sword sound. Resolve the same override from the equipped weapon's
+        // script here, where local players, remote players, and NPCs all pass.
+        if (!mWeapon.isEmpty())
         {
-            MWBase::World* world = MWBase::Environment::get().getWorld();
-            const MWWorld::ESMStore& store = world->getStore();
+            const ESM::RefId& weaponScript = mWeapon.getClass().getScript(mWeapon);
+            if (weaponScript == saberSingleScript && store.get<ESM::Sound>().search(saberSingle))
+            {
+                soundId = &saberSingle;
+                volume = 1.f;
+                pitch = 1.f;
+            }
+            else if (weaponScript == saberDoubleScript && store.get<ESM::Sound>().search(saberDouble))
+            {
+                soundId = &saberDouble;
+                volume = 1.f;
+                pitch = 1.f;
+            }
+        }
+
+        if (soundId == &weaponSwish && cls.isNpc() && cls.getNpcStats(mPtr).isWerewolf())
+        {
             const ESM::Sound* sound = store.get<ESM::Sound>().searchRandom("WolfSwing", world->getPrng());
             if (sound)
                 soundId = &sound->mId;

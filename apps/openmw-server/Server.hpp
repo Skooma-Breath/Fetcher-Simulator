@@ -571,6 +571,7 @@ private:
     int                           mActorAuthorityStickyMs = 3000;
     bool                          mActorAuthorityPreferExactCell = true;
     bool                          mAnnouncePlayerDeaths = true;
+    bool                          mGuardArrestDialogueEnabled = false;
     bool                          mModChecksEnabled = false;
     bool                          mModChecksStrictOrder = false;
     bool                          mModChecksRequireExactList = false;

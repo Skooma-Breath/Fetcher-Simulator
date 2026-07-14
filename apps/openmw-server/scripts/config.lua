@@ -19,6 +19,10 @@ Config.ADMIN_PASSWORD = "changeme"
 
 Config.START_HOUR = 8.0
 Config.TIME_SCALE = 30.0
+-- Guard arrest policy sent to multiplayer clients:
+--   "combat"   skips the non-pausing arrest prompt and treats capture as resistance.
+--   "dialogue" preserves the vanilla pay/jail/resist prompt.
+Config.GUARD_ARREST_MODE = "combat"
 -- Periodic server Lua still runs at 60 Hz for ordinary script events.
 -- Immediate intent evaluation wakes the Lua thread on demand for hot paths
 -- like Activate, so these settings mainly cover the non-blocking tick work.

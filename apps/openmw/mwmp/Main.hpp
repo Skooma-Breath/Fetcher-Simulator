@@ -6,6 +6,7 @@
 #include <osg/Vec3f>
 #include <string>
 #include <vector>
+#include <components/openmw-mp/Packets/System/PacketGameSettings.hpp>
 #include <components/openmw-mp/Packets/System/PacketHandshake.hpp>
 
 namespace MWWorld { class Ptr; }
@@ -69,6 +70,7 @@ namespace mwmp
         ChatWindow& getChatWindow() { return *mChatWindow; }
         MpNetworkBridge& getNetworkBridge() { return *mNetworkBridge; }
         bool hasChatWindow() const { return mChatWindow != nullptr; }
+        GuardArrestMode getGuardArrestMode() const { return mGuardArrestMode; }
 
         // Connection state queries (used by AccountDialog to poll results)
         bool               isWorldReady()          const { return mWorldReady; }
@@ -181,6 +183,7 @@ namespace mwmp
         std::string mHost;
         uint16_t    mPort           = 25565;
         std::string mRejectReason;
+        GuardArrestMode mGuardArrestMode = GuardArrestMode::Combat;
 
         // Chargen restore data (returning players)
         std::string mRestoredRace;

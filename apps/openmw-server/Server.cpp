@@ -1577,8 +1577,12 @@ void MPServer::run()
     // Read Config.MAX_CHARS_PER_ACCOUNT from config.lua (0 = unlimited).
     mMaxCharsPerAccount = mLua.getInt("Config", "MAX_CHARS_PER_ACCOUNT", mMaxCharsPerAccount);
     mAnnouncePlayerDeaths = mLua.getBool("Config", "ANNOUNCE_PLAYER_DEATHS", true);
+    mGuardArrestDialogueEnabled
+        = lowerAscii(mLua.getString("Config", "GUARD_ARREST_MODE", "combat")) == "dialogue";
     Log(Debug::Info) << "[Server] Max chars per account: "
                      << (mMaxCharsPerAccount == 0 ? "unlimited" : std::to_string(mMaxCharsPerAccount));
+    Log(Debug::Info) << "[Server] Guard arrest mode: "
+                     << (mGuardArrestDialogueEnabled ? "dialogue" : "combat");
 
     mModChecksEnabled = mLua.getBool("Config", "MOD_CHECKS_ENABLED", false);
     mModChecksStrictOrder = mLua.getBool("Config", "MOD_CHECKS_STRICT_ORDER", false);
@@ -4249,6 +4253,11 @@ void MPServer::sendGameSettingsToClient(HSteamNetConnection conn, const std::str
         pkt.settings = mLua.getEffectiveSurfPhysicsSettings(clientIt->second.guid, cellId);
     else
         pkt.settings = mLua.getCellSurfPhysicsSettings(cellId);
+    // Config values are loaded before the dedicated Lua tick thread starts.
+    // Never enter the Lua VM from this network-thread packet path.
+    pkt.guardArrestMode = mGuardArrestDialogueEnabled
+        ? GuardArrestMode::Dialogue
+        : GuardArrestMode::Combat;
     sendTo(conn, pkt.encode());
 }
 
