@@ -2,6 +2,7 @@
 #define OPENMW_MWMP_SYNC_REMOTEPLAYER_HPP
 
 #include <cstdint>
+#include <deque>
 #include <memory>
 #include <string>
 #include <unordered_map>
@@ -89,6 +90,8 @@ namespace mwmp
 
         // ---- interpolation ----
         void updateInterpolation(float dt);
+        bool updateSnapshotTarget();
+        void clearPositionSnapshots();
 
         // ---- cell helpers ----
         bool isInSameCellAsLocalPlayer(bool quiet = false) const;
@@ -128,6 +131,22 @@ namespace mwmp
 
         static constexpr float POS_INTERP_SPEED = 15.f;
         static constexpr float ROT_INTERP_SPEED = 20.f;
+
+        struct PositionSnapshot
+        {
+            Position position;
+            Velocity velocity;
+            uint64_t senderTimeUs = 0;
+            uint64_t receiveTimeUs = 0;
+            uint32_t sequence = 0;
+        };
+        std::deque<PositionSnapshot> mPositionSnapshots;
+        double mPositionClockOffsetUs = 0.0;
+        bool mHasPositionClockOffset = false;
+        uint64_t mLastPositionSampleTimeUs = 0;
+        static constexpr uint64_t POSITION_INTERPOLATION_DELAY_US = 120000;
+        static constexpr uint64_t POSITION_EXTRAPOLATION_LIMIT_US = 100000;
+        static constexpr std::size_t MAX_POSITION_SNAPSHOTS = 32;
 
         // Throttled debug output for comparing interpolation speed to
         // CharacterController animation-rate decisions on the same remote actor.
@@ -191,6 +210,10 @@ namespace mwmp
         std::size_t mMovementDiagApplyMoves = 0;
         std::size_t mMovementDiagApplySkips = 0;
         std::size_t mMovementDiagExtrapolationClamps = 0;
+        std::size_t mMovementDiagSnapshotInterpFrames = 0;
+        std::size_t mMovementDiagSnapshotExtrapFrames = 0;
+        std::size_t mMovementDiagSnapshotHoldFrames = 0;
+        std::size_t mMovementDiagSnapshotDepthMax = 0;
         std::size_t mMovementDiagQuietWindows = 0;
     };
 

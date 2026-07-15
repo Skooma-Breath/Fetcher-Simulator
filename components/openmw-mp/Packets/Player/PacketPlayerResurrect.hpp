@@ -14,11 +14,15 @@ namespace mwmp
         void pack(WriteStream& ws) override
         {
             ws.write(mPlayer->guid);
+            packCellId(ws, mPlayer->cell);
+            packPosition(ws, mPlayer->position);
         }
 
         void unpack(ReadStream& rs) override
         {
             rs.read(mPlayer->guid);
+            unpackCellId(rs, mPlayer->cell);
+            unpackPosition(rs, mPlayer->position);
         }
     };
 } // namespace mwmp

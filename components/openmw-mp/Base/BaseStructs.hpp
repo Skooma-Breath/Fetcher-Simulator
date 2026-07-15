@@ -198,6 +198,11 @@ namespace mwmp
         float       strength = 0.f;
         float       damage  = 0.f;
         int         type    = 0;    // 0=melee,1=magic,2=bow,3=throw
+        // Exact on-strike enchantment that successfully fired for this hit.
+        // Empty when no enchantment fired (including insufficient charge).
+        // Receivers use this only to replay audiovisual presentation; gameplay
+        // effects remain authoritative on the client that resolved the hit.
+        std::string onStrikeEnchantment;
         // Animation group chosen by the sender's CharacterController at wind-up time.
         // "chop" / "slash" / "thrust" for melee; "shoot" for ranged.
         // Mirrors TES3MP attack.attackAnimation — lets the receiver's CC play the

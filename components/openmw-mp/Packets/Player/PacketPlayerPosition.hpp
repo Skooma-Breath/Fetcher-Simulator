@@ -19,6 +19,7 @@ namespace mwmp
             ws.write(mPlayer->velocity.linear[0]);
             ws.write(mPlayer->velocity.linear[1]);
             ws.write(mPlayer->velocity.linear[2]);
+            ws.write(mPlayer->positionSampleTimeUs);
         }
 
         void unpack(ReadStream& rs) override
@@ -29,6 +30,12 @@ namespace mwmp
             rs.read(mPlayer->velocity.linear[0]);
             rs.read(mPlayer->velocity.linear[1]);
             rs.read(mPlayer->velocity.linear[2]);
+            // Keep decoding compatible with position packets produced before
+            // timestamped snapshots were introduced.
+            if (rs.remaining() >= sizeof(mPlayer->positionSampleTimeUs))
+                rs.read(mPlayer->positionSampleTimeUs);
+            else
+                mPlayer->positionSampleTimeUs = 0;
         }
     };
 

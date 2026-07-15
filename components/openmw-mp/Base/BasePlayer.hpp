@@ -33,6 +33,10 @@ namespace mwmp
         // ------------------------------------------------------------------
         Position    position;
         Velocity    velocity;
+        // Sender steady-clock timestamp for the authoritative position sample.
+        // Receivers use relative clock offset, so clocks do not need to be
+        // synchronised across machines.
+        uint64_t    positionSampleTimeUs = 0;
         CellId      cell;
 
         // ------------------------------------------------------------------

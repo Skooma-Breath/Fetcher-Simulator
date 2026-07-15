@@ -710,7 +710,8 @@ namespace MWClass
             damage *= store.find("fCombatKODamageMult")->mValue.getFloat();
 
         // Apply "On hit" enchanted weapons
-        MWMechanics::applyOnStrikeEnchantment(ptr, victim, weapon, hitPosition);
+        const bool appliedOnStrikeEnchantment
+            = MWMechanics::applyOnStrikeEnchantment(ptr, victim, weapon, hitPosition);
 
         MWMechanics::applyElementalShields(ptr, victim);
 
@@ -732,7 +733,9 @@ namespace MWClass
             const bool knocked = victimStats.getKnockedDown()
                 || victimStats.getFatigue().getCurrent() < 0.f
                 || victimStats.getFatigue().getBase() == 0.f;
-            mwmp::Main::get().getPlayerSync().notifyLocalHit(victim, damage, healthdmg, knocked, hitPosition);
+            mwmp::Main::get().getPlayerSync().notifyLocalHit(victim, damage, healthdmg, knocked, hitPosition, 0, 0.f,
+                appliedOnStrikeEnchantment ? weapon.getClass().getEnchantment(weapon).serializeText()
+                                           : std::string());
         }
 #endif
     }

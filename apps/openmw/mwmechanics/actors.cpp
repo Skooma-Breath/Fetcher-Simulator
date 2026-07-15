@@ -1636,7 +1636,11 @@ namespace MWMechanics
                         return; // for now abort update of the old cell when cell changes by teleportation magic effect
                                 // a better solution might be to apply cell changes at the end of the frame
                     }
-                    if (aiActive && inProcessingRange)
+                    const bool isNetworkPlayerPuppet = !isPlayer
+                        && actor.getPtr().getClass().getCreatureStats(actor.getPtr()).getMovementFlag(
+                            MWMechanics::CreatureStats::Flag_NetworkPlayerNpc);
+
+                    if (aiActive && inProcessingRange && !isNetworkPlayerPuppet)
                     {
                         if (engageCombatTimerStatus == Misc::TimerStatus::Elapsed)
                         {
@@ -1671,7 +1675,7 @@ namespace MWMechanics
                             }
                         }
                     }
-                    else if (aiActive && !isPlayer && isConscious(actor.getPtr())
+                    else if (aiActive && !isPlayer && !isNetworkPlayerPuppet && isConscious(actor.getPtr())
                         && !(luaControls && luaControls->mDisableAI))
                     {
                         CreatureStats& stats = actor.getPtr().getClass().getCreatureStats(actor.getPtr());
@@ -1687,7 +1691,10 @@ namespace MWMechanics
                     if (mTimerUpdateEquippedLight == 0 && actor.getPtr().getClass().hasInventoryStore(actor.getPtr()))
                         updateEquippedLight(actor.getPtr(), updateEquippedLightInterval, showTorches);
 
-                    if (luaControls != nullptr && isConscious(actor.getPtr()))
+                    // Remote-player position, rotation, and action state come from
+                    // multiplayer packets. Local actor-control Lua (notably
+                    // move360-style scripts) must not rotate or move the puppet.
+                    if (luaControls != nullptr && !isNetworkPlayerPuppet && isConscious(actor.getPtr()))
                         updateLuaControls(actor.getPtr(), isPlayer, *luaControls);
                 }
             }
@@ -1791,10 +1798,12 @@ namespace MWMechanics
                 actor.getPtr().getRefData().getBaseNode()->setNodeMask(MWRender::Mask_Actor);
                 // Remote network-player NPCs have collision disabled at spawn and must not
                 // have it re-enabled here. This loop runs every frame for all non-player actors
-                // and would otherwise clobber the spawn-time setActorCollisionMode(false,false),
+                // and would otherwise clobber the spawn-time setActorCollisionMode(false,true),
                 // causing wall-bounce oscillation despite the interpolator being sole position authority.
-                if (!actor.getPtr().getClass().getCreatureStats(actor.getPtr()).getMovementFlag(
-                        MWMechanics::CreatureStats::Flag_NetworkPlayerNpc))
+                const bool isNetworkPlayerNpc
+                    = actor.getPtr().getClass().getCreatureStats(actor.getPtr()).getMovementFlag(
+                        MWMechanics::CreatureStats::Flag_NetworkPlayerNpc);
+                if (!isNetworkPlayerNpc)
                 {
                     world->setActorCollisionMode(actor.getPtr(), true,
                         !actor.getPtr().getClass().getCreatureStats(actor.getPtr()).isDeathAnimationFinished());
@@ -1802,7 +1811,13 @@ namespace MWMechanics
 
                 if (!actor.getPositionAdjusted())
                 {
-                    actor.getPtr().getClass().adjustPosition(actor.getPtr(), false);
+                    // The proxy already carries its owner's authoritative world
+                    // position. With internal collision disabled, adjustPosition(false)
+                    // cannot trace down but still adds its 20-unit placement lift;
+                    // the result is a hovering proxy until the first position packet
+                    // writes the authoritative Z again.
+                    if (!isNetworkPlayerNpc)
+                        actor.getPtr().getClass().adjustPosition(actor.getPtr(), false);
                     actor.setPositionAdjusted(true);
                 }
 

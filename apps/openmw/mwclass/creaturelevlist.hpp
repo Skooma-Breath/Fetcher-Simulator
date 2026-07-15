@@ -14,6 +14,9 @@ namespace MWClass
         void ensureCustomData(const MWWorld::Ptr& ptr) const;
 
     public:
+        MWWorld::Ptr getSpawnedActor(const MWWorld::Ptr& ptr) const;
+        void setSpawnedActor(const MWWorld::Ptr& ptr, const MWWorld::Ptr& spawnedActor) const;
+
         std::string_view getName(const MWWorld::ConstPtr& ptr) const override;
         ///< \return name or ID; can return an empty string.
 

@@ -38,7 +38,8 @@ namespace mwmp
         void forceFullSync(bool includeInventoryAndEquipment = true);
         void flushPersistentStats();
         void notifyLocalHit(const MWWorld::Ptr& victim, float damage, bool healthDamage, bool knocked,
-            const osg::Vec3f& hitPos, int attackType = 0, float attackStrength = 0.f);
+            const osg::Vec3f& hitPos, int attackType = 0, float attackStrength = 0.f,
+            const std::string& onStrikeEnchantment = {});
         void noteRemotePlayerHit(uint32_t attackerGuid);
         void notifyLocalCastRelease(
             const std::string& spellId, const std::string& castAnimation, const MWWorld::Ptr& target);
@@ -112,6 +113,12 @@ namespace mwmp
         // --- send-rate accumulators ---
         float mPositionTimer    = 0.f;
         float mStatsTimer       = 0.f;
+        float mPositionDiagTimer = 0.f;
+        float mPositionDiagFrameDtMax = 0.f;
+        std::size_t mPositionDiagFrames = 0;
+        std::size_t mPositionDiagSendOpportunities = 0;
+        std::size_t mPositionDiagUnchanged = 0;
+        std::size_t mPositionDiagSends = 0;
 
         //60 Hz breaks footstep cadence...need to test with Lerping
         //static constexpr float POSITION_RATE = 0.166f; // 60 Hz

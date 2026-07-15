@@ -47,6 +47,7 @@ namespace mwmp
             ws.write(mPlayer->attack.strength);
             ws.write(mPlayer->attack.damage);
             ws.write(mPlayer->attack.type);
+            ws.writeString(mPlayer->attack.onStrikeEnchantment);
             ws.writeString(mPlayer->attack.attackAnimation);
         }
 
@@ -68,6 +69,7 @@ namespace mwmp
             rs.read(mPlayer->attack.strength);
             rs.read(mPlayer->attack.damage);
             rs.read(mPlayer->attack.type);
+            mPlayer->attack.onStrikeEnchantment = rs.readString();
             mPlayer->attack.attackAnimation = rs.readString();
         }
     };

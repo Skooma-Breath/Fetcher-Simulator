@@ -321,6 +321,7 @@ namespace MWClass
 
         float damage = min + (max - min) * attackStrength;
         bool healthdmg = true;
+        bool appliedOnStrikeEnchantment = false;
         if (!weapon.isEmpty())
         {
             const unsigned char* attack = nullptr;
@@ -339,7 +340,8 @@ namespace MWClass
             }
 
             // Apply "On hit" enchanted weapons
-            MWMechanics::applyOnStrikeEnchantment(ptr, victim, weapon, hitPosition);
+            appliedOnStrikeEnchantment
+                = MWMechanics::applyOnStrikeEnchantment(ptr, victim, weapon, hitPosition);
         }
         else if (isBipedal(ptr))
         {
@@ -363,7 +365,9 @@ namespace MWClass
             const bool knocked = victimStats.getKnockedDown()
                 || victimStats.getFatigue().getCurrent() < 0.f
                 || victimStats.getFatigue().getBase() == 0.f;
-            mwmp::Main::get().getPlayerSync().notifyLocalHit(victim, damage, healthdmg, knocked, hitPosition);
+            mwmp::Main::get().getPlayerSync().notifyLocalHit(victim, damage, healthdmg, knocked, hitPosition, 0, 0.f,
+                appliedOnStrikeEnchantment ? weapon.getClass().getEnchantment(weapon).serializeText()
+                                           : std::string());
         }
 #endif
     }

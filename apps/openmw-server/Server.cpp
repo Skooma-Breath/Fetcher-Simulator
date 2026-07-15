@@ -1634,6 +1634,8 @@ void MPServer::run()
     mRunning = true;
     using Clock = std::chrono::steady_clock;
     auto last   = Clock::now();
+    mLoopDiagnostics = {};
+    mLoopDiagnostics.windowStart = last;
 
     while (mRunning)
     {
@@ -1646,6 +1648,40 @@ void MPServer::run()
         tick(dt);
         mLua.drainOutbound();
         syncLuaSnapshot();
+
+        const auto loopEnd = Clock::now();
+        const double loopMs = std::chrono::duration<double, std::milli>(loopEnd - now).count();
+        ++mLoopDiagnostics.loops;
+        mLoopDiagnostics.loopTotalMs += loopMs;
+        mLoopDiagnostics.loopMaxMs = std::max(mLoopDiagnostics.loopMaxMs, loopMs);
+
+        const double diagnosticWindowSeconds
+            = std::chrono::duration<double>(loopEnd - mLoopDiagnostics.windowStart).count();
+        if (diagnosticWindowSeconds >= 1.0)
+        {
+            const double loopAverageMs = mLoopDiagnostics.loops != 0
+                ? mLoopDiagnostics.loopTotalMs / static_cast<double>(mLoopDiagnostics.loops) : 0.0;
+            const double messagesPerPoll = mLoopDiagnostics.loops != 0
+                ? static_cast<double>(mLoopDiagnostics.messages) / static_cast<double>(mLoopDiagnostics.loops) : 0.0;
+            const double relayAverageMs = mLoopDiagnostics.playerPositionRelays != 0
+                ? mLoopDiagnostics.playerPositionRelayTotalMs
+                    / static_cast<double>(mLoopDiagnostics.playerPositionRelays)
+                : 0.0;
+            Log(Debug::Info) << "[MPDIAG] Server loop"
+                             << " loopsHz=" << (mLoopDiagnostics.loops / diagnosticWindowSeconds)
+                             << " loopAvgMs=" << loopAverageMs
+                             << " loopMaxMs=" << mLoopDiagnostics.loopMaxMs
+                             << " messages=" << mLoopDiagnostics.messages
+                             << " messagesPerPoll=" << messagesPerPoll
+                             << " messagesPerPollMax=" << mLoopDiagnostics.maxMessagesPerPoll
+                             << " pollsAt512=" << mLoopDiagnostics.pollsAtReceiveLimit
+                             << " slowHandlers8ms=" << mLoopDiagnostics.slowHandlers
+                             << " playerPositionRelays=" << mLoopDiagnostics.playerPositionRelays
+                             << " playerRelayAvgMs=" << relayAverageMs
+                             << " playerRelayMaxMs=" << mLoopDiagnostics.playerPositionRelayMaxMs;
+            mLoopDiagnostics = {};
+            mLoopDiagnostics.windowStart = loopEnd;
+        }
 
         // Keep the network relay responsive independently of simulation/Lua
         // cadence.  At 50 ms, busy actor cells let actor traffic accumulate in
@@ -1727,6 +1763,11 @@ void MPServer::processIncomingMessages()
     ISteamNetworkingMessage* msgs[MAX_MSGS];
 
     int n = mInterface->ReceiveMessagesOnPollGroup(mPollGroup, msgs, MAX_MSGS);
+    mLoopDiagnostics.messages += static_cast<std::size_t>(std::max(n, 0));
+    mLoopDiagnostics.maxMessagesPerPoll
+        = std::max(mLoopDiagnostics.maxMessagesPerPoll, static_cast<std::size_t>(std::max(n, 0)));
+    if (n == MAX_MSGS)
+        ++mLoopDiagnostics.pollsAtReceiveLimit;
 
     // Actor-heavy cells can fill a receive batch with replaceable NPC state.
     // Preserve order within each class, but handle system/player/chat traffic
@@ -1760,10 +1801,33 @@ void MPServer::processIncomingMessages()
     {
         auto* msg = msgs[i];
         auto it = mClients.find(msg->m_conn);
-        if (it != mClients.end())
+        PacketHeader messageHeader;
+        const bool hasHeader = BasePacket::peekHeader(static_cast<const uint8_t*>(msg->m_pData),
+            static_cast<std::size_t>(msg->m_cbSize), messageHeader);
+        const auto handlerStart = std::chrono::steady_clock::now();
+        const bool handled = it != mClients.end();
+        if (handled)
             onClientMessage(it->second,
                 static_cast<const uint8_t*>(msg->m_pData),
                 static_cast<std::size_t>(msg->m_cbSize));
+        const double handlerMs = std::chrono::duration<double, std::milli>(
+            std::chrono::steady_clock::now() - handlerStart).count();
+        if (handlerMs >= 8.0)
+        {
+            ++mLoopDiagnostics.slowHandlers;
+            Log(handlerMs >= 50.0 ? Debug::Warning : Debug::Info)
+                << "[MPDIAG] Slow server packet handler"
+                << " type=" << (hasHeader ? messageHeader.type : 0)
+                << " bytes=" << msg->m_cbSize
+                << " elapsedMs=" << handlerMs;
+        }
+        if (handled && hasHeader && static_cast<PacketType>(messageHeader.type) == PacketType::PlayerPosition)
+        {
+            ++mLoopDiagnostics.playerPositionRelays;
+            mLoopDiagnostics.playerPositionRelayTotalMs += handlerMs;
+            mLoopDiagnostics.playerPositionRelayMaxMs
+                = std::max(mLoopDiagnostics.playerPositionRelayMaxMs, handlerMs);
+        }
         msg->Release();
     }
 }
@@ -1878,13 +1942,28 @@ void MPServer::onClientDisconnected(HSteamNetConnection conn, const std::string&
                          << " disconnectedGuid=" << disconnectedGuid
                          << " generation=" << record->actorAuthorityGeneration;
     }
+    // A non-authority player leaving a cell does not change its simulation
+    // owner.  Rebroadcasting the complete actor baseline in that case makes
+    // already-applied corpses pass through the bootstrap hide/reveal path
+    // again on every remaining client.  Per-actor leases owned by the player
+    // were revoked and broadcast above, so only refresh cells whose actual
+    // cell authority disconnected.
+    auto refreshIfOwnedByDisconnectedPlayer = [&](const std::string& cellId)
+    {
+        const auto cellIt = mWorld.actorCells.find(cellId);
+        if (cellIt != mWorld.actorCells.end()
+            && cellIt->second.authorityGuid == disconnectedGuid)
+        {
+            refreshActorAuthorityForCell(cellId);
+        }
+    };
     if (!actorInterestCells.empty())
     {
         for (const std::string& cellId : actorInterestCells)
-            refreshActorAuthorityForCell(cellId);
+            refreshIfOwnedByDisconnectedPlayer(cellId);
     }
     else if (!actorCell.empty())
-        refreshActorAuthorityForCell(actorCell);
+        refreshIfOwnedByDisconnectedPlayer(actorCell);
     syncLuaSnapshot();
 }
 
@@ -2474,7 +2553,7 @@ void MPServer::updateActorAuthorityLeaseFromAi(const std::string& cellId,
             record.actorAuthorityReason.clear();
         }
     }
-    else if (record.actorAuthorityReason == "target-player")
+    else if (record.actorAuthorityReason == "target-player" && !record.actor.isDead)
     {
         record.actorAuthorityGuid = 0;
         record.actorAuthorityTargetGuid = 0;
@@ -2737,7 +2816,37 @@ void MPServer::rememberDeadVanillaActor(const ActorRegistryRecord& record)
     ActorRegistryRecord remembered = record;
     remembered.actor.cellId = record.actor.cellId;
     const std::string actorKey = makeActorKey(remembered.actor);
+    const ActorInstanceId actorNetId = actorInstanceIdFromActor(remembered.actor);
     bool changed = false;
+
+    // A stable vanilla/spawner refNum may only describe one creature species.
+    // Remove stale rows produced by an earlier local leveled-list roll before
+    // remembering the authoritative corpse.
+    if (actorNetId != 0)
+    {
+        for (auto& [deadCellId, deadActors] : mWorld.deadVanillaActorCells)
+        {
+            for (auto deadIt = deadActors.begin(); deadIt != deadActors.end();)
+            {
+                if (deadIt->first == actorKey
+                    || actorInstanceIdFromActor(deadIt->second.actor) != actorNetId)
+                {
+                    ++deadIt;
+                    continue;
+                }
+
+                if (mPlayerDb)
+                {
+                    mPlayerDb->deleteDeadVanillaActor(
+                        deadIt->second.actor.refId, deadIt->second.actor.refNum);
+                }
+                forgetActorLocation(deadIt->second.actor, deadCellId);
+                deadIt = deadActors.erase(deadIt);
+                changed = true;
+            }
+        }
+    }
+
     for (auto cellIt = mWorld.deadVanillaActorCells.begin(); cellIt != mWorld.deadVanillaActorCells.end();)
     {
         if (cellIt->first == remembered.actor.cellId)
@@ -2765,22 +2874,33 @@ void MPServer::rememberDeadVanillaActor(const ActorRegistryRecord& record)
 
     for (auto& [cellId, cellState] : mWorld.actorCells)
     {
-        if (cellId == remembered.actor.cellId)
-            continue;
+        for (auto actorIt = cellState.actors.begin(); actorIt != cellState.actors.end();)
+        {
+            const bool sameKeyInDestination
+                = cellId == remembered.actor.cellId && actorIt->first == actorKey;
+            const bool conflictingIdentity = actorNetId != 0
+                && actorIt->second.actor.mpNum == 0
+                && actorInstanceIdFromActor(actorIt->second.actor) == actorNetId
+                && actorIt->first != actorKey;
+            const bool staleSameActorInOtherCell = cellId != remembered.actor.cellId
+                && actorIt->first == actorKey && actorIt->second.actor.mpNum == 0;
+            if (sameKeyInDestination || (!conflictingIdentity && !staleSameActorInOtherCell))
+            {
+                ++actorIt;
+                continue;
+            }
 
-        auto actorIt = cellState.actors.find(actorKey);
-        if (actorIt == cellState.actors.end() || actorIt->second.actor.mpNum != 0)
-            continue;
+            forgetActorLocation(actorIt->second.actor, cellId);
+            cellState.staleLiveVanillaDeathResendMs.erase(actorIt->first);
+            actorIt = cellState.actors.erase(actorIt);
+            changed = true;
 
-        cellState.actors.erase(actorIt);
-        cellState.staleLiveVanillaDeathResendMs.erase(actorKey);
-        changed = true;
-
-        Log(Debug::Verbose) << "[Server] Removed stale live vanilla record for canonical corpse"
-                            << " refId=" << remembered.actor.refId
-                            << " refNum=" << remembered.actor.refNum
-                            << " liveCell=" << cellId
-                            << " deadCell=" << remembered.actor.cellId;
+            Log(Debug::Verbose) << "[Server] Removed stale vanilla record for canonical corpse"
+                                << " refId=" << remembered.actor.refId
+                                << " refNum=" << remembered.actor.refNum
+                                << " liveCell=" << cellId
+                                << " deadCell=" << remembered.actor.cellId;
+        }
     }
 
     if (changed && mPlayerDb)
@@ -2951,6 +3071,14 @@ std::size_t MPServer::mergeDeadVanillaActorsForCell(
     std::size_t merged = 0;
     for (const auto& [actorKey, record] : cellIt->second)
     {
+        const ActorInstanceId actorNetId = actorInstanceIdFromActor(record.actor);
+        const bool identityAlreadyPresent = actorNetId != 0
+            && std::any_of(actors.begin(), actors.end(), [&](const auto& entry) {
+                return actorInstanceIdFromActor(entry.second.actor) == actorNetId;
+            });
+        if (identityAlreadyPresent && actors.find(actorKey) == actors.end())
+            continue;
+
         auto actorIt = actors.find(actorKey);
         if (actorIt == actors.end() || !actorIt->second.actor.isDead)
             ++merged;
@@ -3029,6 +3157,7 @@ ActorIdentityList MPServer::buildActorIdentityList(
     std::size_t missingIdentity = 0;
     std::size_t ambiguousIdentityNormalized = 0;
     std::size_t unmanagedSpawnerPruned = 0;
+    std::size_t duplicateIdentityDropped = 0;
     std::vector<std::string> unmanagedSpawnerKeys;
     for (auto& [actorKey, record] : cellState.actors)
     {
@@ -3059,7 +3188,9 @@ ActorIdentityList MPServer::buildActorIdentityList(
     identityList.authorityGeneration = cellState.authorityGeneration;
     identityList.sequence = cellState.nextSnapshotSequence;
     identityList.serverTimestamp = currentServerTimeMs();
+    identityList.completeCellSnapshot = cellState.hasCompleteAuthoritySnapshot;
     identityList.actors.reserve(actors.size());
+    std::unordered_set<ActorInstanceId> emittedActorNetIds;
 
     for (auto& [actorKey, record] : actors)
     {
@@ -3082,6 +3213,11 @@ ActorIdentityList MPServer::buildActorIdentityList(
             ++missingIdentity;
             continue;
         }
+        if (!emittedActorNetIds.insert(actorNetId).second)
+        {
+            ++duplicateIdentityDropped;
+            continue;
+        }
 
         ActorIdentityRecord identity;
         identity.actorNetId = actorNetId;
@@ -3092,7 +3228,8 @@ ActorIdentityList MPServer::buildActorIdentityList(
         identityList.actors.push_back(std::move(identity));
     }
 
-    if (missingIdentity != 0 || ambiguousIdentityNormalized != 0 || unmanagedSpawnerPruned != 0)
+    if (missingIdentity != 0 || ambiguousIdentityNormalized != 0 || unmanagedSpawnerPruned != 0
+        || duplicateIdentityDropped != 0)
     {
         const bool importantIdentityRepair = missingIdentity != 0 || ambiguousIdentityNormalized != 0;
         Log(importantIdentityRepair ? Debug::Info : Debug::Verbose)
@@ -3101,7 +3238,8 @@ ActorIdentityList MPServer::buildActorIdentityList(
             << " sent=" << identityList.actors.size()
             << " missingIdentity=" << missingIdentity
             << " ambiguousIdentityNormalized=" << ambiguousIdentityNormalized
-            << " unmanagedSpawnerPruned=" << unmanagedSpawnerPruned;
+            << " unmanagedSpawnerPruned=" << unmanagedSpawnerPruned
+            << " duplicateIdentityDropped=" << duplicateIdentityDropped;
     }
 
     return identityList;
@@ -3711,7 +3849,17 @@ void MPServer::loadPersistentWorldState()
         }
     }
 
-    for (const auto& persistedActor : mPlayerDb->loadDeadVanillaActors())
+    const std::vector<BaseActor> persistedDeadVanillaActors = mPlayerDb->loadDeadVanillaActors();
+    std::unordered_map<ActorInstanceId, std::size_t> persistedDeadIdentityCounts;
+    for (const BaseActor& persistedActor : persistedDeadVanillaActors)
+    {
+        const ActorInstanceId actorNetId = actorInstanceIdFromActor(persistedActor);
+        if (actorNetId != 0)
+            ++persistedDeadIdentityCounts[actorNetId];
+    }
+
+    std::size_t conflictingDeadVanillaActorsPurged = 0;
+    for (const auto& persistedActor : persistedDeadVanillaActors)
     {
         BaseActor actor = persistedActor;
         actor.mpNum = 0;
@@ -3719,6 +3867,19 @@ void MPServer::loadPersistentWorldState()
             continue;
 
         normalizeActorIdentity(actor);
+        const ActorInstanceId actorNetId = actorInstanceIdFromActor(actor);
+        const auto identityCountIt = persistedDeadIdentityCounts.find(actorNetId);
+        if (actorNetId != 0 && identityCountIt != persistedDeadIdentityCounts.end()
+            && identityCountIt->second > 1)
+        {
+            // Older leveled-list reconciliation builds could persist two
+            // species under the same stable spawner refNum. Neither row is
+            // trustworthy, so discard the entire collision and let the cell
+            // authority publish one fresh canonical roll.
+            mPlayerDb->deleteDeadVanillaActor(actor.refId, actor.refNum);
+            ++conflictingDeadVanillaActorsPurged;
+            continue;
+        }
         actor.isDead = true;
         actor.isInstantDeath = true;
         if (actor.dynamicStats.health.current > 0.f)
@@ -3731,6 +3892,12 @@ void MPServer::loadPersistentWorldState()
         mWorld.deadVanillaActorCells[actor.cellId][actorKey] = record;
         rememberActorLocation(actor, actor.cellId);
         ++deadVanillaActorCount;
+    }
+
+    if (conflictingDeadVanillaActorsPurged != 0)
+    {
+        Log(Debug::Warning) << "[Server] Purged conflicting persisted vanilla corpses"
+                            << " rows=" << conflictingDeadVanillaActorsPurged;
     }
 
     objectCount = 0;
@@ -4776,6 +4943,24 @@ void MPServer::handleCharacterSelect(ConnectedClient& c, const uint8_t* data, si
     }
 
     cdPkt.characterId = c.dbCharacterId;
+
+    // Queue records and the persisted actor baseline before CharacterData.  The
+    // client enters the selected character's world as soon as CharacterData is
+    // handled; sending the target cell afterwards lets the first authority load
+    // and simulate persisted corpses as living actors for at least one frame.
+    // CharacterData and ActorDeath share the reliable realtime lane below, so
+    // this preamble lets ActorSync cache death state while OpenMW is still in
+    // State_NoGame.
+    // The normal sendCellStateToClient() below remains the post-selection catch-up.
+    sendDynamicRecordsToClient(c.conn);
+    if (!cdPkt.spawnCell.empty())
+    {
+        sendActorStateToClient(c.conn, cdPkt.spawnCell);
+        Log(Debug::Verbose) << "[Server] Sent pre-world actor bootstrap"
+                            << " to=" << sel.charName
+                            << " cell=" << cdPkt.spawnCell;
+    }
+
     sendTo(c.conn, cdPkt.encode());
     c.charSelectComplete = true;
 
@@ -4814,8 +4999,6 @@ void MPServer::handleCharacterSelect(ConnectedClient& c, const uint8_t* data, si
     c.player.position.rot[2] = cdPkt.spawnRotZ;
     c.player.position.isTeleporting = true;
     c.player.velocity = {};
-
-    sendDynamicRecordsToClient(c.conn);
 
     if (sendSavedInventory)
     {
@@ -5040,6 +5223,7 @@ void MPServer::handlePlayerPosition(ConnectedClient& c, const uint8_t* data, siz
 
     c.player.position = proposed.position;
     c.player.velocity = proposed.velocity;
+    c.player.positionSampleTimeUs = proposed.positionSampleTimeUs;
 
     // Relay to all other clients (unreliable is fine â€” we use raw broadcast)
     if (forceReliableTeleportRelay)
@@ -5590,6 +5774,7 @@ void MPServer::handleActorList(ConnectedClient& c, const uint8_t* data, size_t s
     std::size_t missingIdentityDropped = 0;
     std::size_t ambiguousIdentityNormalized = 0;
     std::size_t unmanagedSpawnerDropped = 0;
+    std::size_t duplicateIdentityDropped = 0;
     std::size_t unknownSpawnedDropped = 0;
     std::size_t deadSpawnedSuppressed = 0;
     std::size_t boundaryActorListSuppressed = 0;
@@ -5601,6 +5786,14 @@ void MPServer::handleActorList(ConnectedClient& c, const uint8_t* data, size_t s
     uint32_t firstDeadSpawnedMpNum = 0;
     std::string firstDeadSpawnedKnownCell;
     cellState.actors.clear();
+    std::unordered_set<ActorInstanceId> incomingActorNetIds;
+
+    auto cellContainsActorNetId = [&](ActorInstanceId actorNetId) {
+        return actorNetId != 0
+            && std::any_of(cellState.actors.begin(), cellState.actors.end(), [&](const auto& entry) {
+                return actorInstanceIdFromActor(entry.second.actor) == actorNetId;
+            });
+    };
 
     auto findKnownDeadSpawnedRecord = [&](const BaseActor& actor, std::string* knownCellId = nullptr)
         -> const ActorRegistryRecord*
@@ -5652,6 +5845,12 @@ void MPServer::handleActorList(ConnectedClient& c, const uint8_t* data, size_t s
                 firstUnmanagedSpawnerRefId = actor.refId;
                 firstUnmanagedSpawnerRefNum = actor.refNum;
             }
+            continue;
+        }
+        const ActorInstanceId incomingActorNetId = actorInstanceIdFromActor(actor);
+        if (incomingActorNetId == 0 || !incomingActorNetIds.insert(incomingActorNetId).second)
+        {
+            ++duplicateIdentityDropped;
             continue;
         }
         if (rejectResetStaleDeadVanillaActor(actor, incoming.cellId, c, "ActorList"))
@@ -5819,7 +6018,8 @@ void MPServer::handleActorList(ConnectedClient& c, const uint8_t* data, size_t s
         }
     }
 
-    if (missingIdentityDropped != 0 || ambiguousIdentityNormalized != 0 || unmanagedSpawnerDropped != 0)
+    if (missingIdentityDropped != 0 || ambiguousIdentityNormalized != 0 || unmanagedSpawnerDropped != 0
+        || duplicateIdentityDropped != 0)
     {
         const bool importantActorListRepair = missingIdentityDropped != 0 || ambiguousIdentityNormalized != 0;
         Log(importantActorListRepair ? Debug::Info : Debug::Verbose)
@@ -5830,6 +6030,7 @@ void MPServer::handleActorList(ConnectedClient& c, const uint8_t* data, size_t s
             << " missingIdentityDropped=" << missingIdentityDropped
             << " ambiguousIdentityNormalized=" << ambiguousIdentityNormalized
             << " unmanagedSpawnerDropped=" << unmanagedSpawnerDropped
+            << " duplicateIdentityDropped=" << duplicateIdentityDropped
             << " firstUnmanagedSpawner=" << firstUnmanagedSpawnerRefId
             << " firstUnmanagedSpawnerRefNum=" << firstUnmanagedSpawnerRefNum;
     }
@@ -5938,6 +6139,8 @@ void MPServer::handleActorList(ConnectedClient& c, const uint8_t* data, size_t s
     {
         if (cellState.actors.find(actorKey) != cellState.actors.end())
             continue;
+        if (cellContainsActorNetId(actorInstanceIdFromActor(record.actor)))
+            continue;
 
         cellState.actors[actorKey] = record;
         rememberActorLocation(record.actor, incoming.cellId);
@@ -6010,11 +6213,17 @@ void MPServer::handleActorList(ConnectedClient& c, const uint8_t* data, size_t s
     ActorList deduped = incoming;
     deduped.actors.clear();
     deduped.actors.reserve(cellState.actors.size());
+    std::unordered_set<ActorInstanceId> relayedActorNetIds;
     for (const auto& [actorKey, record] : cellState.actors)
-        deduped.actors.push_back(record.actor);
+    {
+        const ActorInstanceId actorNetId = actorInstanceIdFromActor(record.actor);
+        if (actorNetId != 0 && relayedActorNetIds.insert(actorNetId).second)
+            deduped.actors.push_back(record.actor);
+    }
 
     PacketActorList out;
     out.setActorList(&deduped);
+    cellState.hasCompleteAuthoritySnapshot = true;
     broadcastActorIdentityForCell(incoming.cellId, cellState);
     broadcastActorToCell(incoming.cellId, out.encode(), c.conn);
     broadcastActorAuthorityLeasesForCell(incoming.cellId, cellState);
@@ -8062,15 +8271,32 @@ void MPServer::handleActorCombatRequest(ConnectedClient& c, const uint8_t* data,
     auto cellIt = mWorld.actorCells.find(incoming.cellId);
     if (cellIt == mWorld.actorCells.end()) return;
 
-    const uint32_t authorityGuid = cellIt->second.authorityGuid;
+    const uint32_t cellAuthorityGuid = cellIt->second.authorityGuid;
 
     // NPC->player damage: routed by the cell authority to the victim player.
     // This must be checked BEFORE the authority guard because the sender IS
     // the authority in this case (authority forwards NPC hits to the victim).
     if (incoming.victimPlayerGuid != 0)
     {
-        if (authorityGuid == 0 || authorityGuid != c.guid)
+        bool senderOwnsEveryAttacker = !incoming.actors.empty();
+        for (const BaseActor& actor : incoming.actors)
+        {
+            const auto recordIt = cellIt->second.actors.find(makeActorKey(actor));
+            if (recordIt == cellIt->second.actors.end()
+                || !isAllowedActorSender(c, recordIt->second, incoming.cellId))
+            {
+                senderOwnsEveryAttacker = false;
+                break;
+            }
+        }
+        if (!senderOwnsEveryAttacker)
+        {
+            Log(Debug::Warning) << "[Server] Rejected NpcPlayerDamage from non-owner"
+                                << " sender=" << c.guid
+                                << " cell=" << incoming.cellId
+                                << " cellAuthority=" << cellAuthorityGuid;
             return;
+        }
 
         for (auto& [conn, client] : mClients)
         {
@@ -8085,17 +8311,44 @@ void MPServer::handleActorCombatRequest(ConnectedClient& c, const uint8_t* data,
         return;
     }
 
-    // Normal non-authority->authority: find the cell and validate sender is not authority.
-    if (authorityGuid == 0 || authorityGuid == c.guid)
-        return; // sender already has authority or no one does
-
-    // Route to cell authority.
-    for (auto& [conn, client] : mClients)
+    // Route each hit to the authority for that specific actor.  A target-player
+    // lease deliberately moves simulation away from the cell authority; sending
+    // damage back to the cell authority makes two clients mutate the same NPC.
+    for (const BaseActor& actor : incoming.actors)
     {
-        if (client.guid == authorityGuid)
+        uint32_t actorAuthorityGuid = cellAuthorityGuid;
+        const auto recordIt = cellIt->second.actors.find(makeActorKey(actor));
+        if (recordIt != cellIt->second.actors.end()
+            && isActorAuthorityLeaseValid(recordIt->second, incoming.cellId))
         {
-            sendTo(conn, out.encode(), true);
-            break;
+            actorAuthorityGuid = recordIt->second.actorAuthorityGuid;
+        }
+
+        // The sender already applies hits locally when it owns the victim.  Old
+        // clients may still emit this redundant request; never bounce it through
+        // another simulator.
+        if (actorAuthorityGuid == 0 || actorAuthorityGuid == c.guid)
+            continue;
+
+        ActorList routed = incoming;
+        routed.actors.clear();
+        routed.actors.push_back(actor);
+        PacketActorCombatRequest routedPacket;
+        routedPacket.setActorList(&routed);
+        for (auto& [conn, client] : mClients)
+        {
+            if (client.guid == actorAuthorityGuid)
+            {
+                sendTo(conn, routedPacket.encode(), true);
+                Log(Debug::Verbose) << "[Server] Routed ActorCombatRequest"
+                                    << " sender=" << c.guid
+                                    << " victim=" << actor.refId
+                                    << " refNum=" << actor.refNum
+                                    << " mpNum=" << actor.mpNum
+                                    << " owner=" << actorAuthorityGuid
+                                    << " cell=" << incoming.cellId;
+                break;
+            }
         }
     }
 }
@@ -9711,11 +9964,17 @@ EResult MPServer::sendPacketOnConfiguredLane(HSteamNetConnection conn,
 
     PacketHeader header;
     const bool hasHeader = BasePacket::peekHeader(data.data(), data.size(), header);
+    const PacketType type = hasHeader ? static_cast<PacketType>(header.type) : PacketType::Handshake;
     const bool actorPacket = hasHeader
         && header.type >= static_cast<uint16_t>(PacketType::ActorList)
         && header.type <= static_cast<uint16_t>(PacketType::ActorAttackV2);
+    // CharacterData is the client's enter-world gate. Route it on the same
+    // reliable lane as ActorDeath so a pre-world corpse bootstrap cannot be
+    // overtaken by the load trigger merely because actor and system packets use
+    // separate SteamNetworkingSockets lanes.
+    const bool characterDataPacket = hasHeader && type == PacketType::CharacterData;
 
-    if (!actorPacket)
+    if (!actorPacket && !characterDataPacket)
     {
         return mInterface->SendMessageToConnection(
             conn, data.data(), static_cast<uint32_t>(data.size()), flags, nullptr);
@@ -9728,8 +9987,8 @@ EResult MPServer::sendPacketOnConfiguredLane(HSteamNetConnection conn,
     std::memcpy(message->m_pData, data.data(), data.size());
     message->m_conn = conn;
     message->m_nFlags = flags;
-    const PacketType type = static_cast<PacketType>(header.type);
-    const bool realtimeActorPacket = type == PacketType::ActorPosition
+    const bool realtimeActorPacket = characterDataPacket
+        || type == PacketType::ActorPosition
         || type == PacketType::ActorAnimFlags
         || type == PacketType::ActorAnimPlay
         || type == PacketType::ActorAttack

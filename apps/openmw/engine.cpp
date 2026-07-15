@@ -444,6 +444,10 @@ bool OMW::Engine::frame(unsigned frameNumber, float frametime)
             if (mStateManager->getState() != MWBase::StateManager::State_NoGame)
             {
                 mWorld->update(frametime, paused);
+#ifdef BUILD_MULTIPLAYER
+                if (mwmp::Main::isInitialised())
+                    mwmp::Main::get().postWorldUpdate();
+#endif
             }
         }
 #ifdef BUILD_MULTIPLAYER

@@ -26,6 +26,10 @@ namespace mwmp
             for (const auto& actor : mActorList->actors)
             {
                 packActorIdentity(ws, actor);
+                // For player->actor requests this is the requesting player's
+                // sampled position, used when the authority's remote proxy is
+                // stale. For NPC->player requests it remains the NPC position.
+                packPosition(ws, actor.position);
                 packAttack(ws, actor.attack);
             }
         }
@@ -40,6 +44,7 @@ namespace mwmp
             for (auto& actor : mActorList->actors)
             {
                 unpackActorIdentity(rs, actor);
+                unpackPosition(rs, actor.position);
                 unpackAttack(rs, actor.attack);
             }
         }

@@ -14,7 +14,7 @@ namespace mwmp
     static constexpr uint32_t ActorSyncProtocolVersionV1 = 1;
     // Still named v2 in code because this is the active ActorSync v2 lane, but
     // the wire number is bumped for the deterministic ActorInstanceId key break.
-    static constexpr uint32_t ActorSyncProtocolVersionV2 = 5;
+    static constexpr uint32_t ActorSyncProtocolVersionV2 = 7;
 
     using ActorInstanceId = uint64_t;
 
@@ -169,6 +169,10 @@ namespace mwmp
         uint32_t authorityGeneration = 0;
         uint32_t sequence = 0;
         uint64_t serverTimestamp = 0;
+        // True only after the current cell authority has submitted its complete
+        // actor list. Startup overlays containing only persistent corpses are
+        // intentionally incomplete.
+        bool completeCellSnapshot = false;
         std::vector<ActorIdentityRecord> actors;
     };
 

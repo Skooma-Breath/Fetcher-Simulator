@@ -1,6 +1,7 @@
 #include "PlayerSync.hpp"
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstring>
 
@@ -67,6 +68,12 @@ namespace mwmp
 
 namespace
 {
+    uint64_t steadyTimeUs()
+    {
+        return static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(
+            std::chrono::steady_clock::now().time_since_epoch()).count());
+    }
+
     bool sameItemIdentity(const Item& left, const Item& right)
     {
         return left.refId == right.refId
@@ -581,6 +588,11 @@ void PlayerSync::update(float dt)
     if (mLocal.guid == 0)
         return;
 
+    const float safeDt = std::max(0.f, dt);
+    mPositionDiagTimer += safeDt;
+    mPositionDiagFrameDtMax = std::max(mPositionDiagFrameDtMax, safeDt);
+    ++mPositionDiagFrames;
+
     // --- position / rotation / velocity ---
     const auto& refData  = player.getRefData();
     const auto& pos      = refData.getPosition();
@@ -680,6 +692,26 @@ void PlayerSync::update(float dt)
     }
 
     tickPosition(dt);
+    if (mPositionDiagTimer >= 1.f)
+    {
+        const float planarSpeed = std::sqrt(mLocal.velocity.linear[0] * mLocal.velocity.linear[0]
+            + mLocal.velocity.linear[1] * mLocal.velocity.linear[1]);
+        Log(Debug::Info) << "[MPDIAG] PlayerPosition sender"
+                         << " frameHz=" << (mPositionDiagFrames / mPositionDiagTimer)
+                         << " sendHz=" << (mPositionDiagSends / mPositionDiagTimer)
+                         << " opportunities=" << mPositionDiagSendOpportunities
+                         << " unchanged=" << mPositionDiagUnchanged
+                          << " frameDtMaxMs=" << (mPositionDiagFrameDtMax * 1000.f)
+                          << " timerRemainderMs=" << (mPositionTimer * 1000.f)
+                          << " planarSpeed=" << planarSpeed
+                          << " yaw=" << mLocal.position.rot[2];
+        mPositionDiagTimer = std::fmod(mPositionDiagTimer, 1.f);
+        mPositionDiagFrameDtMax = 0.f;
+        mPositionDiagFrames = 0;
+        mPositionDiagSendOpportunities = 0;
+        mPositionDiagUnchanged = 0;
+        mPositionDiagSends = 0;
+    }
     tickDynamicStats(dt);
     sendAnimFlags(dt);
     sendAnimPlay();
@@ -714,10 +746,16 @@ void PlayerSync::tickPosition(float dt)
     mPositionTimer += dt;
     if (mPositionTimer < POSITION_RATE)
         return;
-    mPositionTimer = 0.f;
+    // Retain the fractional remainder. Resetting to zero quantises a nominal
+    // 30 Hz sender to the render cadence (for example, 20 Hz at 50 FPS).
+    mPositionTimer = std::fmod(mPositionTimer, POSITION_RATE);
+    ++mPositionDiagSendOpportunities;
 
     if (!positionChanged())
+    {
+        ++mPositionDiagUnchanged;
         return;
+    }
 
     // Velocity-Stop edge: if velocity just dropped to zero, send reliably to
     // ensure the "Stop" signal reaches the receiver immediately.
@@ -748,12 +786,14 @@ void PlayerSync::tickDynamicStats(float dt)
 // ---------------------------------------------------------------------------
 void PlayerSync::sendPosition(bool reliable)
 {
+    mLocal.positionSampleTimeUs = steadyTimeUs();
     PacketPlayerPosition pkt;
     pkt.setPlayer(&mLocal);
     if (reliable)
         mClient.sendReliable(pkt.encode(mSeqCounter++));
     else
         mClient.sendUnreliable(pkt.encode(mSeqCounter++));
+    ++mPositionDiagSends;
 
     // Reset teleport flag after encoding so it doesn't persist to the next tick.
     mLocal.position.isTeleporting = false;
@@ -1350,6 +1390,7 @@ void PlayerSync::sendAttack()
     mLocal.attack.knocked = false;
     mLocal.attack.healthDamage = false;
     mLocal.attack.damage = 0.f;
+    mLocal.attack.onStrikeEnchantment.clear();
     mLocal.attack.target.clear();
     mLocal.attack.targetMpNum = 0;
     mLocal.attack.targetKind = mwmp::Attack::TargetNone;
@@ -1383,7 +1424,7 @@ void PlayerSync::sendAttack()
 }
 
 void PlayerSync::notifyLocalHit(const MWWorld::Ptr& victim, float damage, bool healthDamage, bool knocked,
-    const osg::Vec3f& hitPos, int attackType, float attackStrength)
+    const osg::Vec3f& hitPos, int attackType, float attackStrength, const std::string& onStrikeEnchantment)
 {
     if (mLocal.guid == 0 || victim.isEmpty())
         return;
@@ -1408,6 +1449,7 @@ void PlayerSync::notifyLocalHit(const MWWorld::Ptr& victim, float damage, bool h
     mLocal.attack.type = attackType;
     mLocal.attack.strength = attackStrength;
     mLocal.attack.damage = damage;
+    mLocal.attack.onStrikeEnchantment = onStrikeEnchantment;
     mLocal.attack.target = victim.getCellRef().getRefId().serializeText();
     mLocal.attack.targetMpNum = resolveTargetMpNum(victim);
     mLocal.attack.targetKind = mwmp::Attack::TargetNone;
@@ -1551,8 +1593,29 @@ void PlayerSync::sendResurrect()
     {
         MWWorld::Ptr player = world->getPlayerPtr();
         if (!player.isEmpty())
+        {
+            if (const MWWorld::CellStore* cellStore = player.getCell())
+            {
+                if (const MWWorld::Cell* cell = cellStore->getCell())
+                {
+                    mLocal.cell.isExterior = cell->isExterior();
+                    mLocal.cell.cellName = std::string(cell->getNameId());
+                    if (cell->isExterior())
+                    {
+                        mLocal.cell.gridX = cell->getGridX();
+                        mLocal.cell.gridY = cell->getGridY();
+                    }
+                }
+            }
+            const auto& position = player.getRefData().getPosition();
+            for (int i = 0; i < 3; ++i)
+            {
+                mLocal.position.pos[i] = position.pos[i];
+                mLocal.position.rot[i] = position.rot[i];
+            }
             if (auto* bn = player.getRefData().getBaseNode())
                 bn->setUserValue("mp_anim_play_pending", false);
+        }
     }
     PacketPlayerResurrect pkt;
     pkt.setPlayer(&mLocal);

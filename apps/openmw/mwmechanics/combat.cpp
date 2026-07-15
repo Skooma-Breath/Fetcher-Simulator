@@ -64,11 +64,11 @@ namespace MWMechanics
             {
                 MWMechanics::CastSpell cast(attacker, victim, fromProjectile);
                 cast.mHitPosition = hitPosition;
-                cast.cast(object, false);
+                const bool castSucceeded = cast.cast(object, false);
                 // Apply magic effects directly instead of waiting a frame to allow soul trap to work on one-hit kills
-                if (!victim.isEmpty() && victim.getClass().isActor())
+                if (castSucceeded && !victim.isEmpty() && victim.getClass().isActor())
                     MWBase::Environment::get().getMechanicsManager()->updateMagicEffects(victim);
-                return true;
+                return castSucceeded;
             }
         }
         return false;
@@ -325,7 +325,9 @@ namespace MWMechanics
                     ? 3
                     : 2;
                 mwmp::Main::get().getPlayerSync().notifyLocalHit(
-                    victim, damage, true, knocked, hitPosition, attackType, attackStrength);
+                    victim, damage, true, knocked, hitPosition, attackType, attackStrength,
+                    appliedEnchantment ? projectile.getClass().getEnchantment(projectile).serializeText()
+                                       : std::string());
             }
 #endif
         }

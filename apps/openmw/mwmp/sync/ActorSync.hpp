@@ -31,6 +31,9 @@ namespace mwmp
         explicit ActorSync(NetworkClient& client);
 
         void update(float dt);
+        // Called after World::update so actors inserted while loading a cell
+        // can receive bootstrap presentation before the first render traversal.
+        void updateLoadedCellBootstrapVisuals();
 
         // Must be called when the local player fully disconnects from a server
         // (e.g. returns to main menu).  Clears all per-session cell/actor
@@ -117,6 +120,10 @@ namespace mwmp
             // re-entering a cell with dead actors skips to the final death pose
             // instead of replaying the death animation from scratch.
             bool deathAlreadyApplied = false;
+            // A bootstrapped corpse is hidden until the frame after its final
+            // death pose is installed, so the bind pose cannot flash on the
+            // first rendered cell frame.
+            uint64_t bootstrapDeathRevealUpdate = 0;
             // When true, the death came from a real-time ActorDeath packet (not an
             // ActorList load), so the death animation should play from the start.
             bool deathFromRealtimePacket = false;
@@ -251,6 +258,7 @@ namespace mwmp
             uint32_t latestReliableSequence = 0;
             bool initialListSent = false;
             std::string outboundCellId;
+            std::unordered_set<std::string> lastSentActorListKeys;
             // Log-dedup: mpNums already reported via "authority mapped actor".
             // Cleared whenever outboundCellId changes so re-mappings are logged.
             std::unordered_set<uint32_t> authorityLoggedMpNums;
@@ -268,6 +276,7 @@ namespace mwmp
         bool shouldReplayDeadBaselineAsRealtime(const ActorRuntime& actor, const BaseActor& state) const;
         void markDeadBaselineState(ActorRuntime& actor, const BaseActor& state, bool replayRealtime);
         ActorInstanceId actorNetIdForActorState(const BaseActor& actor) const;
+        ActorInstanceId actorNetIdForPtr(const std::string& cellId, const MWWorld::Ptr& ptr) const;
         void rememberActorNetId(ActorInstanceId actorNetId, const BaseActor& actor);
         void indexActorNetId(ActorInstanceId actorNetId, const std::string& oldCellId, const std::string& newCellId);
         ActorRuntime* findPrimaryActorRuntime(const BaseActor& actor);
@@ -300,6 +309,17 @@ namespace mwmp
         std::unordered_map<std::string, uint32_t>    mMpNumsByLocalActor;
         std::unordered_map<uint32_t, MWWorld::Ptr>   mServerSpawnedActorsByMpNum;
         std::unordered_map<uint32_t, uint64_t>       mServerSpawnedActorLastTimestamps;
+        // A placed leveled-creature reference can resolve to a different base
+        // actor on each client. Map the authoritative vanilla actor identity to
+        // the observer-side replacement so later snapshots and authority
+        // handoffs continue to use the original refNum.
+        std::unordered_map<ActorInstanceId, MWWorld::Ptr>   mReconciledVanillaActorsByNetId;
+        // Complete identity snapshots communicate a placed leveled-list
+        // Chance None result by omitting the spawner's canonical refNum. Keep
+        // that decision across cell unload/reload and authority handoff so a
+        // newly loaded local RNG roll cannot become a client-only actor.
+        std::unordered_map<std::string, std::unordered_set<ActorInstanceId>>
+            mChanceNoneLeveledSpawnersByCell;
         std::unordered_map<ActorInstanceId, ActorRuntime>   mActorsByNetId;
         std::unordered_map<ActorInstanceId, uint32_t>       mActorAuthorityGuids;
         std::unordered_set<ActorInstanceId> mPendingPresentationSampleRequests;
@@ -307,6 +327,7 @@ namespace mwmp
         std::unordered_map<std::string, ActorInstanceId>    mActorNetIdsByKey;
         std::string mLastLocalCellId;
         bool mHaveLastLocalCellId = false;
+        uint64_t mUpdateSerial = 0;
         uint64_t mActorV2DiagnosticsLastLogMs = 0;
         std::size_t mActorV2SnapshotsWindow = 0;
         std::size_t mActorV2InvalidActorIdWindow = 0;

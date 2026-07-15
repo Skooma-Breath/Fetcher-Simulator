@@ -322,6 +322,13 @@ void Main::frame(float dt)
 }
 
 // ---------------------------------------------------------------------------
+void Main::postWorldUpdate()
+{
+    if (mClient && mClient->isConnected() && mActorSync)
+        mActorSync->updateLoadedCellBootstrapVisuals();
+}
+
+// ---------------------------------------------------------------------------
 bool Main::captureCurrentChargenData(const char* context)
 {
     try

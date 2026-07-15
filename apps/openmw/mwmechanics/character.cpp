@@ -2460,6 +2460,15 @@ namespace MWMechanics
             }
 
             float effectiveRotation = rot.z();
+#ifdef BUILD_MULTIPLAYER
+            if (isNetworkPlayerPuppet)
+            {
+                float visualTurn = 0.f;
+                if (auto* baseNode = mPtr.getRefData().getBaseNode())
+                    baseNode->getUserValue("mp_visual_turn", visualTurn);
+                effectiveRotation = visualTurn;
+            }
+#endif
             bool canMove = cls.getMaxSpeed(mPtr) > 0;
             const bool turnToMovementDirection = Settings::game().mTurnToMovementDirection;
             const bool isBiped = mPtr.getClass().isBipedal(mPtr);
@@ -2755,13 +2764,10 @@ namespace MWMechanics
                 {
                     // It seems only bipedal actors use turning animations.
                     // Also do not use turning animations in the first-person view and when sneaking.
-                    // Exception: remote network NPCs (Flag_NetworkPlayerNpc) are flagged as
-                    // isFirstPersonPlayer for move-path reasons, but they DO need turn anims —
-                    // RemotePlayer::applyAnimationStateToActor feeds mRotation[2] specifically
-                    // to drive standing-turn detection here.
-                    const bool isNetworkNpcTurn = !isPlayer && cls.isActor()
-                        && cls.getCreatureStats(mPtr).getMovementFlag(MWMechanics::CreatureStats::Flag_NetworkPlayerNpc);
-                    if (!sneak && (!isFirstPersonPlayer || isNetworkNpcTurn) && isBiped)
+                    // Network-player puppets receive a visual-only turn delta from
+                    // RemotePlayer. It drives this animation state without feeding
+                    // another rotation back into the actor transform.
+                    if (!sneak && (!isFirstPersonPlayer || isNetworkPlayerPuppet) && isBiped)
                     {
                         if (effectiveRotation > 0.f)
                             movestate = inwater ? CharState_SwimTurnRight : CharState_TurnRight;
@@ -2807,6 +2813,32 @@ namespace MWMechanics
                 }
             }
 
+#ifdef BUILD_MULTIPLAYER
+            // A teleport/login hard snap can arrive after a standing-turn state was
+            // selected but before a zero-rotation frame retires it. Position and
+            // animation packets are independent, and a disconnected sender may never
+            // provide that retiring frame at all. Explicitly discard the controller's
+            // latched movement/jump states so the regular idle state is visible now.
+            if (isNetworkPlayerPuppet)
+            {
+                bool forceNetworkIdle = false;
+                if (auto* baseNode = mPtr.getRefData().getBaseNode())
+                {
+                    baseNode->getUserValue("mp_force_network_idle", forceNetworkIdle);
+                    if (forceNetworkIdle)
+                        baseNode->setUserValue("mp_force_network_idle", false);
+                }
+                if (forceNetworkIdle)
+                {
+                    resetCurrentMovementState();
+                    resetCurrentJumpState();
+                    mTurnAnimationThreshold = 0.f;
+                    movestate = CharState_None;
+                    jumpstate = JumpState_None;
+                }
+            }
+#endif
+
             if (movestate != CharState_None)
             {
                 clearAnimQueue();
@@ -2837,7 +2869,8 @@ namespace MWMechanics
             {
                 if (duration > 0)
                 {
-                    float turnSpeed = std::min(1.5f, std::abs(rot.z()) / duration / static_cast<float>(osg::PI));
+                    float turnSpeed
+                        = std::min(1.5f, std::abs(effectiveRotation) / duration / static_cast<float>(osg::PI));
                     mAnimation->adjustSpeedMult(mCurrentMovement, turnSpeed);
                 }
             }
@@ -2903,7 +2936,7 @@ namespace MWMechanics
             {
                 if (!isKnockedDown() && !isKnockedOut())
                 {
-                    if (rot != osg::Vec3f())
+                    if (!isNetworkPlayerPuppet && rot != osg::Vec3f())
                         world->rotateObject(mPtr, rot, true);
                 }
                 else // avoid z-rotating for knockdown

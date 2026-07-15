@@ -29,6 +29,7 @@ namespace mwmp
             ws.write(mIdentityList->authorityGeneration);
             ws.write(mIdentityList->sequence);
             ws.write(mIdentityList->serverTimestamp);
+            ws.write(mIdentityList->completeCellSnapshot);
 
             const auto count = static_cast<uint16_t>(mIdentityList->actors.size());
             ws.write(count);
@@ -69,6 +70,7 @@ namespace mwmp
             rs.read(mIdentityList->authorityGeneration);
             rs.read(mIdentityList->sequence);
             rs.read(mIdentityList->serverTimestamp);
+            rs.read(mIdentityList->completeCellSnapshot);
 
             uint16_t count = 0;
             rs.read(count);

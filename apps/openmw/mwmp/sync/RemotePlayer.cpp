@@ -89,6 +89,12 @@ namespace mwmp
                 std::chrono::steady_clock::now().time_since_epoch()).count());
         }
 
+        uint64_t steadyTimeUs()
+        {
+            return static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(
+                std::chrono::steady_clock::now().time_since_epoch()).count());
+        }
+
         void clearTransientLocomotion(AnimFlags& flags)
         {
             flags.animFwd = 0.f;
@@ -120,6 +126,31 @@ namespace mwmp
                 return {};
 
             return *weapon;
+        }
+
+        void playReplicatedOnStrikeEnchantment(
+            const MWWorld::Ptr& attacker, const MWWorld::Ptr& target, const std::string& enchantmentId)
+        {
+            if (enchantmentId.empty() || attacker.isEmpty() || target.isEmpty())
+                return;
+
+            const auto& esmStore = *MWBase::Environment::get().getESMStore();
+            const ESM::Enchantment* enchantment
+                = esmStore.get<ESM::Enchantment>().search(ESM::RefId::stringRefId(enchantmentId));
+            if (!enchantment || enchantment->mData.mType != ESM::Enchantment::WhenStrikes)
+                return;
+
+            const auto& effectStore = esmStore.get<ESM::MagicEffect>();
+            for (const auto& effectInfo : enchantment->mEffects.mList)
+            {
+                const ESM::MagicEffect* effect = effectStore.search(effectInfo.mData.mEffectID);
+                if (!effect)
+                    continue;
+
+                const MWWorld::Ptr& effectTarget
+                    = effectInfo.mData.mRange == ESM::RT_Self ? attacker : target;
+                MWMechanics::playEffects(effectTarget, *effect);
+            }
         }
 
         MWWorld::CellStore* findActiveCell(MWWorld::World& world, const CellId& cellState)
@@ -384,6 +415,11 @@ namespace mwmp
                 ? mMovementDiagReceivedStepTotal / static_cast<float>(mMovementDiagChangedPackets) : 0.f;
             const float errorAverage = mMovementDiagTargetErrorSamples != 0
                 ? mMovementDiagTargetErrorTotal / static_cast<float>(mMovementDiagTargetErrorSamples) : 0.f;
+            const MWMechanics::Movement& diagMovement = mNpcPtr.getClass().getMovementSettings(mNpcPtr);
+            MWBase::World* world = MWBase::Environment::get().getWorld();
+            MWRender::Animation* animation = world ? world->getAnimation(mNpcPtr) : nullptr;
+            const std::string lowerBodyAnimation = animation
+                ? std::string(animation->getActiveGroup(MWRender::BoneGroup_LowerBody)) : std::string{};
             Log(Debug::Info) << "[MPDIAG] RemotePlayer movement"
                              << " name=" << mName
                              << " cell=" << mState.cell.cellName
@@ -413,7 +449,24 @@ namespace mwmp
                              << " applyMoves=" << mMovementDiagApplyMoves
                              << " applySkips=" << mMovementDiagApplySkips
                              << " extrapClamps=" << mMovementDiagExtrapolationClamps
-                             << " axes=" << mState.animFlags.animFwd << "," << mState.animFlags.animSide;
+                             << " snapshotDepth=" << mPositionSnapshots.size()
+                             << " snapshotDepthMax=" << mMovementDiagSnapshotDepthMax
+                             << " snapshotInterpFrames=" << mMovementDiagSnapshotInterpFrames
+                             << " snapshotExtrapFrames=" << mMovementDiagSnapshotExtrapFrames
+                             << " snapshotHoldFrames=" << mMovementDiagSnapshotHoldFrames
+                             << " axes=" << mState.animFlags.animFwd << "," << mState.animFlags.animSide
+                             << " movementFlags=" << mState.animFlags.movementFlags
+                             << " actionFlags=" << mState.animFlags.actionFlags
+                             << " actorMove=" << diagMovement.mPosition[0] << "," << diagMovement.mPosition[1]
+                             << "," << diagMovement.mPosition[2]
+                             << " actorRotZ=" << diagMovement.mRotation[2]
+                             << " yawStep=" << mInterp.yawDelta
+                             << " yawError=" << (mInterp.trz - mInterp.crz)
+                             << " yawCurrent=" << mInterp.crz
+                             << " yawTarget=" << mInterp.trz
+                             << " actorYaw=" << mNpcPtr.getRefData().getPosition().rot[2]
+                             << " onGround=" << (world && world->isOnGround(mNpcPtr))
+                             << " lowerAnim='" << lowerBodyAnimation << "'";
             mMovementDiagTimer = 0.f;
             mMovementDiagFrames = 0;
             mMovementDiagMovingFrames = 0;
@@ -440,6 +493,10 @@ namespace mwmp
             mMovementDiagApplyMoves = 0;
             mMovementDiagApplySkips = 0;
             mMovementDiagExtrapolationClamps = 0;
+            mMovementDiagSnapshotInterpFrames = 0;
+            mMovementDiagSnapshotExtrapFrames = 0;
+            mMovementDiagSnapshotHoldFrames = 0;
+            mMovementDiagSnapshotDepthMax = 0;
         }
 
         if (mIsSpawned)
@@ -607,14 +664,19 @@ namespace mwmp
         }
         mov.mIsStrafing = mIsStrafing;
 
-        // Pass the interpolated yaw delta so standing turn animations trigger
+        // World rotation is applied absolutely by applyInterpolationToWorld().
+        // Feeding the same delta through CharacterController rotates the proxy a
+        // second time and leaves a permanent facing offset after the turn ends.
         mov.mRotation[0] = 0.f;
         mov.mRotation[1] = 0.f;
-        const bool isIdle = (effFwd == 0.f && effSide == 0.f);
-        if (isIdle && std::abs(mInterp.yawDelta) > 0.005f)
-            mov.mRotation[2] = mInterp.yawDelta;
-        else
-            mov.mRotation[2] = 0.f;
+        mov.mRotation[2] = 0.f;
+        if (auto* baseNode = mNpcPtr.getRefData().getBaseNode())
+        {
+            const bool isIdle = (effFwd == 0.f && effSide == 0.f);
+            const float visualTurn = isIdle && std::abs(mInterp.yawDelta) > 0.005f
+                ? mInterp.yawDelta : 0.f;
+            baseNode->setUserValue("mp_visual_turn", visualTurn);
+        }
 
         // Jump animation ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â‚¬Å¾Ã‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¦ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¡ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Â¦Ãƒâ€šÃ‚Â¡ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â ported from TES3MP's DedicatedPlayer::setAnimFlags().
         //
@@ -1004,6 +1066,35 @@ namespace mwmp
             // Insert (or update if already exists from a previous spawn) the record
             world->getStore().overrideRecord(npcRecord);
 
+            // A cell transition or forced process interruption can leave an old
+            // instance of this deterministic proxy record in an active CellStore.
+            // Remove every live copy before placing the one owned by this
+            // RemotePlayer so death/resurrect/coc can never display duplicates.
+            std::vector<MWWorld::Ptr> staleProxies;
+            const ESM::RefId proxyRecordId = ESM::RefId::stringRefId(npcRecordId);
+            for (MWWorld::CellStore* activeCell : worldImpl->getWorldScene().getActiveCells())
+            {
+                if (!activeCell)
+                    continue;
+                activeCell->forEach([&](MWWorld::Ptr existing) {
+                    if (!existing.isEmpty() && existing.getCellRef().getCount() > 0
+                        && existing.getCellRef().getRefId() == proxyRecordId
+                        && (mNpcPtr.isEmpty() || !(existing == mNpcPtr)))
+                    {
+                        staleProxies.push_back(existing);
+                    }
+                    return true;
+                });
+            }
+            for (const MWWorld::Ptr& staleProxy : staleProxies)
+                world->deleteObject(staleProxy);
+            if (!staleProxies.empty())
+            {
+                Log(Debug::Warning) << "[MP] RemotePlayer " << mName
+                                    << ": removed " << staleProxies.size()
+                                    << " stale proxy instance(s) before spawn";
+            }
+
             Log(Debug::Info) << "[MP] RemotePlayer " << mName << ": NPC record '" << npcRecordId << "'"
                              << " race='" << mState.race << "'"
                              << " head='" << mState.headMesh << "'"
@@ -1090,8 +1181,12 @@ namespace mwmp
         // cell before Main destroys its PlayerList. In that state mNpcPtr still
         // looks non-empty but points into a released CellStore, so deleteObject
         // would dereference freed RefData during shutdown.
-        const bool cellStillActive = world
-            && findActiveCell(*static_cast<MWWorld::World*>(world), mState.cell) != nullptr;
+        // onCellUpdate() has already replaced mState.cell with the destination.
+        // Test the Ptr's actual source CellStore; checking the new state can skip
+        // deletion and leave a stationary proxy behind when the player respawns.
+        const bool cellStillActive = world && !mNpcPtr.isEmpty() && mNpcPtr.getCell() != nullptr
+            && static_cast<MWWorld::World*>(world)->getWorldScene().getActiveCells().find(mNpcPtr.getCell())
+                != static_cast<MWWorld::World*>(world)->getWorldScene().getActiveCells().end();
         if (cellStillActive && !mNpcPtr.isEmpty())
         {
             try
@@ -1276,7 +1371,8 @@ namespace mwmp
                             << " ext=" << mState.cell.isExterior << " grid=(" << mState.cell.gridX << ","
                             << mState.cell.gridY << ")";
 
-        const uint64_t receiveMs = steadyTimeMs();
+        const uint64_t receiveUs = steadyTimeUs();
+        const uint64_t receiveMs = receiveUs / 1000;
         if (mLastPositionReceiveMs != 0 && receiveMs >= mLastPositionReceiveMs)
         {
             const float gapMs = static_cast<float>(receiveMs - mLastPositionReceiveMs);
@@ -1310,11 +1406,24 @@ namespace mwmp
         const float oldVy = mState.velocity.linear[1];
         const float oldVz = mState.velocity.linear[2];
 
+        if (state.positionSampleTimeUs != 0 && mLastPositionSampleTimeUs != 0
+            && state.positionSampleTimeUs <= mLastPositionSampleTimeUs)
+        {
+            ++mMovementDiagStalePackets;
+            Log(Debug::Verbose) << "[MP] RemotePlayer " << mName
+                                << ": ignored non-monotonic position sample time="
+                                << state.positionSampleTimeUs
+                                << " last=" << mLastPositionSampleTimeUs;
+            return;
+        }
+
         // intentionally NOT touching mState.cell
         mState.position = state.position;
         mState.velocity = state.velocity;
+        mState.positionSampleTimeUs = state.positionSampleTimeUs;
 
         auto hardSnapPosition = [&](const char* reason) {
+            clearPositionSnapshots();
             mState.velocity = {};
             // A position teleport is also a break in locomotion continuity.  The
             // animation packet is independent from the position packet, so keeping
@@ -1322,6 +1431,8 @@ namespace mwmp
             // sender's next idle edge (or periodic animation refresh) arrives.
             clearTransientLocomotion(mState.animFlags);
             clearTransientLocomotion(mLastAppliedAnimFlags);
+            mState.animFlags.movementFlags = 0;
+            mLastAppliedAnimFlags.movementFlags = 0;
             mInterp.cx = state.position.pos[0];
             mInterp.cy = state.position.pos[1];
             mInterp.cz = state.position.pos[2];
@@ -1352,9 +1463,20 @@ namespace mwmp
                 movement.mPosition[0] = 0.f;
                 movement.mPosition[1] = 0.f;
                 movement.mPosition[2] = 0.f;
+                movement.mRotation[0] = 0.f;
+                movement.mRotation[1] = 0.f;
+                movement.mRotation[2] = 0.f;
                 movement.mIsStrafing = false;
                 if (auto* baseNode = mNpcPtr.getRefData().getBaseNode())
+                {
                     baseNode->setUserValue("mp_interp_speed", 0.f);
+                    baseNode->setUserValue("mp_visual_turn", 0.f);
+                    // The CharacterController owns the currently playing lower-body
+                    // state. Clearing packet flags alone does not stop a turn group
+                    // that was already selected, so ask it to discard that state on
+                    // its next update and expose the normal idle underneath.
+                    baseNode->setUserValue("mp_force_network_idle", true);
+                }
             }
             Log(Debug::Verbose) << "[MP] RemotePlayer " << mName << " teleported: hard-snapping (" << reason << ").";
         };
@@ -1369,6 +1491,61 @@ namespace mwmp
         if (state.position.isTeleporting || largePositionJump)
         {
             hardSnapPosition(state.position.isTeleporting ? "flag" : "large position jump");
+            return;
+        }
+
+        if (state.positionSampleTimeUs != 0)
+        {
+            const bool firstSnapshot = mPositionSnapshots.empty();
+            const double candidateOffsetUs
+                = static_cast<double>(receiveUs) - static_cast<double>(state.positionSampleTimeUs);
+            if (!mHasPositionClockOffset)
+            {
+                mPositionClockOffsetUs = candidateOffsetUs;
+                mHasPositionClockOffset = true;
+            }
+            else if (candidateOffsetUs < mPositionClockOffsetUs)
+            {
+                // A lower arrival offset is evidence of a better baseline-latency
+                // sample. Adopt it immediately: after a load or observer stall the
+                // first processed packet may have spent seconds in the receive
+                // queue, and slowly converging would replay that entire backlog.
+                mPositionClockOffsetUs = candidateOffsetUs;
+            }
+
+            PositionSnapshot snapshot;
+            snapshot.position = state.position;
+            snapshot.velocity = state.velocity;
+            snapshot.senderTimeUs = state.positionSampleTimeUs;
+            snapshot.receiveTimeUs = receiveUs;
+            snapshot.sequence = sequence;
+            mPositionSnapshots.push_back(snapshot);
+            while (mPositionSnapshots.size() > MAX_POSITION_SNAPSHOTS)
+                mPositionSnapshots.pop_front();
+            mLastPositionSampleTimeUs = state.positionSampleTimeUs;
+
+            mInterp.lastRecvX = state.position.pos[0];
+            mInterp.lastRecvY = state.position.pos[1];
+            mInterp.lastRecvZ = state.position.pos[2];
+            mInterp.targetVz = state.velocity.linear[2];
+            mInterp.hasTarget = true;
+
+            // The first sample establishes the proxy immediately; buffering only
+            // begins once there is an actual movement timeline to replay.
+            if (firstSnapshot && !mInterp.hasSnapped)
+            {
+                mInterp.cx = mInterp.tx = state.position.pos[0];
+                mInterp.cy = mInterp.ty = state.position.pos[1];
+                mInterp.cz = mInterp.tz = state.position.pos[2];
+                mInterp.crx = mInterp.trx = state.position.rot[0];
+                mInterp.cry = mInterp.try_ = state.position.rot[1];
+                mInterp.crz = mInterp.trz = state.position.rot[2];
+                mInterp.hasSnapped = true;
+            }
+
+            const bool currentlyJumping = (mState.animFlags.movementFlags & AnimFlags::MF_JUMP) != 0;
+            if (currentlyJumping && std::abs(state.velocity.linear[2]) > 30.f)
+                mJumpArcPrimed = true;
             return;
         }
 
@@ -1586,6 +1763,7 @@ namespace mwmp
         mIsStrafing = false;
         mTimeSinceLastPosUpdate = 0.f;
         mJumpArcPrimed = false;
+        clearPositionSnapshots();
 
         // Snap interpolation to new position so trySpawn has valid coordinates
         mInterp.cx = state.position.pos[0];
@@ -1666,8 +1844,13 @@ namespace mwmp
     }
 
     // ---------------------------------------------------------------------------
-    void RemotePlayer::onResurrect(const BasePlayer& /*state*/)
+    void RemotePlayer::onResurrect(const BasePlayer& state)
     {
+        // The resurrect packet carries the authoritative post-respawn cell and
+        // transform. Apply it before reviving the proxy so observers never see
+        // the corpse stand up at its old death location while waiting for the
+        // sender's next movement frame.
+        onCellChange(state, 0);
         mIsDead = false;
         mState.isDead = false;
         mState.deathAnimationGroup.clear();
@@ -1708,6 +1891,8 @@ namespace mwmp
 
             stats.setKnockedDown(false);
             stats.setHitRecovery(false);
+
+            applyInterpolationToWorld();
         }
         Log(Debug::Info) << "[MP] RemotePlayer " << mName << " resurrected";
     }
@@ -1850,7 +2035,8 @@ namespace mwmp
                          << " anim='" << atk.attackAnimation << "'"
                          << " target='" << atk.target << "'"
                          << " targetMpNum=" << atk.targetMpNum
-                         << " targetKind=" << static_cast<int>(atk.targetKind);
+                         << " targetKind=" << static_cast<int>(atk.targetKind)
+                         << " onStrikeEnchantment='" << atk.onStrikeEnchantment << "'";
 
         // Push the animation type onto the NPC's base node so the CC receive hook
         // in character.cpp (Flag_NetworkPlayerNpc branch) reads it when it enters
@@ -1923,6 +2109,7 @@ namespace mwmp
                 if (atk.healthDamage && targetPtr == world->getPlayerPtr())
                     spawnReplicatedPlayerBloodEffect(targetPtr, hitPos);
                 playReplicatedImpactSound(mNpcPtr, targetPtr, atk);
+                playReplicatedOnStrikeEnchantment(mNpcPtr, targetPtr, atk.onStrikeEnchantment);
             }
             else if (targetIsActor && !targetPtr.isEmpty())
             {
@@ -1937,6 +2124,7 @@ namespace mwmp
                 if (atk.healthDamage && atk.type != 1)
                     spawnReplicatedPlayerBloodEffect(targetPtr, hitPos);
                 playReplicatedImpactSound(mNpcPtr, targetPtr, atk);
+                playReplicatedOnStrikeEnchantment(mNpcPtr, targetPtr, atk.onStrikeEnchantment);
             }
             else if (!atk.target.empty())
             {
@@ -2124,21 +2312,30 @@ namespace mwmp
             case Action::Set:
                 store.clear();
                 for (const auto& item : changes.items)
-                    store.add(ESM::RefId::stringRefId(item.refId), item.count);
+                {
+                    if (!item.refId.empty() && item.count > 0)
+                        store.add(ESM::RefId::stringRefId(item.refId), item.count);
+                }
                 Log(Debug::Verbose) << "[MP] RemotePlayer " << mName << ": inventory Set (" << changes.items.size()
                                     << " items)";
                 break;
 
             case Action::Add:
                 for (const auto& item : changes.items)
-                    store.add(ESM::RefId::stringRefId(item.refId), item.count);
+                {
+                    if (!item.refId.empty() && item.count > 0)
+                        store.add(ESM::RefId::stringRefId(item.refId), item.count);
+                }
                 Log(Debug::Verbose) << "[MP] RemotePlayer " << mName << ": inventory Add (" << changes.items.size()
                                     << " items)";
                 break;
 
             case Action::Remove:
                 for (const auto& item : changes.items)
-                    store.remove(ESM::RefId::stringRefId(item.refId), item.count);
+                {
+                    if (!item.refId.empty() && item.count > 0)
+                        store.remove(ESM::RefId::stringRefId(item.refId), item.count);
+                }
                 Log(Debug::Verbose) << "[MP] RemotePlayer " << mName << ": inventory Remove (" << changes.items.size()
                                     << " items)";
                 break;
@@ -2150,12 +2347,112 @@ namespace mwmp
         applyEquipmentState(mState, /*playSounds=*/false);
     }
 
+    void RemotePlayer::clearPositionSnapshots()
+    {
+        mPositionSnapshots.clear();
+        mPositionClockOffsetUs = 0.0;
+        mHasPositionClockOffset = false;
+        mLastPositionSampleTimeUs = 0;
+    }
+
+    bool RemotePlayer::updateSnapshotTarget()
+    {
+        if (mPositionSnapshots.empty() || !mHasPositionClockOffset)
+            return false;
+
+        const uint64_t nowUs = steadyTimeUs();
+        const double renderTimeUs = static_cast<double>(nowUs) - mPositionClockOffsetUs
+            - static_cast<double>(POSITION_INTERPOLATION_DELAY_US);
+
+        // Retain the sample immediately before the render cursor and everything
+        // after it. Queued packets received in one observer frame therefore remain
+        // distinct points on the sender's timeline instead of replacing one target.
+        while (mPositionSnapshots.size() > 2
+            && static_cast<double>(mPositionSnapshots[1].senderTimeUs) <= renderTimeUs)
+        {
+            mPositionSnapshots.pop_front();
+        }
+
+        mMovementDiagSnapshotDepthMax
+            = std::max(mMovementDiagSnapshotDepthMax, mPositionSnapshots.size());
+
+        const PositionSnapshot& oldest = mPositionSnapshots.front();
+        const PositionSnapshot& newest = mPositionSnapshots.back();
+        Position target = oldest.position;
+
+        if (renderTimeUs <= static_cast<double>(oldest.senderTimeUs))
+        {
+            ++mMovementDiagSnapshotHoldFrames;
+        }
+        else if (renderTimeUs < static_cast<double>(newest.senderTimeUs))
+        {
+            std::size_t upperIndex = 1;
+            while (upperIndex < mPositionSnapshots.size()
+                && static_cast<double>(mPositionSnapshots[upperIndex].senderTimeUs) < renderTimeUs)
+            {
+                ++upperIndex;
+            }
+
+            const PositionSnapshot& upper = mPositionSnapshots[upperIndex];
+            const PositionSnapshot& lower = mPositionSnapshots[upperIndex - 1];
+            const double spanUs = static_cast<double>(upper.senderTimeUs - lower.senderTimeUs);
+            const float alpha = spanUs > 0.0
+                ? static_cast<float>((renderTimeUs - static_cast<double>(lower.senderTimeUs)) / spanUs)
+                : 1.f;
+            for (int axis = 0; axis < 3; ++axis)
+            {
+                target.pos[axis] = lower.position.pos[axis]
+                    + (upper.position.pos[axis] - lower.position.pos[axis]) * alpha;
+                target.rot[axis] = lerpAngle(lower.position.rot[axis], upper.position.rot[axis], alpha);
+            }
+            ++mMovementDiagSnapshotInterpFrames;
+        }
+        else
+        {
+            target = newest.position;
+            const double rawExtrapolationUs = renderTimeUs - static_cast<double>(newest.senderTimeUs);
+            const uint64_t extrapolationUs = static_cast<uint64_t>(std::clamp(rawExtrapolationUs, 0.0,
+                static_cast<double>(POSITION_EXTRAPOLATION_LIMIT_US)));
+            const float extrapolationSeconds = static_cast<float>(extrapolationUs) / 1000000.f;
+
+            // Coast briefly, then integrate an exponential brake. At and beyond
+            // the cap the target remains fixed until a new authoritative sample
+            // arrives, preventing an arbitrarily stale velocity from running away.
+            constexpr float fullSpeedCoastSeconds = 0.05f;
+            constexpr float brakeRate = 8.f;
+            float effectiveSeconds = std::min(extrapolationSeconds, fullSpeedCoastSeconds);
+            if (extrapolationSeconds > fullSpeedCoastSeconds)
+            {
+                const float brakingSeconds = extrapolationSeconds - fullSpeedCoastSeconds;
+                effectiveSeconds += (1.f - std::exp(-brakingSeconds * brakeRate)) / brakeRate;
+            }
+            for (int axis = 0; axis < 3; ++axis)
+                target.pos[axis] += newest.velocity.linear[axis] * effectiveSeconds;
+
+            if (rawExtrapolationUs <= static_cast<double>(POSITION_EXTRAPOLATION_LIMIT_US))
+                ++mMovementDiagSnapshotExtrapFrames;
+            else
+                ++mMovementDiagSnapshotHoldFrames;
+        }
+
+        mInterp.tx = target.pos[0];
+        mInterp.ty = target.pos[1];
+        mInterp.tz = target.pos[2];
+        mInterp.trx = target.rot[0];
+        mInterp.try_ = target.rot[1];
+        mInterp.trz = target.rot[2];
+        mInterp.hasTarget = true;
+        return true;
+    }
+
     // ---------------------------------------------------------------------------
     // Linear-interpolate current position/rotation toward target each frame.
     void RemotePlayer::updateInterpolation(float dt)
     {
         if (!mInterp.hasTarget)
             return;
+
+        const bool usingSnapshotTimeline = updateSnapshotTarget();
 
         mTimeSinceLastPosUpdate += dt;
 
@@ -2196,7 +2493,7 @@ namespace mwmp
         // predicted, so packet jitter in a busy cell made the proxy repeatedly
         // ease toward an already-old position. Keep prediction tightly capped
         // around the last authoritative sample to prevent runaway drift.
-        if (!isInputIdle)
+        if (!usingSnapshotTimeline && !isInputIdle)
         {
             const float vx = mState.velocity.linear[0] * brakeFactor;
             const float vy = mState.velocity.linear[1] * brakeFactor;
@@ -2227,7 +2524,7 @@ namespace mwmp
         // and stair treads the per-frame Z velocity oscillates near zero, stalling
         // prediction while XY kept advancing smoothly.  Using the same idle check
         // Same idle check as XY ensures consistent treatment.
-        if (!isInputIdle && hasVerticalMotion)
+        if (!usingSnapshotTimeline && !isInputIdle && hasVerticalMotion)
         {
             float currentVz = netVerticalSpeed * brakeFactor;
             if (isAirborne && !isFlying)
@@ -2350,12 +2647,6 @@ namespace mwmp
         const float interpTotalSpeed
             = dt > 0.f ? std::sqrt(interpStepX * interpStepX + interpStepY * interpStepY + interpStepZ * interpStepZ) / dt : 0.f;
 
-        const float netPlanarSpeedRaw = std::sqrt(mState.velocity.linear[0] * mState.velocity.linear[0]
-            + mState.velocity.linear[1] * mState.velocity.linear[1]);
-        const float netTotalSpeedRaw = std::sqrt(mState.velocity.linear[0] * mState.velocity.linear[0]
-            + mState.velocity.linear[1] * mState.velocity.linear[1]
-            + mState.velocity.linear[2] * mState.velocity.linear[2]);
-
         // Animation cadence ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â‚¬Å¾Ã‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¦ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¡ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Â¦Ãƒâ€šÃ‚Â¡ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â set mInterpPlanarSpeed for CharacterController.
         // Drive animations from the ACTUAL visual movement (interpolation speed)
         // rather than solely relying on the sender's physics velocity. This
@@ -2427,42 +2718,6 @@ namespace mwmp
             mFootstepDebugTimer = 0.25f;
         }
 
-        // XY dead reckoning: advance the target forward using the sender's last-known
-        // world-space velocity so the interpolator is always chasing a predicted future
-        // position rather than a stale past one.  This removes the systematic lag visible
-        // at 20 Hz (remoteplanar residuals of 5-9 units at packet arrival) and reduces
-        // correction snaps to near-zero at 30 Hz.
-        //
-        // Guards:
-        //   - Not idle (fwd/side != 0): no movement, no prediction needed.
-        if (!isInputIdle)
-        {
-            const float vx = mState.velocity.linear[0] * brakeFactor;
-            const float vy = mState.velocity.linear[1] * brakeFactor;
-            // Jitter gate: ignore packet velocity below 1.0 unit/sec to prevent
-            // sub-pixel physics noise from causing constant micro-drifts.
-            if (vx * vx + vy * vy > 1.0f)
-            {
-                // Advance target
-                mInterp.tx += vx * dt;
-                mInterp.ty += vy * dt;
-
-                // Cap drift dynamically based on velocity instead of a fixed 24u limit
-                // so extreme speeds (e.g. jump spells) don't hit the interpolation ceiling.
-                const float speedSq = vx * vx + vy * vy;
-                const float maxExtrapDist = std::max(24.f, std::sqrt(speedSq) * 0.1f);
-
-                const float driftX = mInterp.tx - mInterp.lastRecvX;
-                const float driftY = mInterp.ty - mInterp.lastRecvY;
-                const float driftSq = driftX * driftX + driftY * driftY;
-                if (driftSq > maxExtrapDist * maxExtrapDist)
-                {
-                    const float scale = maxExtrapDist / std::sqrt(driftSq);
-                    mInterp.tx = mInterp.lastRecvX + driftX * scale;
-                    mInterp.ty = mInterp.lastRecvY + driftY * scale;
-                }
-            }
-        }
     }
 
     // ---------------------------------------------------------------------------

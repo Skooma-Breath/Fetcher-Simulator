@@ -429,6 +429,7 @@ private:
         uint32_t authorityGeneration = 0;
         uint64_t authorityStickyUntilMs = 0;
         uint32_t nextSnapshotSequence = 1;
+        bool hasCompleteAuthoritySnapshot = false;
         std::unordered_map<std::string, ActorRegistryRecord> actors;
         std::unordered_set<std::string> resetSuppressedVanillaDeaths;
         std::unordered_map<std::string, uint64_t> staleLiveVanillaDeathResendMs;
@@ -488,6 +489,20 @@ private:
     uint16_t    mPort;
     std::atomic<bool> mRunning { false };
     std::chrono::steady_clock::time_point mStartTime;
+    struct ServerLoopDiagnostics
+    {
+        std::chrono::steady_clock::time_point windowStart;
+        std::size_t loops = 0;
+        std::size_t messages = 0;
+        std::size_t maxMessagesPerPoll = 0;
+        std::size_t pollsAtReceiveLimit = 0;
+        std::size_t slowHandlers = 0;
+        std::size_t playerPositionRelays = 0;
+        double loopTotalMs = 0.0;
+        double loopMaxMs = 0.0;
+        double playerPositionRelayTotalMs = 0.0;
+        double playerPositionRelayMaxMs = 0.0;
+    } mLoopDiagnostics;
     bool mGeneratedRecordGcScheduled = false;
     std::chrono::steady_clock::time_point mGeneratedRecordGcDueTime {};
     std::string mGeneratedRecordGcReason;

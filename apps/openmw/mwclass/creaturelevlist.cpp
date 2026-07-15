@@ -41,6 +41,26 @@ namespace MWClass
     {
     }
 
+    MWWorld::Ptr CreatureLevList::getSpawnedActor(const MWWorld::Ptr& ptr) const
+    {
+        if (!ptr.getRefData().getCustomData())
+            return {};
+        return ptr.getRefData().getCustomData()->asCreatureLevListCustomData().getSpawnedPtr();
+    }
+
+    void CreatureLevList::setSpawnedActor(
+        const MWWorld::Ptr& ptr, const MWWorld::Ptr& spawnedActor) const
+    {
+        ensureCustomData(ptr);
+        CreatureLevListCustomData& customData
+            = ptr.getRefData().getCustomData()->asCreatureLevListCustomData();
+        customData.mSpawnedActor
+            = spawnedActor.isEmpty() ? ESM::RefNum() : spawnedActor.getCellRef().getRefNum();
+        // An empty actor represents an authoritative Chance None roll. Do not
+        // immediately roll the list again on the observer.
+        customData.mSpawn = false;
+    }
+
     MWWorld::Ptr CreatureLevList::copyToCellImpl(const MWWorld::ConstPtr& ptr, MWWorld::CellStore& cell) const
     {
         const MWWorld::LiveCellRef<ESM::CreatureLevList>* ref = ptr.get<ESM::CreatureLevList>();
