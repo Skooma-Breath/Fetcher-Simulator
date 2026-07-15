@@ -1236,5 +1236,75 @@
     "plugins": [
       "Tamriel Data Races Playable 25.05.ESP"
     ]
+  },
+  {
+    "name": "Zesterer's Volumetric Cloud & Mist Mod for OpenMW",
+    "author": "zesterer",
+    "description": "Adds raycasted volumetric clouds, dynamic mist, atmospheric scattering, and related post-processing effects to OpenMW.",
+    "url": "https://github.com/zesterer/openmw-volumetric-clouds",
+    "category": "Shaders",
+    "dl_url": "",
+    "usage_notes": "Requires post-processing to be enabled in OpenMW. Enable the clouds effect from the F2 post-processing menu; if FXAA is used, place it after clouds. Distant fog should remain disabled.",
+    "compat": 4,
+    "dir": "OpenMWVolumetricClouds",
+    "slug": "openmw-volumetric-clouds",
+    "date_added": "2026-07-13T00:00:00+00:00",
+    "date_updated": "2026-07-13T00:00:00+00:00",
+    "download_info": [
+      {
+        "direct_download": "https://github.com/zesterer/openmw-volumetric-clouds/archive/refs/heads/main.zip",
+        "file_name": "openmw-volumetric-clouds-main.zip",
+        "extract_to": "OpenMWVolumetricClouds",
+        "nexus_file_id": null,
+        "pinned": false,
+        "actions": []
+      }
+    ],
+    "tags": [
+      "openmw-shaders"
+    ],
+    "on_lists": [
+      "fetcher-bardcraft"
+    ],
+    "data_paths": [
+      "OpenMWVolumetricClouds"
+    ],
+    "plugins": []
+  },
+  {
+    "name": "Tiny Transparent Skies for Zesterer's Volumetric Clouds",
+    "author": "ShulShagana",
+    "description": "Replaces vanilla weather sky textures with tiny transparent textures so volumetric clouds render without duplicate flat clouds while retaining the night sky.",
+    "url": "https://www.nexusmods.com/morrowind/mods/56065",
+    "category": "Shaders",
+    "dl_url": "",
+    "usage_notes": "Download the main file named Tiny Transparent Skies for Volumetric Clouds. The optional Sun Remover is intentionally excluded. This data path must load after vanilla assets and other sky texture replacers.",
+    "compat": 4,
+    "dir": "TinyTransparentSkiesForVolumetricClouds",
+    "slug": "tiny-transparent-skies-for-volumetric-clouds",
+    "date_added": "2026-07-13T00:00:00+00:00",
+    "date_updated": "2026-07-13T00:00:00+00:00",
+    "download_info": [
+      {
+        "direct_download": null,
+        "file_name": "Tiny Transparent Skies for Volumetric Clouds",
+        "extract_to": "TinyTransparentSkiesForVolumetricClouds",
+        "nexus_file_id": null,
+        "pinned": false,
+        "actions": []
+      }
+    ],
+    "tags": [
+      "openmw-shaders",
+      "sky",
+      "textures"
+    ],
+    "on_lists": [
+      "fetcher-bardcraft"
+    ],
+    "data_paths": [
+      "TinyTransparentSkiesForVolumetricClouds/BlankSkiesForVolumetricClouds"
+    ],
+    "plugins": []
   }
 ]
