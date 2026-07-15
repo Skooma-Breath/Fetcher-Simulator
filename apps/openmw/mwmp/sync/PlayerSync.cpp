@@ -1118,6 +1118,17 @@ void PlayerSync::sendAnimFlags(float dt)
         // the sender's actual stats, stance, encumbrance, and settings.
         const float expectedMoveSpeed = player.getClass().getMaxSpeed(player);
         blockedMoveSpeed = expectedMoveSpeed;
+        // CharacterController publishes the exact base speed used to advance
+        // the local locomotion animation. It includes acceleration, strafing,
+        // stance, encumbrance, and low-Speed behavior that cannot be recovered
+        // reliably from world displacement on the observer.
+        if (auto* baseNode = player.getRefData().getBaseNode())
+        {
+            float localAnimationSpeed = 0.f;
+            if (baseNode->getUserValue("mp_anim_base_speed", localAnimationSpeed)
+                && localAnimationSpeed > 0.f)
+                blockedMoveSpeed = localAnimationSpeed;
+        }
         const float wallSpeedThreshold = std::max(velocityGate, expectedMoveSpeed * 0.8f);
         wallBlocked = rawHasMovementInput
             && expectedMoveSpeed > velocityGate
@@ -1210,7 +1221,8 @@ void PlayerSync::sendAnimFlags(float dt)
 
     f.animFwd  = fwd;
     f.animSide = side;
-    f.blockedMoveSpeed = wallBlocked ? blockedMoveSpeed : 0.f;
+    const bool hasLocomotionAxes = std::abs(fwd) >= 0.1f || std::abs(side) >= 0.1f;
+    f.blockedMoveSpeed = (hasLocomotionAxes || wallBlocked) ? blockedMoveSpeed : 0.f;
     // Jump launch velocity: only set on the rising edge so the receiver seeds its
     // parabolic arc from the real vz at the moment the jump impulse fires.
     // For all other frames this stays 0 to keep packet semantics clean.

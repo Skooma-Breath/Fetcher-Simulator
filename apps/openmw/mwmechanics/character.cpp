@@ -2527,12 +2527,11 @@ namespace MWMechanics
                 {
                     if (mpSpeed > 0.001f)
                     {
-                        // De-scale the physics speed back to base units (scale 1.0) so it matches
-                        // the mMovementAnimSpeed derived from the raw NIF model.
-                        if (scale > 0.f)
-                            speed = mpSpeed / scale;
-                        else
-                            speed = mpSpeed;
+                        // The interpolator reports authoritative world displacement.
+                        // Animation velocity is evaluated in the same visual space;
+                        // applying race scale again makes short races cycle too fast
+                        // and large races cycle too slowly.
+                        speed = mpSpeed;
 
                         if (mMpDebugTimer <= 0.f)
                             Log(Debug::Verbose) << "[MPDBG] Applied speed override: " << mpSpeed << " -> " << speed;
@@ -2882,6 +2881,18 @@ namespace MWMechanics
                     const float maxSpeedMult = 10.f;
                     const float speedMult = speed / mMovementAnimSpeed;
                     mAnimation->adjustSpeedMult(mCurrentMovement, std::min(maxSpeedMult, speedMult));
+#ifdef BUILD_MULTIPLAYER
+                    if (isPlayer || isNetworkPlayerPuppet)
+                    {
+                        if (auto* baseNode = mPtr.getRefData().getBaseNode())
+                        {
+                            baseNode->setUserValue("mp_anim_base_speed", speed);
+                            baseNode->setUserValue("mp_anim_velocity", mMovementAnimSpeed);
+                            baseNode->setUserValue("mp_anim_speed_mult", std::min(maxSpeedMult, speedMult));
+                            baseNode->setUserValue("mp_anim_world_scale", scale);
+                        }
+                    }
+#endif
                     // Make sure the actual speed is the "expected" speed even though the animation is slower
                     if (isMovementAnimationControlled())
                     {

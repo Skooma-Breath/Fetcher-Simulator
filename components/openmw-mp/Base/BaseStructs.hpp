@@ -121,7 +121,7 @@ namespace mwmp
         // groups itself — identical to how a local 1st-person player is handled.
         float    animFwd  = 0.f;  // mPosition[1]: +1=forward, -1=backward, 0=idle
         float    animSide = 0.f;  // mPosition[0]: +1=strafe-right, -1=strafe-left
-        float    blockedMoveSpeed = 0.f; // sender-side expected pace for wall-blocked movement
+        float    blockedMoveSpeed = 0.f; // sender-side locomotion animation pace; also used while wall-blocked
         float    jumpVz = 0.f;           // launch velocity for remote jump arcs
 
         // The current animation group being played on the lower body of the authority NPC.

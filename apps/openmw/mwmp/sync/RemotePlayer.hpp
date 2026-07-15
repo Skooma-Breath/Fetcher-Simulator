@@ -157,6 +157,10 @@ namespace mwmp
         // animation rate tracks actual movement instead of stats-based speed.
         float mInterpPlanarSpeed = 0.f;
         bool mLocomotionVisuallySuppressed = false;
+        float mBufferedAnimFwd = 0.f;
+        float mBufferedAnimSide = 0.f;
+        float mBufferedLocomotionSpeed = 0.f;
+        uint32_t mBufferedLocomotionFlags = 0;
         float mLastAppliedInterpPos[3] = { 0.f, 0.f, 0.f };
         bool mHasAppliedInterpPos = false;
 
