@@ -67,6 +67,18 @@ struct ContentFileRule
     std::string sha256;
 };
 
+struct JournalGroupMember
+{
+    std::string account;
+    std::string character;
+};
+
+struct JournalSharingGroup
+{
+    std::string name;
+    std::vector<JournalGroupMember> members;
+};
+
 class LuaServerContext
 {
 public:
@@ -112,6 +124,7 @@ public:
     std::optional<PlayerMark> getConfigPlayerMark(const std::string& key) const;
     std::vector<PlayerMark> getConfigPlayerMarks(const std::string& key) const;
     std::vector<ContentFileRule> getConfigContentFileRules(const std::string& key) const;
+    std::vector<JournalSharingGroup> getConfigJournalGroups(const std::string& key) const;
     std::optional<LuaPlayerSnapshot> getPlayer(uint32_t guid) const;
     std::vector<LuaPlayerSnapshot> getPlayers() const;
     int getPlayerCount() const;

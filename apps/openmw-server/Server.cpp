@@ -48,6 +48,7 @@
 #include <components/openmw-mp/Packets/Player/PacketPlayerCast.hpp>
 #include <components/openmw-mp/Packets/Player/PacketPlayerSpeech.hpp>
 #include <components/openmw-mp/Packets/Player/PacketPlayerInventory.hpp>
+#include <components/openmw-mp/Packets/Player/PacketPlayerJournal.hpp>
 #include <components/openmw-mp/Packets/Player/PacketPlayerStatsDynamic.hpp>
 #include <components/openmw-mp/Packets/Player/PacketPlayerDeath.hpp>
 #include <components/openmw-mp/Packets/Player/PacketPlayerResurrect.hpp>
@@ -1589,6 +1590,24 @@ void MPServer::run()
     mModChecksRequireExactList = mLua.getBool("Config", "MOD_CHECKS_REQUIRE_EXACT_LIST", false);
     mModChecksHelpUrl = mLua.getString("Config", "MOD_CHECKS_HELP_URL", "");
     mRequiredContentFiles = mLua.getConfigContentFileRules("REQUIRED_CONTENT_FILES");
+
+    const std::string journalSharing = lowerAscii(mLua.getString("Config", "JOURNAL_SHARING", "player"));
+    if (journalSharing == "server")
+        mJournalSharingMode = JournalSharingMode::Server;
+    else if (journalSharing == "group")
+        mJournalSharingMode = JournalSharingMode::Group;
+    else
+    {
+        mJournalSharingMode = JournalSharingMode::Player;
+        if (journalSharing != "player")
+            Log(Debug::Warning) << "[Server] Invalid Config.JOURNAL_SHARING='" << journalSharing
+                                << "'; using player";
+    }
+    mJournalSharingGroups = mLua.getConfigJournalGroups("JOURNAL_GROUPS");
+    std::sort(mJournalSharingGroups.begin(), mJournalSharingGroups.end(),
+        [](const JournalSharingGroup& left, const JournalSharingGroup& right) { return left.name < right.name; });
+    Log(Debug::Info) << "[Server] Journal sharing mode=" << journalSharing
+                     << " groups=" << mJournalSharingGroups.size();
     Log(Debug::Info) << "[Server] Content-file checks: "
                      << (mModChecksEnabled ? "enabled" : "disabled")
                      << " required=" << mRequiredContentFiles.size()
@@ -3678,6 +3697,7 @@ void MPServer::onClientMessage(ConnectedClient& client,
         case PacketType::PlayerAttack:     handlePlayerAttack(client, data, size);       break;
         case PacketType::PlayerCast:       handlePlayerCast(client, data, size);         break;
         case PacketType::PlayerInventory:  handlePlayerInventory(client, data, size);    break;
+        case PacketType::PlayerJournal:    handlePlayerJournal(client, data, size);      break;
         case PacketType::PlayerStatsDynamic: handlePlayerStatsDynamic(client, data, size); break;
         case PacketType::PlayerDeath:      handlePlayerDeath(client, data, size);        break;
         case PacketType::PlayerResurrect:  handlePlayerResurrect(client, data, size);    break;
@@ -4943,6 +4963,7 @@ void MPServer::handleCharacterSelect(ConnectedClient& c, const uint8_t* data, si
     }
 
     cdPkt.characterId = c.dbCharacterId;
+    c.slotName = cdPkt.characterName;
 
     // Queue records and the persisted actor baseline before CharacterData.  The
     // client enters the selected character's world as soon as CharacterData is
@@ -4953,6 +4974,7 @@ void MPServer::handleCharacterSelect(ConnectedClient& c, const uint8_t* data, si
     // State_NoGame.
     // The normal sendCellStateToClient() below remains the post-selection catch-up.
     sendDynamicRecordsToClient(c.conn);
+    sendAuthoritativeJournal(c);
     if (!cdPkt.spawnCell.empty())
     {
         sendActorStateToClient(c.conn, cdPkt.spawnCell);
@@ -5578,6 +5600,76 @@ void MPServer::handlePlayerInventory(ConnectedClient& c, const uint8_t* data, si
     syncLuaSnapshot();
     scheduleGeneratedDynamicRecordGc("player_inventory");
     broadcastToAll(std::vector<uint8_t>(data, data + size), c.conn);
+}
+
+// ---------------------------------------------------------------------------
+void MPServer::handlePlayerJournal(ConnectedClient& c, const uint8_t* data, size_t size)
+{
+    BasePlayer incoming;
+    PacketPlayerJournal packet;
+    packet.setPlayer(&incoming);
+    if (!packet.decode(data, size))
+        return;
+    if (incoming.guid != c.guid
+        || incoming.journalChanges.action != BasePlayer::JournalChanges::Action::Add)
+    {
+        Log(Debug::Warning) << "[Server] Rejected non-delta PlayerJournal from " << c.name;
+        return;
+    }
+
+    std::vector<BasePlayer::JournalItem> accepted;
+    accepted.reserve(std::min<std::size_t>(incoming.journalChanges.items.size(), 256));
+    for (BasePlayer::JournalItem item : incoming.journalChanges.items)
+    {
+        if (accepted.size() >= 256)
+            break;
+        if (item.quest.empty() || item.quest.size() > 256)
+            continue;
+        if (item.type == BasePlayer::JournalItem::Type::Entry
+            && (item.infoId.empty() || item.infoId.size() > 256))
+            continue;
+        if (item.text.size() > 65535 || item.actorName.size() > 1024)
+            continue;
+
+        item.daysPassed = std::clamp(item.daysPassed, 0, 10000000);
+        item.month = std::clamp(item.month, 0, 11);
+        item.dayOfMonth = std::clamp(item.dayOfMonth, 0, 31);
+        accepted.push_back(std::move(item));
+    }
+    if (accepted.empty())
+        return;
+
+    if (mPlayerDb && c.dbCharacterId > 0)
+    {
+        try
+        {
+            mPlayerDb->saveCharacterJournalChanges(c.dbCharacterId, accepted);
+        }
+        catch (const std::exception& e)
+        {
+            Log(Debug::Warning) << "[PlayerDB] saveCharacterJournalChanges error: " << e.what();
+            return;
+        }
+    }
+
+    for (auto& [_, target] : mClients)
+    {
+        if (!shouldShareJournal(c, target))
+            continue;
+
+        BasePlayer relay;
+        relay.guid = target.guid;
+        relay.journalChanges.action = BasePlayer::JournalChanges::Action::Add;
+        relay.journalChanges.items = accepted;
+        PacketPlayerJournal relayPacket;
+        relayPacket.setPlayer(&relay);
+        sendTo(target.conn, relayPacket.encode());
+    }
+
+    Log(Debug::Verbose) << "[Server] Persisted PlayerJournal"
+                        << " player=" << c.name
+                        << " mode=" << static_cast<int>(mJournalSharingMode)
+                        << " items=" << accepted.size();
 }
 
 // ---------------------------------------------------------------------------
@@ -9618,6 +9710,119 @@ void MPServer::sendAuthoritativeEquipment(ConnectedClient& c, bool includeOthers
     sendTo(c.conn, encoded);
     if (includeOthers)
         broadcastToAll(encoded, c.conn);
+}
+
+std::string MPServer::journalGroupFor(const ConnectedClient& c) const
+{
+    const std::string account = lowerAscii(c.loginName);
+    const std::string character = lowerAscii(c.slotName);
+    for (const JournalSharingGroup& group : mJournalSharingGroups)
+    {
+        for (const JournalGroupMember& member : group.members)
+        {
+            if (lowerAscii(member.account) != account)
+                continue;
+            if (member.character.empty() || lowerAscii(member.character) == character)
+                return group.name;
+        }
+    }
+    return {};
+}
+
+bool MPServer::shouldShareJournal(const ConnectedClient& source, const ConnectedClient& target) const
+{
+    if (source.conn == target.conn || !target.charSelectComplete)
+        return false;
+    if (mJournalSharingMode == JournalSharingMode::Server)
+        return true;
+    if (mJournalSharingMode != JournalSharingMode::Group)
+        return false;
+
+    const std::string sourceGroup = journalGroupFor(source);
+    return !sourceGroup.empty() && sourceGroup == journalGroupFor(target);
+}
+
+std::vector<int64_t> MPServer::journalSourceCharacterIds(const ConnectedClient& c)
+{
+    if (!mPlayerDb || c.dbCharacterId <= 0)
+        return {};
+    if (mJournalSharingMode == JournalSharingMode::Player)
+        return { c.dbCharacterId };
+
+    const std::vector<JournalCharacterIdentity> identities = mPlayerDb->listJournalCharacterIdentities();
+    if (mJournalSharingMode == JournalSharingMode::Server)
+    {
+        std::vector<int64_t> ids;
+        ids.reserve(identities.size());
+        for (const JournalCharacterIdentity& identity : identities)
+            ids.push_back(identity.characterId);
+        return ids;
+    }
+
+    const std::string groupName = journalGroupFor(c);
+    if (groupName.empty())
+        return { c.dbCharacterId };
+
+    const auto group = std::find_if(mJournalSharingGroups.begin(), mJournalSharingGroups.end(),
+        [&](const JournalSharingGroup& value) { return value.name == groupName; });
+    if (group == mJournalSharingGroups.end())
+        return { c.dbCharacterId };
+
+    std::vector<int64_t> ids;
+    for (const JournalCharacterIdentity& identity : identities)
+    {
+        const std::string account = lowerAscii(identity.accountName);
+        const std::string character = lowerAscii(identity.characterName);
+        const bool matches = std::any_of(group->members.begin(), group->members.end(),
+            [&](const JournalGroupMember& member) {
+                return lowerAscii(member.account) == account
+                    && (member.character.empty() || lowerAscii(member.character) == character);
+            });
+        if (matches)
+            ids.push_back(identity.characterId);
+    }
+
+    if (std::find(ids.begin(), ids.end(), c.dbCharacterId) == ids.end())
+        ids.push_back(c.dbCharacterId);
+    std::sort(ids.begin(), ids.end());
+    ids.erase(std::unique(ids.begin(), ids.end()), ids.end());
+    return ids;
+}
+
+void MPServer::sendAuthoritativeJournal(ConnectedClient& c)
+{
+    std::vector<BasePlayer::JournalItem> items;
+    std::vector<int64_t> sourceIds;
+    if (mPlayerDb && c.dbCharacterId > 0)
+    {
+        sourceIds = journalSourceCharacterIds(c);
+        items = mPlayerDb->loadCharacterJournals(sourceIds);
+    }
+
+    BasePlayer payload;
+    payload.guid = c.guid;
+    std::size_t offset = 0;
+    bool first = true;
+    do
+    {
+        const std::size_t count = std::min<std::size_t>(
+            PacketPlayerJournal::MaxItems, items.size() - offset);
+        payload.journalChanges.action = first ? BasePlayer::JournalChanges::Action::Set
+                                              : BasePlayer::JournalChanges::Action::Append;
+        payload.journalChanges.items.assign(items.begin() + offset, items.begin() + offset + count);
+
+        PacketPlayerJournal journal;
+        journal.setPlayer(&payload);
+        sendTo(c.conn, journal.encode());
+        first = false;
+        offset += count;
+    } while (offset < items.size());
+
+    Log(Debug::Verbose) << "[PlayerDB] sent authoritative journal"
+                        << " guid=" << c.guid
+                        << " charId=" << c.dbCharacterId
+                        << " sourceCharacters=" << sourceIds.size()
+                        << " items=" << items.size();
 }
 
 // ---------------------------------------------------------------------------

@@ -67,6 +67,29 @@ Config.REQUIRED_CONTENT_FILES = require("mod_manifest")
 Config.MAX_CHARS_PER_ACCOUNT = 5
 
 ------------------------------------------------------------------------
+-- Quest journal persistence and sharing
+------------------------------------------------------------------------
+
+-- "player": each character sees only journal entries they triggered.
+-- "group":  members of the same JOURNAL_GROUPS entry share quest journal state.
+-- "server": every character on the server shares quest journal state.
+--
+-- Journal packets apply resolved journal state directly. They do not rerun the
+-- originating MWScript command and they do not synchronize unrelated MWScript
+-- globals or locals.
+Config.JOURNAL_SHARING = "player"
+
+-- Group members are identified by login account. Set character to restrict a
+-- membership to one character slot; omit it to include every slot on the account.
+-- A member should appear in at most one group.
+Config.JOURNAL_GROUPS = {
+    -- fellowship = {
+    --     { account = "alice", character = "Nerevar" },
+    --     { account = "bob" },
+    -- },
+}
+
+------------------------------------------------------------------------
 -- Spawn
 ------------------------------------------------------------------------
 

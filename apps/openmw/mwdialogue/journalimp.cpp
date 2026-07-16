@@ -78,6 +78,12 @@ namespace MWDialogue
         mTopics.clear();
     }
 
+    void Journal::clearQuestJournal()
+    {
+        mJournal.clear();
+        mQuests.clear();
+    }
+
     void Journal::addEntry(const ESM::RefId& id, int index, const MWWorld::Ptr& actor)
     {
         // bail out if we already have heard this...
@@ -112,6 +118,44 @@ namespace MWDialogue
         {
             mJournal.push_back(std::move(entry));
             MWBase::Environment::get().getWindowManager()->messageBox("#{sJournalEntry}");
+        }
+    }
+
+    void Journal::applyJournalEntry(const ESM::JournalEntry& record, int index, bool notify)
+    {
+        if (record.mType != ESM::JournalEntry::Type_Journal || !isThere(record.mTopic, record.mInfo))
+            return;
+
+        for (const JournalEntry& existing : mJournal)
+        {
+            if (existing.mTopic == record.mTopic && existing.mInfoId == record.mInfo)
+            {
+                if (getJournalIndex(record.mTopic) != index)
+                    setJournalIndex(record.mTopic, index);
+                return;
+            }
+        }
+
+        StampedJournalEntry entry(record);
+        Quest& quest = getOrStartQuest(record.mTopic);
+        if (quest.addEntry(entry))
+        {
+            const std::string_view name = quest.getName();
+            for (auto& [_, otherQuest] : mQuests)
+            {
+                if (otherQuest.isFinished() && Misc::StringUtils::ciEqual(otherQuest.getName(), name))
+                    otherQuest.setFinished(false);
+            }
+        }
+
+        if (quest.getIndex() != index)
+            quest.setIndex(index);
+
+        if (!entry.getText().empty())
+        {
+            mJournal.push_back(std::move(entry));
+            if (notify)
+                MWBase::Environment::get().getWindowManager()->messageBox("#{sJournalEntry}");
         }
     }
 

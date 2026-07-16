@@ -270,6 +270,7 @@ private:
     void handlePlayerAttack     (ConnectedClient& c, const uint8_t* data, size_t size);
     void handlePlayerCast       (ConnectedClient& c, const uint8_t* data, size_t size);
     void handlePlayerInventory  (ConnectedClient& c, const uint8_t* data, size_t size);
+    void handlePlayerJournal    (ConnectedClient& c, const uint8_t* data, size_t size);
     void handlePlayerStatsDynamic(ConnectedClient& c, const uint8_t* data, size_t size);
     void handlePlayerDeath      (ConnectedClient& c, const uint8_t* data, size_t size);
     void handlePlayerResurrect  (ConnectedClient& c, const uint8_t* data, size_t size);
@@ -329,6 +330,10 @@ private:
     void syncLuaAuthorityState();
     void sendAuthoritativeInventory(ConnectedClient& c);
     void sendAuthoritativeEquipment(ConnectedClient& c, bool includeOthers = true);
+    void sendAuthoritativeJournal(ConnectedClient& c);
+    std::string journalGroupFor(const ConnectedClient& c) const;
+    bool shouldShareJournal(const ConnectedClient& source, const ConnectedClient& target) const;
+    std::vector<int64_t> journalSourceCharacterIds(const ConnectedClient& c);
     void sendPlayerStateBootstrapToClient(ConnectedClient& receiver);
     void startAdminHttpServer();
     void stopAdminHttpServer();
@@ -592,6 +597,9 @@ private:
     bool                          mModChecksRequireExactList = false;
     std::string                   mModChecksHelpUrl;
     std::vector<ContentFileRule>  mRequiredContentFiles;
+    enum class JournalSharingMode { Player, Group, Server };
+    JournalSharingMode             mJournalSharingMode = JournalSharingMode::Player;
+    std::vector<JournalSharingGroup> mJournalSharingGroups;
 
     // ── Config ────────────────────────────────────────────────────────────
     static constexpr float       MAX_MOVE_SPEED = 600.f;

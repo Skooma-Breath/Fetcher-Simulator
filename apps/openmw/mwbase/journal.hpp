@@ -21,6 +21,7 @@ namespace ESM
 {
     class ESMReader;
     class ESMWriter;
+    struct JournalEntry;
 }
 
 namespace MWBase
@@ -44,6 +45,9 @@ namespace MWBase
 
         virtual void clear() = 0;
 
+        virtual void clearQuestJournal() = 0;
+        ///< Clear quest indices and quest journal text while preserving dialogue topics.
+
         virtual ~Journal() = default;
 
         virtual MWDialogue::Quest& getOrStartQuest(const ESM::RefId& id) = 0;
@@ -54,6 +58,9 @@ namespace MWBase
         virtual void addEntry(const ESM::RefId& id, int index, const MWWorld::Ptr& actor) = 0;
         ///< Add a journal entry.
         /// @param actor Used as context for replacing of escape sequences (%name, etc).
+
+        virtual void applyJournalEntry(const ESM::JournalEntry& entry, int index, bool notify) = 0;
+        ///< Apply an already-resolved journal entry received from an authoritative source.
 
         virtual void setJournalIndex(const ESM::RefId& id, int index) = 0;
         ///< Set the journal index without adding an entry.

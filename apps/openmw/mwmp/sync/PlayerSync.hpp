@@ -2,6 +2,8 @@
 #define OPENMW_MWMP_SYNC_PLAYERSYNC_HPP
 
 #include <cstdint>
+#include <unordered_map>
+#include <unordered_set>
 
 #include <osg/Vec3f>
 
@@ -49,6 +51,7 @@ namespace mwmp
         void applyServerCellChange(const BasePlayer& authoritative);
         void queueAuthoritativeEquipment(const BasePlayer& authoritative);
         void queueAuthoritativeInventory(const BasePlayer& authoritative);
+        void queueAuthoritativeJournal(const BasePlayer& authoritative);
         void queueRestoredStats(const BasePlayer& restored);
         void applyRestoredStatsToPlayer();
         void applyServerDeath(const BasePlayer& state);
@@ -60,6 +63,7 @@ namespace mwmp
         // ---- per-frame checks ----
         void tickPosition(float dt);
         void tickDynamicStats(float dt);
+        void tickJournal();
 
         // ---- send helpers ----
         void sendPosition(bool reliable);
@@ -67,6 +71,7 @@ namespace mwmp
         void sendLoadedActorCells(bool force = false);
         void sendEquipment();
         void sendInventory();
+        void sendJournal();
         void sendAnimFlags(float dt);
         void sendAnimPlay();
         void sendAttack();
@@ -94,6 +99,7 @@ namespace mwmp
         void capturePersistentStats(const MWWorld::Ptr& player);
         void captureEquipment(const MWWorld::Ptr& player);
         void captureInventory(const MWWorld::Ptr& player);
+        void captureJournalSnapshot();
         std::vector<std::string> collectLoadedActorCellIds() const;
         void applyPendingAuthoritativeState(const MWWorld::Ptr& player);
         uint32_t resolveTargetMpNum(const MWWorld::Ptr& victim) const;
@@ -200,6 +206,11 @@ namespace mwmp
         bool mPendingInventoryRestore = false;
         std::array<EquipmentItem, BasePlayer::NUM_EQUIPMENT_SLOTS> mAuthoritativeEquipment{};
         BasePlayer::InventoryChanges mAuthoritativeInventory;
+        BasePlayer::JournalChanges mAuthoritativeJournal;
+        bool mPendingJournalRestore = false;
+        bool mJournalAuthoritativeInitialized = false;
+        std::unordered_set<std::string> mLastJournalEntries;
+        std::unordered_map<std::string, int> mLastJournalIndices;
         std::string mLastPendingInventoryMissingRefId;
         std::string mLastPendingEquipmentMissingRefId;
 

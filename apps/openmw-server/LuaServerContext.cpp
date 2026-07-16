@@ -754,6 +754,57 @@ std::vector<ContentFileRule> LuaServerContext::getConfigContentFileRules(const s
     return rules;
 }
 
+std::vector<JournalSharingGroup> LuaServerContext::getConfigJournalGroups(const std::string& key) const
+{
+    std::vector<JournalSharingGroup> groups;
+    if (!mLoaded)
+        return groups;
+
+    const std::optional<sol::table> config = loadConfigTable(*mLua);
+    if (!config)
+        return groups;
+
+    sol::object groupsObject = (*config)[key];
+    if (!groupsObject.is<sol::table>())
+        return groups;
+
+    for (const auto& groupEntry : groupsObject.as<sol::table>())
+    {
+        if (!groupEntry.first.is<std::string>() || !groupEntry.second.is<sol::table>())
+            continue;
+
+        JournalSharingGroup group;
+        group.name = groupEntry.first.as<std::string>();
+        const sol::table members = groupEntry.second.as<sol::table>();
+        for (std::size_t index = 1; index <= members.size(); ++index)
+        {
+            sol::object memberObject = members[index];
+            if (!memberObject.is<sol::table>())
+            {
+                Log(Debug::Warning) << "[LuaServerContext] Ignored invalid Config." << key
+                                    << " member in group " << group.name;
+                continue;
+            }
+
+            const sol::table memberTable = memberObject.as<sol::table>();
+            JournalGroupMember member;
+            member.account = memberTable.get_or("account", std::string{});
+            member.character = memberTable.get_or("character", std::string{});
+            if (member.account.empty())
+            {
+                Log(Debug::Warning) << "[LuaServerContext] Ignored Config." << key
+                                    << " member without account in group " << group.name;
+                continue;
+            }
+            group.members.push_back(std::move(member));
+        }
+
+        if (!group.name.empty() && !group.members.empty())
+            groups.push_back(std::move(group));
+    }
+    return groups;
+}
+
 std::optional<LuaPlayerSnapshot> LuaServerContext::getPlayer(uint32_t guid) const
 {
     std::lock_guard<std::mutex> lock(mSnapshotMutex);

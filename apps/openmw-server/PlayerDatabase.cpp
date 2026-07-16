@@ -1,13 +1,16 @@
 #include "PlayerDatabase.hpp"
 
 #include <algorithm>
+#include <chrono>
 #include <components/debug/debuglog.hpp>
 #include <sqlite3.h>
 
 #include <ctime>
 #include <limits>
+#include <map>
 #include <stdexcept>
 #include <string>
+#include <unordered_set>
 
 namespace mwmp
 {
@@ -285,6 +288,33 @@ CREATE TABLE IF NOT EXISTS character_skills (
     PRIMARY KEY(character_id, skill_index)
 );
 
+CREATE TABLE IF NOT EXISTS character_journal_entries (
+    id                    INTEGER PRIMARY KEY AUTOINCREMENT,
+    character_id          INTEGER NOT NULL REFERENCES characters(id) ON DELETE CASCADE,
+    quest_id              TEXT    NOT NULL,
+    info_id               TEXT    NOT NULL,
+    journal_index         INTEGER NOT NULL DEFAULT 0,
+    entry_text            TEXT    NOT NULL DEFAULT '',
+    actor_name            TEXT    NOT NULL DEFAULT '',
+    has_timestamp         INTEGER NOT NULL DEFAULT 0,
+    days_passed           INTEGER NOT NULL DEFAULT 0,
+    month                 INTEGER NOT NULL DEFAULT 0,
+    day_of_month          INTEGER NOT NULL DEFAULT 0,
+    changed_at            INTEGER NOT NULL DEFAULT 0,
+    UNIQUE(character_id, quest_id, info_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_character_journal_entries_character
+    ON character_journal_entries(character_id, id);
+
+CREATE TABLE IF NOT EXISTS character_journal_quests (
+    character_id          INTEGER NOT NULL REFERENCES characters(id) ON DELETE CASCADE,
+    quest_id              TEXT    NOT NULL,
+    journal_index         INTEGER NOT NULL DEFAULT 0,
+    changed_at            INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY(character_id, quest_id)
+);
+
 CREATE TABLE IF NOT EXISTS character_marks (
     character_id          INTEGER NOT NULL REFERENCES characters(id) ON DELETE CASCADE,
     mark_name             TEXT    NOT NULL,
@@ -528,6 +558,8 @@ CREATE INDEX IF NOT EXISTS idx_character_lua_storage_namespace
             { "character_dynamic_stats", "character_id" },
             { "character_attributes", "character_id, attribute_index" },
             { "character_skills", "character_id, skill_index" },
+            { "character_journal_entries", "character_id, id" },
+            { "character_journal_quests", "character_id, quest_id" },
             { "character_marks", "character_id, mark_name" },
             { "character_lua_storage", "character_id, storage_namespace, storage_key" },
         };
@@ -1337,6 +1369,182 @@ CREATE INDEX IF NOT EXISTS idx_character_lua_storage_namespace
             }
             throw;
         }
+    }
+
+    void PlayerDatabase::saveCharacterJournalChanges(
+        int64_t characterId, const std::vector<BasePlayer::JournalItem>& changes)
+    {
+        if (characterId <= 0 || changes.empty())
+            return;
+
+        exec("BEGIN");
+        try
+        {
+            sqlite3_stmt* insertEntry = prepare(
+                "INSERT OR IGNORE INTO character_journal_entries(character_id, quest_id, info_id, journal_index,"
+                " entry_text, actor_name, has_timestamp, days_passed, month, day_of_month, changed_at)"
+                " VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)");
+            sqlite3_stmt* upsertQuest = prepare(
+                "INSERT INTO character_journal_quests(character_id, quest_id, journal_index, changed_at)"
+                " VALUES(?1, ?2, ?3, ?4)"
+                " ON CONFLICT(character_id, quest_id) DO UPDATE SET"
+                " journal_index=excluded.journal_index, changed_at=excluded.changed_at");
+
+            int64_t changedAt = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                std::chrono::system_clock::now().time_since_epoch()).count();
+            for (const BasePlayer::JournalItem& item : changes)
+            {
+                if (item.quest.empty())
+                    continue;
+
+                if (item.type == BasePlayer::JournalItem::Type::Entry && !item.infoId.empty())
+                {
+                    sqlite3_bind_int64(insertEntry, 1, characterId);
+                    sqlite3_bind_text(insertEntry, 2, item.quest.c_str(), -1, SQLITE_TRANSIENT);
+                    sqlite3_bind_text(insertEntry, 3, item.infoId.c_str(), -1, SQLITE_TRANSIENT);
+                    sqlite3_bind_int(insertEntry, 4, item.index);
+                    sqlite3_bind_text(insertEntry, 5, item.text.c_str(), -1, SQLITE_TRANSIENT);
+                    sqlite3_bind_text(insertEntry, 6, item.actorName.c_str(), -1, SQLITE_TRANSIENT);
+                    sqlite3_bind_int(insertEntry, 7, item.hasTimestamp ? 1 : 0);
+                    sqlite3_bind_int(insertEntry, 8, item.daysPassed);
+                    sqlite3_bind_int(insertEntry, 9, item.month);
+                    sqlite3_bind_int(insertEntry, 10, item.dayOfMonth);
+                    sqlite3_bind_int64(insertEntry, 11, changedAt++);
+                    checkSqlite(sqlite3_step(insertEntry), mDb, "insertCharacterJournalEntry");
+                    sqlite3_reset(insertEntry);
+                    sqlite3_clear_bindings(insertEntry);
+                }
+
+                sqlite3_bind_int64(upsertQuest, 1, characterId);
+                sqlite3_bind_text(upsertQuest, 2, item.quest.c_str(), -1, SQLITE_TRANSIENT);
+                sqlite3_bind_int(upsertQuest, 3, item.index);
+                sqlite3_bind_int64(upsertQuest, 4, changedAt++);
+                checkSqlite(sqlite3_step(upsertQuest), mDb, "upsertCharacterJournalQuest");
+                sqlite3_reset(upsertQuest);
+                sqlite3_clear_bindings(upsertQuest);
+            }
+
+            sqlite3_finalize(insertEntry);
+            sqlite3_finalize(upsertQuest);
+            exec("COMMIT");
+        }
+        catch (...)
+        {
+            try
+            {
+                exec("ROLLBACK");
+            }
+            catch (...)
+            {
+            }
+            throw;
+        }
+    }
+
+    std::vector<BasePlayer::JournalItem> PlayerDatabase::loadCharacterJournals(
+        const std::vector<int64_t>& characterIds)
+    {
+        if (characterIds.empty())
+            return {};
+
+        std::string placeholders;
+        for (std::size_t i = 0; i < characterIds.size(); ++i)
+        {
+            if (i != 0)
+                placeholders += ',';
+            placeholders += '?' + std::to_string(i + 1);
+        }
+
+        std::vector<BasePlayer::JournalItem> result;
+        std::unordered_set<std::string> seenEntries;
+        const std::string entrySql =
+            "SELECT quest_id, info_id, journal_index, entry_text, actor_name, has_timestamp, days_passed, month,"
+            " day_of_month FROM character_journal_entries WHERE character_id IN (" + placeholders
+            + ") ORDER BY changed_at, id";
+        sqlite3_stmt* entries = prepare(entrySql.c_str());
+        for (std::size_t i = 0; i < characterIds.size(); ++i)
+            sqlite3_bind_int64(entries, static_cast<int>(i + 1), characterIds[i]);
+        while (sqlite3_step(entries) == SQLITE_ROW)
+        {
+            auto textCol = [&](int index) {
+                const char* value = reinterpret_cast<const char*>(sqlite3_column_text(entries, index));
+                return value ? std::string(value) : std::string();
+            };
+
+            BasePlayer::JournalItem item;
+            item.type = BasePlayer::JournalItem::Type::Entry;
+            item.quest = textCol(0);
+            item.infoId = textCol(1);
+            const std::string key = item.quest + '\x1f' + item.infoId;
+            if (!seenEntries.insert(key).second)
+                continue;
+            item.index = sqlite3_column_int(entries, 2);
+            item.text = textCol(3);
+            item.actorName = textCol(4);
+            item.hasTimestamp = sqlite3_column_int(entries, 5) != 0;
+            item.daysPassed = sqlite3_column_int(entries, 6);
+            item.month = sqlite3_column_int(entries, 7);
+            item.dayOfMonth = sqlite3_column_int(entries, 8);
+            result.push_back(std::move(item));
+        }
+        sqlite3_finalize(entries);
+
+        struct LatestIndex
+        {
+            int index = 0;
+            int64_t changedAt = std::numeric_limits<int64_t>::min();
+        };
+        std::map<std::string, LatestIndex> latestIndices;
+        const std::string questSql =
+            "SELECT quest_id, journal_index, changed_at FROM character_journal_quests WHERE character_id IN ("
+            + placeholders + ") ORDER BY changed_at";
+        sqlite3_stmt* quests = prepare(questSql.c_str());
+        for (std::size_t i = 0; i < characterIds.size(); ++i)
+            sqlite3_bind_int64(quests, static_cast<int>(i + 1), characterIds[i]);
+        while (sqlite3_step(quests) == SQLITE_ROW)
+        {
+            const char* questText = reinterpret_cast<const char*>(sqlite3_column_text(quests, 0));
+            if (!questText)
+                continue;
+            LatestIndex& latest = latestIndices[questText];
+            const int64_t changedAt = sqlite3_column_int64(quests, 2);
+            if (changedAt >= latest.changedAt)
+            {
+                latest.index = sqlite3_column_int(quests, 1);
+                latest.changedAt = changedAt;
+            }
+        }
+        sqlite3_finalize(quests);
+
+        for (const auto& [quest, latest] : latestIndices)
+        {
+            BasePlayer::JournalItem item;
+            item.type = BasePlayer::JournalItem::Type::Index;
+            item.quest = quest;
+            item.index = latest.index;
+            result.push_back(std::move(item));
+        }
+        return result;
+    }
+
+    std::vector<JournalCharacterIdentity> PlayerDatabase::listJournalCharacterIdentities()
+    {
+        sqlite3_stmt* statement = prepare(
+            "SELECT c.id, a.username, c.name FROM characters c"
+            " JOIN accounts a ON a.id=c.account_id ORDER BY c.id");
+        std::vector<JournalCharacterIdentity> result;
+        while (sqlite3_step(statement) == SQLITE_ROW)
+        {
+            JournalCharacterIdentity identity;
+            identity.characterId = sqlite3_column_int64(statement, 0);
+            const char* account = reinterpret_cast<const char*>(sqlite3_column_text(statement, 1));
+            const char* character = reinterpret_cast<const char*>(sqlite3_column_text(statement, 2));
+            identity.accountName = account ? account : "";
+            identity.characterName = character ? character : "";
+            result.push_back(std::move(identity));
+        }
+        sqlite3_finalize(statement);
+        return result;
     }
 
     std::vector<PlacedObject> PlayerDatabase::loadWorldObjects()

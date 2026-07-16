@@ -9,6 +9,9 @@
 #include <components/esm/refid.hpp>
 #include <components/esm/util.hpp>
 #include <components/esm3/loadcell.hpp>
+#include <components/esm3/loaddial.hpp>
+#include <components/esm3/loadinfo.hpp>
+#include <components/esm3/journalentry.hpp>
 #include <components/misc/rng.hpp>
 #include <components/openmw-mp/Packets/Player/PacketPlayerPosition.hpp>
 #include <components/openmw-mp/Packets/Player/PacketPlayerCellChange.hpp>
@@ -17,6 +20,7 @@
 #include <components/openmw-mp/Packets/Player/PacketPlayerBaseInfo.hpp>
 #include <components/openmw-mp/Packets/Player/PacketPlayerEquipment.hpp>
 #include <components/openmw-mp/Packets/Player/PacketPlayerInventory.hpp>
+#include <components/openmw-mp/Packets/Player/PacketPlayerJournal.hpp>
 #include <components/openmw-mp/Packets/Player/PacketPlayerDeath.hpp>
 #include <components/openmw-mp/Packets/Player/PacketPlayerResurrect.hpp>
 #include <components/openmw-mp/Packets/Player/PacketPlayerAnimPlay.hpp>
@@ -28,6 +32,7 @@
 
 // OpenMW world/player access
 #include "../../mwbase/environment.hpp"
+#include "../../mwbase/journal.hpp"
 #include "../../mwbase/world.hpp"
 #include "../../mwbase/inputmanager.hpp"
 #include "../../mwbase/luamanager.hpp"
@@ -72,6 +77,11 @@ namespace
     {
         return static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(
             std::chrono::steady_clock::now().time_since_epoch()).count());
+    }
+
+    std::string journalEntryKey(const ESM::RefId& quest, const ESM::RefId& infoId)
+    {
+        return quest.serializeText() + '\x1f' + infoId.serializeText();
     }
 
     bool sameItemIdentity(const Item& left, const Item& right)
@@ -531,6 +541,23 @@ void PlayerSync::queueAuthoritativeInventory(const BasePlayer& authoritative)
         applyPendingAuthoritativeState(player);
 }
 
+void PlayerSync::queueAuthoritativeJournal(const BasePlayer& authoritative)
+{
+    const BasePlayer::JournalChanges& incoming = authoritative.journalChanges;
+    if (incoming.action == BasePlayer::JournalChanges::Action::Set || !mPendingJournalRestore)
+        mAuthoritativeJournal = incoming;
+    else
+    {
+        mAuthoritativeJournal.items.insert(mAuthoritativeJournal.items.end(),
+            incoming.items.begin(), incoming.items.end());
+    }
+    mPendingJournalRestore = true;
+
+    Log(Debug::Verbose) << "[MP] PlayerSync: queued authoritative journal"
+                        << " action=" << static_cast<int>(incoming.action)
+                        << " items=" << incoming.items.size();
+}
+
 void PlayerSync::queueRestoredStats(const BasePlayer& restored)
 {
     mPendingRestoredStats = restored;
@@ -713,6 +740,7 @@ void PlayerSync::update(float dt)
         mPositionDiagSends = 0;
     }
     tickDynamicStats(dt);
+    tickJournal();
     sendAnimFlags(dt);
     sendAnimPlay();
     sendAttack();
@@ -781,6 +809,104 @@ void PlayerSync::tickDynamicStats(float dt)
 
     snapshotDynamicStats();
     sendDynamicStats();
+}
+
+void PlayerSync::captureJournalSnapshot()
+{
+    mLastJournalEntries.clear();
+    mLastJournalIndices.clear();
+
+    MWBase::Journal* journal = MWBase::Environment::get().getJournal();
+    if (!journal)
+        return;
+
+    for (const auto& [questId, quest] : journal->getQuests())
+    {
+        mLastJournalIndices[questId.serializeText()] = quest.getIndex();
+        for (auto it = quest.begin(); it != quest.end(); ++it)
+            mLastJournalEntries.insert(journalEntryKey(questId, it->mInfoId));
+    }
+}
+
+void PlayerSync::tickJournal()
+{
+    if (!mJournalAuthoritativeInitialized)
+        return;
+
+    const MWBase::Environment& environment = MWBase::Environment::get();
+    MWBase::Journal* journal = environment.getJournal();
+    if (!journal)
+        return;
+
+    std::unordered_set<std::string> currentEntries;
+    std::unordered_map<std::string, int> currentIndices;
+    std::vector<BasePlayer::JournalItem> changes;
+
+    for (const auto& [questId, quest] : journal->getQuests())
+    {
+        const std::string questText = questId.serializeText();
+        currentIndices[questText] = quest.getIndex();
+
+        for (auto it = quest.begin(); it != quest.end(); ++it)
+        {
+            const std::string key = journalEntryKey(questId, it->mInfoId);
+            currentEntries.insert(key);
+            if (mLastJournalEntries.contains(key))
+                continue;
+
+            BasePlayer::JournalItem item;
+            item.type = BasePlayer::JournalItem::Type::Entry;
+            item.quest = questText;
+            item.infoId = it->mInfoId.serializeText();
+            item.text = it->mText;
+            item.actorName = it->mActorName;
+            item.index = quest.getIndex();
+
+            if (const ESM::Dialogue* dialogue
+                = environment.getESMStore()->get<ESM::Dialogue>().search(questId))
+            {
+                const auto info = std::find_if(dialogue->mInfo.begin(), dialogue->mInfo.end(),
+                    [&](const ESM::DialInfo& value) { return value.mId == it->mInfoId; });
+                if (info != dialogue->mInfo.end() && info->mData.mJournalIndex >= 0)
+                    item.index = info->mData.mJournalIndex;
+            }
+
+            const auto stamped = std::find_if(journal->getEntries().begin(), journal->getEntries().end(),
+                [&](const MWDialogue::StampedJournalEntry& value) {
+                    return value.mTopic == questId && value.mInfoId == it->mInfoId;
+                });
+            if (stamped != journal->getEntries().end())
+            {
+                item.hasTimestamp = true;
+                item.daysPassed = stamped->mDay;
+                item.month = stamped->mMonth;
+                item.dayOfMonth = stamped->mDayOfMonth;
+            }
+
+            changes.push_back(std::move(item));
+        }
+    }
+
+    for (const auto& [quest, index] : currentIndices)
+    {
+        const auto previous = mLastJournalIndices.find(quest);
+        if (previous != mLastJournalIndices.end() && previous->second == index)
+            continue;
+
+        BasePlayer::JournalItem item;
+        item.type = BasePlayer::JournalItem::Type::Index;
+        item.quest = quest;
+        item.index = index;
+        changes.push_back(std::move(item));
+    }
+
+    mLastJournalEntries = std::move(currentEntries);
+    mLastJournalIndices = std::move(currentIndices);
+    if (changes.empty())
+        return;
+
+    mLocal.journalChanges.items = std::move(changes);
+    sendJournal();
 }
 
 // ---------------------------------------------------------------------------
@@ -1488,6 +1614,25 @@ void PlayerSync::notifyLocalHit(const MWWorld::Ptr& victim, float damage, bool h
     mClient.sendReliable(pkt.encode(mSeqCounter++));
 }
 
+void PlayerSync::sendJournal()
+{
+    if (mLocal.journalChanges.items.empty())
+        return;
+
+    constexpr std::size_t maxDeltaItems = 256;
+    std::vector<BasePlayer::JournalItem> items = std::move(mLocal.journalChanges.items);
+    mLocal.journalChanges.action = BasePlayer::JournalChanges::Action::Add;
+    for (std::size_t offset = 0; offset < items.size(); offset += maxDeltaItems)
+    {
+        const std::size_t count = std::min(maxDeltaItems, items.size() - offset);
+        mLocal.journalChanges.items.assign(items.begin() + offset, items.begin() + offset + count);
+        PacketPlayerJournal pkt;
+        pkt.setPlayer(&mLocal);
+        mClient.sendReliable(pkt.encode(mSeqCounter++));
+    }
+    mLocal.journalChanges.items.clear();
+}
+
 void PlayerSync::noteRemotePlayerHit(uint32_t attackerGuid)
 {
     if (attackerGuid == 0)
@@ -2009,6 +2154,60 @@ void PlayerSync::captureInventory(const MWWorld::Ptr& player)
 
 void PlayerSync::applyPendingAuthoritativeState(const MWWorld::Ptr& player)
 {
+    if (mPendingJournalRestore)
+    {
+        const MWBase::Environment& environment = MWBase::Environment::get();
+        MWBase::Journal* journal = environment.getJournal();
+        const bool replace = mAuthoritativeJournal.action == BasePlayer::JournalChanges::Action::Set;
+        const bool notify = mAuthoritativeJournal.action == BasePlayer::JournalChanges::Action::Add;
+        if (replace)
+            journal->clearQuestJournal();
+
+        for (const BasePlayer::JournalItem& item : mAuthoritativeJournal.items)
+        {
+            if (item.quest.empty())
+                continue;
+
+            try
+            {
+                const ESM::RefId questId = ESM::RefId::deserializeText(item.quest);
+                if (item.type == BasePlayer::JournalItem::Type::Index)
+                {
+                    journal->setJournalIndex(questId, item.index);
+                    continue;
+                }
+
+                if (item.infoId.empty())
+                    continue;
+
+                ESM::JournalEntry record{};
+                record.mType = ESM::JournalEntry::Type_Journal;
+                record.mTopic = questId;
+                record.mInfo = ESM::RefId::deserializeText(item.infoId);
+                record.mText = item.text;
+                record.mActorName = item.actorName;
+                record.mDay = item.daysPassed;
+                record.mMonth = item.month;
+                record.mDayOfMonth = item.dayOfMonth;
+                journal->applyJournalEntry(record, item.index, notify);
+            }
+            catch (const std::exception& e)
+            {
+                Log(Debug::Warning) << "[MP] Ignoring invalid authoritative journal item"
+                                    << " quest=" << item.quest
+                                    << " info=" << item.infoId
+                                    << " error=" << e.what();
+            }
+        }
+
+        mPendingJournalRestore = false;
+        mJournalAuthoritativeInitialized = true;
+        captureJournalSnapshot();
+        Log(Debug::Verbose) << "[MP] PlayerSync: applied authoritative journal"
+                            << " replace=" << replace
+                            << " items=" << mAuthoritativeJournal.items.size();
+    }
+
     if (!player.getClass().hasInventoryStore(player))
         return;
 

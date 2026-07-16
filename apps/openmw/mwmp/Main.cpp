@@ -37,6 +37,7 @@
 #include <components/openmw-mp/Packets/Player/PacketPlayerCast.hpp>
 #include <components/openmw-mp/Packets/Player/PacketPlayerSpeech.hpp>
 #include <components/openmw-mp/Packets/Player/PacketPlayerInventory.hpp>
+#include <components/openmw-mp/Packets/Player/PacketPlayerJournal.hpp>
 #include <components/openmw-mp/Packets/Lua/PacketLuaEvent.hpp>
 #include <components/openmw-mp/Packets/Lua/PacketLuaStorage.hpp>
 #include <components/openmw-mp/Packets/Actor/PacketActorAI.hpp>
@@ -1346,6 +1347,19 @@ void Main::registerProtocolHandlers()
                     << " applyMs=" << std::chrono::duration<double, std::milli>(finished - decoded).count()
                     << " totalMs=" << totalMs;
             }
+        });
+
+    proto.registerHandler(PacketType::PlayerJournal,
+        [this](const uint8_t* data, size_t size)
+        {
+            BasePlayer tmp;
+            PacketPlayerJournal pkt;
+            pkt.setPlayer(&tmp);
+            if (!pkt.decode(data, size))
+                return;
+            if (tmp.guid != mPlayerSync->localPlayer().guid)
+                return;
+            mPlayerSync->queueAuthoritativeJournal(tmp);
         });
 
     proto.registerHandler(PacketType::PlayerDeath,

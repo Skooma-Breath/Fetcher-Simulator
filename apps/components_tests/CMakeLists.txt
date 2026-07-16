@@ -97,6 +97,14 @@ file(GLOB UNITTEST_SRC_FILES
     nif/testphysics.cpp
 )
 
+if (BUILD_MULTIPLAYER OR BUILD_DEDICATED_SERVER)
+    list(APPEND UNITTEST_SRC_FILES
+        openmw-mp/playerjournal.cpp
+        openmw-mp/playerjournaldatabase.cpp
+        ../openmw-server/PlayerDatabase.cpp
+    )
+endif()
+
 source_group(apps\\components-tests FILES ${UNITTEST_SRC_FILES})
 
 openmw_add_executable(components-tests ${UNITTEST_SRC_FILES})

@@ -139,14 +139,26 @@ namespace mwmp
         struct JournalItem
         {
             std::string quest;
+            std::string infoId;
+            std::string text;
+            std::string actorName;
             int         index = 0;
-            std::string actorRefId;
             bool        hasTimestamp = false;
-            Time        timestamp;
+            int         daysPassed = 0;
+            int         month = 0;
+            int         dayOfMonth = 0;
             enum class Type { Entry = 0, Index };
             Type type = Type::Entry;
         };
-        std::vector<JournalItem> journalChanges;
+
+        struct JournalChanges
+        {
+            std::vector<JournalItem> items;
+            // Add is the only client-to-server action. Set starts an
+            // authoritative snapshot and Append continues a chunked snapshot.
+            enum class Action { Add = 0, Set, Append };
+            Action action = Action::Add;
+        } journalChanges;
         std::vector<std::string> topicChanges;
         std::vector<std::string> bookChanges;
 

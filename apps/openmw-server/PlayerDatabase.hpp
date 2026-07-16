@@ -104,6 +104,13 @@ namespace mwmp
         std::vector<std::vector<std::optional<std::string>>> rows;
     };
 
+    struct JournalCharacterIdentity
+    {
+        int64_t characterId = 0;
+        std::string accountName;
+        std::string characterName;
+    };
+
     struct PersistedSpawnedActor
     {
         BaseActor actor;
@@ -212,6 +219,16 @@ namespace mwmp
 
         /// Replace the persisted player stats snapshot for a character.
         void saveCharacterStats(int64_t characterId, const BasePlayer& player, bool touchLastSeen = true);
+
+        /// Persist journal deltas produced by one character.
+        void saveCharacterJournalChanges(
+            int64_t characterId, const std::vector<BasePlayer::JournalItem>& changes);
+
+        /// Load and merge journal state produced by the supplied characters.
+        std::vector<BasePlayer::JournalItem> loadCharacterJournals(const std::vector<int64_t>& characterIds);
+
+        /// Enumerate account/character identities for journal group resolution.
+        std::vector<JournalCharacterIdentity> listJournalCharacterIdentities();
 
         /// Load persisted multiplayer-placed world objects.
         std::vector<PlacedObject> loadWorldObjects();
