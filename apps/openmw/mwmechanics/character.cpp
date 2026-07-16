@@ -1842,6 +1842,20 @@ namespace MWMechanics
                     && (!mAnimation->hasAnimation(mCurrentWeapon) || isRandomAttackAnimation(mCurrentWeapon)))
                 {
                     mCurrentWeapon = chooseRandomAttackAnimation();
+#ifdef BUILD_MULTIPLAYER
+                    if (auto* bn = mPtr.getRefData().getBaseNode())
+                    {
+                        bool isRemoteActor = false;
+                        std::string syncedAttackGroup;
+                        if (bn->getUserValue("mp_remote_actor", isRemoteActor) && isRemoteActor
+                            && bn->getUserValue("mp_attack_group", syncedAttackGroup)
+                            && isRandomAttackAnimation(syncedAttackGroup)
+                            && mAnimation->hasAnimation(syncedAttackGroup))
+                        {
+                            mCurrentWeapon = syncedAttackGroup;
+                        }
+                    }
+#endif
                 }
 
                 if (mWeaponType == ESM::Weapon::Spell)
@@ -2044,6 +2058,24 @@ namespace MWMechanics
                         startKey = mAttackType + ' ' + startKey;
                         stopKey = mAttackType + " max attack";
                     }
+
+#ifdef BUILD_MULTIPLAYER
+                    // Publish the attack where the authoritative controller
+                    // actually starts its animation. ActorSync consumes this
+                    // edge on the next network update so it can preserve the
+                    // chosen chop/slash/thrust variant.
+                    if (auto* bn = mPtr.getRefData().getBaseNode())
+                    {
+                        bn->setUserValue("mp_attack_type", std::string(mAttackType));
+                        bn->setUserValue("mp_attack_group",
+                            isRandomAttackAnimation(mCurrentWeapon) ? std::string(mCurrentWeapon) : std::string());
+                        bn->setUserValue("mp_attack_controller_started", true);
+                        bool isRemoteActor = false;
+                        bn->getUserValue("mp_remote_actor", isRemoteActor);
+                        if (!isRemoteActor && mPtr != getPlayer())
+                            bn->setUserValue("mp_attack_pending", true);
+                    }
+#endif
 
                     mUpperBodyState = UpperBodyState::AttackWindUp;
 

@@ -205,6 +205,10 @@ namespace mwmp
             // the visible weapon and stop pose stable through the replayed swing.
             float attackDrawHoldTimer = 0.f;
             float attackLocomotionHoldTimer = 0.f;
+            // Non-authority side: keep the synchronized attack control pressed
+            // briefly, then release it so CharacterController owns the complete
+            // wind-up/hit/follow-through transition.
+            float attackControlReleaseTimer = 0.f;
             // Authority side: seconds since this actor was last included in an
             // ActorPositionV2 packet. Dense-cell scheduling uses this to avoid
             // starving active actors behind a large high-priority set.
