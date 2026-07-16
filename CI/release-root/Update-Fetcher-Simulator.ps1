@@ -535,7 +535,10 @@ function Install-ClientModPatch {
     Assert-SafeArchivePaths -ArchivePath $archivePath
     $extractRoot = Join-Path $RunWorkRoot ("patch-{0}" -f [string]$Patch.id)
     Expand-Archive -LiteralPath $archivePath -DestinationPath $extractRoot
-    $appliers = @(Get-ChildItem -LiteralPath $extractRoot -Recurse -File -Filter ([string]$Patch.applierPattern))
+    # Patch archives keep their applier at the archive root. Do not recurse into
+    # large payload trees here: cloud-synced installs can change those temporary
+    # directories while Get-ChildItem is enumerating them.
+    $appliers = @(Get-ChildItem -LiteralPath $extractRoot -File -Filter ([string]$Patch.applierPattern))
     if ($appliers.Count -ne 1) {
         throw "Expected one $($Patch.applierPattern) in $($Patch.assetName), found $($appliers.Count)."
     }
