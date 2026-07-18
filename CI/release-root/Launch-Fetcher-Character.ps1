@@ -41,12 +41,14 @@ if ([string]::IsNullOrWhiteSpace($Account) -or [string]::IsNullOrWhiteSpace($Cha
 }
 
 $profileRoot = Join-Path $root "profiles"
+$playerStorageRoot = Join-Path $root "multiplayer-characters"
 $arguments = @(
     "--connect", $ServerTarget,
     "--mp-account", $Account,
     "--mp-character", $Character,
     "--mp-auto-enter=1",
-    "--mp-profile-root", $profileRoot
+    "--mp-profile-root", $profileRoot,
+    "--mp-player-storage-root", $playerStorageRoot
 )
 
 Write-Host "Launching Fetcher Simulator"
@@ -54,6 +56,7 @@ Write-Host "  Server:    $ServerTarget"
 Write-Host "  Account:   $Account"
 Write-Host "  Character: $Character"
 Write-Host "  Profiles:  $profileRoot"
+Write-Host "  Lua state: $playerStorageRoot"
 
 Push-Location $root
 try {

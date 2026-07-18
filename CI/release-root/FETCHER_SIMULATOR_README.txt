@@ -69,7 +69,9 @@ Enter the linked account and character names when prompted. Mutable files are
 stored under profiles\<server>\<account>\characters\<character>. Account keys
 are shared only by characters on the same account and server. This allows
 multiple clients from one install when each process uses a different character.
-The updater preserves the entire profiles directory.
+Character-bound Lua state is stored under multiplayer-characters so it remains
+the same if the client is later opened directly. The updater preserves both
+directories.
 
 UMO install path
 ----------------

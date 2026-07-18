@@ -114,6 +114,9 @@ namespace OpenMW
         addOption("mp-profile-root",
             bpo::value<Files::MaybeQuotedPath>()->default_value(Files::MaybeQuotedPath(), ""),
             "isolate mutable multiplayer data under server/account/character directories");
+        addOption("mp-player-storage-root",
+            bpo::value<Files::MaybeQuotedPath>()->default_value(Files::MaybeQuotedPath(), ""),
+            "store character-bound multiplayer Lua state under this shared directory");
         addOption("mp-keys-dir",
             bpo::value<Files::MaybeQuotedPath>()->default_value(Files::MaybeQuotedPath(), ""),
             "override the multiplayer account key directory");

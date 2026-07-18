@@ -181,6 +181,7 @@ namespace OMW
         std::string  mMPPlayerName;
         std::string  mMPPasswordHash;
         std::string  mMPCharacterName;
+        std::filesystem::path mMPPlayerStorageRoot;
         bool         mMPAutoEnter      = false;
         bool         mMPEnabled        = false;
         bool         mMPProfileIsolation = false;
@@ -295,6 +296,7 @@ namespace OMW
         }
 
         void setMultiplayerProfileIsolation(bool enabled) { mMPProfileIsolation = enabled; }
+        void setMultiplayerPlayerStorageRoot(const std::filesystem::path& path) { mMPPlayerStorageRoot = path; }
 #endif
     };
 }

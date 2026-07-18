@@ -1067,9 +1067,9 @@ void OMW::Engine::prepareEngine()
 
     mLuaManager->loadPermanentStorage(mCfgMgr.getUserConfigPath(),
 #ifdef BUILD_MULTIPLAYER
-        mMPEnabled && !mMPProfileIsolation, mMPProfileIsolation
+        mMPEnabled && !mMPProfileIsolation, mMPProfileIsolation, mMPPlayerStorageRoot
 #else
-        false, false
+        false, false, {}
 #endif
     );
     mLuaManager->initPreLoad();

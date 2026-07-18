@@ -107,6 +107,7 @@ namespace MWBase
             std::string& error) = 0;
         virtual void restorePendingMultiplayerPlayerScripts() = 0;
         virtual void requestMultiplayerPlayerScriptsCheckpoint() = 0;
+        virtual bool checkpointMultiplayerPlayerScripts(std::string& error) = 0;
 
         // TODO: notify LuaManager about other events
         // virtual void objectOnHit(const MWWorld::Ptr &ptr, float damage, bool ishealth, const MWWorld::Ptr &object,

@@ -427,13 +427,15 @@ namespace MWLua
     }
 
     void LuaManager::loadPermanentStorage(const std::filesystem::path& userConfigPath,
-        bool deferMultiplayerPlayerStorage, bool isolatedMultiplayerProfile)
+        bool deferMultiplayerPlayerStorage, bool isolatedMultiplayerProfile,
+        const std::filesystem::path& multiplayerPlayerStorageRoot)
     {
         mGlobalStorageMirroredFromServer = false;
         mPlayerStorage.setActive(true);
         mGlobalStorage.setActive(true);
         const auto globalPath = userConfigPath / "global_storage.bin";
         mDefaultPlayerStoragePath = userConfigPath / "player_storage.bin";
+        mMultiplayerPlayerStorageRoot = multiplayerPlayerStorageRoot;
         mMultiplayerPlayerStorage = deferMultiplayerPlayerStorage || isolatedMultiplayerProfile;
         mIsolatedMultiplayerProfile = isolatedMultiplayerProfile;
 
@@ -494,10 +496,12 @@ namespace MWLua
 
         prepareMultiplayerPlayerStorage();
         mPlayerStorage.captureBaseline();
-        const std::filesystem::path storagePath = mIsolatedMultiplayerProfile
+        const std::filesystem::path storageRoot = !mMultiplayerPlayerStorageRoot.empty()
+            ? mMultiplayerPlayerStorageRoot
+            : mDefaultPlayerStoragePath.parent_path() / "multiplayer-characters";
+        const std::filesystem::path storagePath = mIsolatedMultiplayerProfile && mMultiplayerPlayerStorageRoot.empty()
             ? mDefaultPlayerStoragePath
-            : mDefaultPlayerStoragePath.parent_path() / "multiplayer-characters"
-                / std::string(storageNamespace) / std::string(characterKey) / "player_storage.bin";
+            : storageRoot / std::string(storageNamespace) / std::string(characterKey) / "player_storage.bin";
         const std::filesystem::path scriptsPath = storagePath.parent_path() / "player_scripts.bin";
 
         if (mBoundPlayerStoragePath && *mBoundPlayerStoragePath == storagePath && mPlayerStorageLock)
@@ -528,6 +532,22 @@ namespace MWLua
             if (!checkpointMultiplayerPlayerScripts(checkpointError))
                 throw std::runtime_error("Unable to checkpoint previous character Lua scripts: " + checkpointError);
             mPlayerScriptsCheckpointRequested = false;
+
+            if (!mMultiplayerPlayerStorageRoot.empty() && mIsolatedMultiplayerProfile)
+            {
+                const std::filesystem::path legacyStoragePath = mDefaultPlayerStoragePath;
+                const std::filesystem::path legacyScriptsPath = legacyStoragePath.parent_path() / "player_scripts.bin";
+                for (const auto& [legacyPath, sharedPath] : {
+                         std::pair{ legacyStoragePath, storagePath }, std::pair{ legacyScriptsPath, scriptsPath } })
+                {
+                    if (!std::filesystem::exists(sharedPath) && std::filesystem::exists(legacyPath))
+                    {
+                        std::filesystem::copy_file(legacyPath, sharedPath);
+                        Log(Debug::Info) << "[MP] Migrated isolated-profile Lua state to shared character path: "
+                                         << sharedPath;
+                    }
+                }
+            }
 
             if (!mIsolatedMultiplayerProfile && !std::filesystem::exists(storagePath)
                 && std::filesystem::exists(mDefaultPlayerStoragePath))

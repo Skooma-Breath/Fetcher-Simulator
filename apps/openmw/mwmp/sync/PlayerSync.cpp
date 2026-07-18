@@ -590,6 +590,12 @@ void PlayerSync::update(float dt)
     if (!mClient.isConnected())
         return;
 
+    // A connection can already be live while the character selection menu is
+    // still using the unloaded player from the previous world.  Do not inspect
+    // or mutate that stale player while waiting for newGame() to rebuild it.
+    if (MWBase::Environment::get().getStateManager()->getState() != MWBase::StateManager::State_Running)
+        return;
+
     // Pull live state from OpenMW
     MWBase::World* world = MWBase::Environment::get().getWorld();
     if (!world) return;
@@ -2159,9 +2165,13 @@ void PlayerSync::captureInventory(const MWWorld::Ptr& player)
 
 void PlayerSync::applyPendingAuthoritativeState(const MWWorld::Ptr& player)
 {
+    const MWBase::Environment& environment = MWBase::Environment::get();
+    if (environment.getStateManager()->getState() != MWBase::StateManager::State_Running
+        || player.isEmpty() || !player.isInCell())
+        return;
+
     if (mPendingJournalRestore)
     {
-        const MWBase::Environment& environment = MWBase::Environment::get();
         MWBase::Journal* journal = environment.getJournal();
         const bool replace = mAuthoritativeJournal.action == BasePlayer::JournalChanges::Action::Set;
         const bool notify = mAuthoritativeJournal.action == BasePlayer::JournalChanges::Action::Add;
@@ -2216,7 +2226,7 @@ void PlayerSync::applyPendingAuthoritativeState(const MWWorld::Ptr& player)
     if (!player.getClass().hasInventoryStore(player))
         return;
 
-    MWBase::World* world = MWBase::Environment::get().getWorld();
+    MWBase::World* world = environment.getWorld();
     if (!world)
         return;
 

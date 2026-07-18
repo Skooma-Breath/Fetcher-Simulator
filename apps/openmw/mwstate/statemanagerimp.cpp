@@ -54,6 +54,19 @@ void MWState::StateManager::cleanup(bool force)
 {
     if (mState != State_NoGame || force)
     {
+        // Multiplayer PLAYER scripts must be checkpointed while the live player,
+        // world time manager, and Lua container still exist.  Deferring this to
+        // LuaManager::noGame() is too late because World::clear() runs first.
+        if (mState != State_NoGame)
+        {
+            std::string checkpointError;
+            if (!MWBase::Environment::get().getLuaManager()->checkpointMultiplayerPlayerScripts(checkpointError))
+            {
+                Log(Debug::Warning)
+                    << "[MP] Player Lua script checkpoint before world teardown failed: " << checkpointError;
+            }
+        }
+
         MWBase::Environment::get().getSoundManager()->clear();
         MWBase::Environment::get().getDialogueManager()->clear();
         MWBase::Environment::get().getJournal()->clear();

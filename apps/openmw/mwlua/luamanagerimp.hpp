@@ -55,7 +55,8 @@ namespace MWLua
         void initPostLoad();
 
         void loadPermanentStorage(const std::filesystem::path& userConfigPath,
-            bool deferMultiplayerPlayerStorage, bool isolatedMultiplayerProfile);
+            bool deferMultiplayerPlayerStorage, bool isolatedMultiplayerProfile,
+            const std::filesystem::path& multiplayerPlayerStorageRoot);
         void savePermanentStorage(const std::filesystem::path& userConfigPath) override;
         void prepareMultiplayerPlayerStorage() override;
         bool bindMultiplayerPlayerStorage(std::string_view storageNamespace,
@@ -63,6 +64,7 @@ namespace MWLua
             std::string& error) override;
         void restorePendingMultiplayerPlayerScripts() override;
         void requestMultiplayerPlayerScriptsCheckpoint() override { mPlayerScriptsCheckpointRequested = true; }
+        bool checkpointMultiplayerPlayerScripts(std::string& error) override;
 
         // \brief Executes lua handlers. Defaults to running in parallel with OSG Cull.
         //
@@ -210,7 +212,6 @@ namespace MWLua
             std::optional<LuaUtil::ScriptIdsWithInitializationData> autoStartConf = std::nullopt);
         void loadPendingMultiplayerPlayerScripts(
             const std::filesystem::path& path, std::string_view characterName, bool restorePlayerScripts);
-        bool checkpointMultiplayerPlayerScripts(std::string& error);
         void reloadAllScriptsImpl();
         void synchronizedUpdateUnsafe();
 
@@ -277,6 +278,7 @@ namespace MWLua
         LuaUtil::LuaStorage mPlayerStorage;
         bool mGlobalStorageMirroredFromServer = false;
         std::filesystem::path mDefaultPlayerStoragePath;
+        std::filesystem::path mMultiplayerPlayerStorageRoot;
         std::optional<std::filesystem::path> mLoadedPlayerStoragePath;
         std::optional<std::filesystem::path> mBoundPlayerStoragePath;
         std::optional<std::filesystem::path> mBoundPlayerScriptsPath;
