@@ -42,6 +42,19 @@ jobs:
       include-tester-tools: true
     secrets: inherit
 
+  Ubuntu-Test:
+    if: ${{ github.ref == 'refs/heads/main' }}
+    uses: ./.github/workflows/ubuntu.yml
+    with:
+      image: ubuntu-24.04
+      build-type: RelWithDebInfo
+      package: true
+      release: true
+      release-tag: Fetcher-Simulator-Ubuntu
+      release-name: Fetcher Simulator Ubuntu 24.04
+      release-asset-name: fetcher-simulator-ubuntu-24.04-amd64.deb
+    secrets: inherit
+
   Windows-Clean:
     if: ${{ always() && (github.ref != 'refs/heads/main' || (github.event_name == 'workflow_dispatch' && inputs.publish-clean && needs.Windows-Test.result == 'success')) }}
     needs:

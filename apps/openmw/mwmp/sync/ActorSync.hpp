@@ -1,10 +1,11 @@
 #ifndef OPENMW_MWMP_SYNC_ACTORSYNC_HPP
 #define OPENMW_MWMP_SYNC_ACTORSYNC_HPP
 
-#include <string>
 #include <cstddef>
+#include <cstdint>
 #include <deque>
 #include <memory>
+#include <string>
 #include <unordered_map>
 #include <unordered_set>
 #include <osg/Vec3f>

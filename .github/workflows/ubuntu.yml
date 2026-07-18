@@ -1,0 +1,122 @@
+name: Reusable Ubuntu workflow
+
+on:
+  workflow_call:
+    inputs:
+      image:
+        description: Ubuntu runner image
+        required: false
+        default: ubuntu-24.04
+        type: string
+      build-type:
+        required: false
+        default: RelWithDebInfo
+        type: string
+      package:
+        required: false
+        default: false
+        type: boolean
+      release:
+        required: false
+        default: false
+        type: boolean
+      release-tag:
+        required: false
+        default: Fetcher-Simulator-Ubuntu
+        type: string
+      release-name:
+        required: false
+        default: Fetcher Simulator Ubuntu 24.04
+        type: string
+      release-asset-name:
+        required: false
+        default: fetcher-simulator-ubuntu-24.04-amd64.deb
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ${{ inputs.image }}
+    timeout-minutes: 180
+    env:
+      BUILD_TYPE: ${{ inputs.build-type }}
+      RELEASE_ASSET: ${{ inputs.release-asset-name }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          submodules: recursive
+
+      - name: Install Ubuntu build and packaging dependencies
+        run: |
+          sudo CI/install_debian_deps.sh gcc openmw-deps openmw-deps-dynamic openmw-multiplayer
+          sudo apt-get install -y --no-install-recommends dpkg-dev file
+
+      - name: Prime ccache
+        uses: hendrikmuhs/ccache-action@v1
+        with:
+          key: ubuntu-24.04-${{ inputs.build-type }}
+          max-size: 1500M
+
+      - name: Configure Fetcher Simulator
+        run: |
+          cmake -S . -B build \
+            -D CMAKE_BUILD_TYPE="$BUILD_TYPE" \
+            -D CMAKE_C_COMPILER=gcc \
+            -D CMAKE_CXX_COMPILER=g++ \
+            -D CMAKE_C_COMPILER_LAUNCHER=ccache \
+            -D CMAKE_CXX_COMPILER_LAUNCHER=ccache \
+            -D CMAKE_INSTALL_PREFIX=/usr \
+            -D OPENMW_USE_SYSTEM_RECASTNAVIGATION=ON \
+            -D USE_SYSTEM_TINYXML=ON \
+            -D BUILD_MULTIPLAYER=ON \
+            -D BUILD_DEDICATED_SERVER=ON \
+            -D BUILD_COMPONENTS_TESTS=OFF \
+            -D BUILD_OPENMW_TESTS=OFF \
+            -D BUILD_OPENCS_TESTS=OFF \
+            -D BUILD_OPENCS=OFF \
+            -D BUILD_WIZARD=OFF \
+            -D BUILD_NIFTEST=OFF \
+            -D BUILD_BULLETOBJECTTOOL=OFF
+
+      - name: Build Fetcher Simulator
+        run: cmake --build build --parallel "$(nproc)"
+
+      - name: Smoke-test build tree
+        run: |
+          ./build/openmw --version
+          ./build/openmw-server --help >/dev/null
+
+      - name: Build and verify Ubuntu package
+        if: ${{ inputs.package }}
+        run: |
+          version="0.52.0+git${GITHUB_SHA::10}"
+          CI/Package-UbuntuRelease.sh \
+            "$GITHUB_WORKSPACE/build" \
+            "$GITHUB_WORKSPACE/release-assets" \
+            "$GITHUB_SHA" \
+            "$version" \
+            "$RELEASE_ASSET"
+
+      - name: Upload Ubuntu package artifact
+        if: ${{ inputs.package }}
+        uses: actions/upload-artifact@v6
+        with:
+          name: fetcher-simulator-ubuntu-${{ github.sha }}
+          path: release-assets/${{ inputs.release-asset-name }}
+          if-no-files-found: error
+
+      - name: Publish stable Ubuntu prerelease
+        if: ${{ inputs.release }}
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          .\CI\Publish-StableGitHubRelease.ps1 `
+            -Repository "${{ github.repository }}" `
+            -Tag "${{ inputs.release-tag }}" `
+            -TargetCommit "${{ github.sha }}" `
+            -Title "${{ inputs.release-name }}" `
+            -Notes "Ubuntu 24.04 amd64 package containing the Fetcher multiplayer OpenMW client and dedicated server. Install with: sudo apt install ./$(Split-Path -Leaf '${{ inputs.release-asset-name }}')" `
+            -Assets "${{ github.workspace }}/release-assets/${{ inputs.release-asset-name }}"

@@ -50,6 +50,13 @@ target_compile_definitions(openmw-server PRIVATE
     OPENMW_SERVER_SOURCE_LUA_LIBS_DIR="${CMAKE_SOURCE_DIR}/components/lua"
 )
 
+if (UNIX AND NOT APPLE)
+    target_compile_definitions(openmw-server PRIVATE
+        OPENMW_SERVER_INSTALL_SCRIPTS_DIR="${DATADIR}/server-scripts"
+        OPENMW_SERVER_INSTALL_LUA_LIBS_DIR="${DATADIR}/lua_libs"
+    )
+endif()
+
 target_link_libraries(openmw-server
     components
     GameNetworkingSockets::GameNetworkingSockets_s
@@ -64,6 +71,11 @@ endif()
 target_compile_features(openmw-server PRIVATE cxx_std_20)
 
 install(TARGETS openmw-server RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
+
+if (UNIX AND NOT APPLE)
+    install(DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/scripts/" DESTINATION "${DATADIR}/server-scripts")
+    install(FILES "${CMAKE_SOURCE_DIR}/components/lua/util.lua" DESTINATION "${DATADIR}/lua_libs")
+endif()
 
 add_custom_command(TARGET openmw-server POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E copy_directory

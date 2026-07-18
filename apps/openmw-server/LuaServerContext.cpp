@@ -198,6 +198,10 @@ namespace
             std::filesystem::current_path() / "resources" / "lua_libs",
         };
 
+#ifdef OPENMW_SERVER_INSTALL_LUA_LIBS_DIR
+        candidates.emplace_back(OPENMW_SERVER_INSTALL_LUA_LIBS_DIR);
+#endif
+
 #ifdef OPENMW_SERVER_SOURCE_LUA_LIBS_DIR
         candidates.emplace_back(OPENMW_SERVER_SOURCE_LUA_LIBS_DIR);
 #endif
@@ -1626,6 +1630,10 @@ std::filesystem::path LuaServerContext::resolveScriptsDir() const
         std::filesystem::current_path() / "server-scripts",
         std::filesystem::current_path() / "apps" / "openmw-server" / "scripts",
     };
+
+#ifdef OPENMW_SERVER_INSTALL_SCRIPTS_DIR
+    candidates.emplace_back(OPENMW_SERVER_INSTALL_SCRIPTS_DIR);
+#endif
 
 #ifdef OPENMW_SERVER_SOURCE_SCRIPTS_DIR
     candidates.emplace_back(OPENMW_SERVER_SOURCE_SCRIPTS_DIR);

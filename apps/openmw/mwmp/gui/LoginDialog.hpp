@@ -1,8 +1,9 @@
 #ifndef OPENMW_MWMP_GUI_LOGINDIALOG_HPP
 #define OPENMW_MWMP_GUI_LOGINDIALOG_HPP
 
-#include <string>
+#include <cstdint>
 #include <functional>
+#include <string>
 
 namespace mwmp
 {

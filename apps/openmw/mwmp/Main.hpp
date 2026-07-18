@@ -1,6 +1,7 @@
 #ifndef OPENMW_MWMP_MAIN_HPP
 #define OPENMW_MWMP_MAIN_HPP
 
+#include <cstdint>
 #include <filesystem>
 #include <memory>
 #include <osg/Vec3f>

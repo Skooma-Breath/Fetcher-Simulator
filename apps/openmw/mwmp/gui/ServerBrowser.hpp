@@ -1,6 +1,7 @@
 #ifndef OPENMW_MWMP_GUI_SERVERBROWSER_HPP
 #define OPENMW_MWMP_GUI_SERVERBROWSER_HPP
 
+#include <cstdint>
 #include <string>
 #include <vector>
 

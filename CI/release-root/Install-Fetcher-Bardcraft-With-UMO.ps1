@@ -16,8 +16,8 @@ param(
     [bool] $ApplyBardcraftMultiplayerPatch = $true,
     [bool] $ApplyPublicTestConfig = $true,
     [string] $BardcraftPatchAssetName = "fetcher-bardcraft-mp-patch-v2.zip",
-    [string] $BardcraftPatchUrl = "https://github.com/Skooma-Breath/Fetcher-Simulator/releases/download/fetcher-bardcraft-mp-patch-v2/fetcher-bardcraft-mp-patch-v2.zip",
-    [string] $BardcraftPatchReleaseApiUrl = "https://api.github.com/repos/Skooma-Breath/Fetcher-Simulator/releases/tags/fetcher-bardcraft-mp-patch-v2",
+    [string] $BardcraftPatchUrl = "https://github.com/Skooma-Breath/Fetcher-Bardcraft/releases/download/fetcher-bardcraft-mp-patch-v2/fetcher-bardcraft-mp-patch-v2.zip",
+    [string] $BardcraftPatchReleaseApiUrl = "https://api.github.com/repos/Skooma-Breath/Fetcher-Bardcraft/releases/tags/fetcher-bardcraft-mp-patch-v2",
     [string] $BardcraftPatchSha256 = ""
 )
 

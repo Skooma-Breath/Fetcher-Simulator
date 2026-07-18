@@ -4,6 +4,7 @@
     {
       "id": "bardcraft-mp-v2",
       "name": "Fetcher Bardcraft multiplayer compatibility",
+      "repository": "Skooma-Breath/Fetcher-Bardcraft",
       "releaseTag": "fetcher-bardcraft-mp-patch-v2",
       "assetName": "fetcher-bardcraft-mp-patch-v2.zip",
       "targetPlugin": "Bardcraft.ESP",

@@ -42,7 +42,7 @@ The current project scope is to make a playable OpenMW 0.51-based multiplayer fo
 - server-authoritative world state for containers, doors, placed objects, dynamic records, spawned actors, and dead vanilla actors;
 - multiplayer compatibility work for client-side Lua scripts and mods where their state or behavior needs to be reflected across clients;
 - server-side Lua scripts and bindings for commands, admin UI services, spawners, mark/recall, and persistence helpers;
-- Windows tester packaging and release workflow support.
+- Windows tester packaging and Ubuntu 24.04 client/server release workflow support.
 
 What Is Done
 ------------
@@ -55,7 +55,8 @@ What Is Done
 - Server persistence exists for accounts, characters, player state, placed world objects, containers, doors, dynamic records, spawned actors, and dead vanilla actor records.
 - ActorSync v2 uses deterministic actor identities, identity acknowledgement, compact position snapshots, presentation snapshots, attack events, and authority handoff logic.
 - Server-side Lua can handle gameplay commands, admin UI service calls, destructible spawners, persistence helpers, and cell reset flows.
-- Windows build/release workflows and tester package support exist in `.github/workflows` and `scripts`.
+- Windows build/release workflows, tester packages, and an Ubuntu 24.04 `.deb`
+  workflow exist in `.github/workflows` and `CI`.
 
 Source Style Surfing
 --------------------
@@ -95,7 +96,7 @@ Future Work
 - Broader multiplayer stress testing with more clients and longer sessions.
 - Better automated regression tests for protocol, persistence, actor lifecycle, and Lua server scripts.
 - More robust master-server/server-browser support.
-- Build workflows for the dedicated server, plus client/server builds for other operating systems.
+- Client/server packages for Linux distributions beyond Ubuntu 24.04.
 - Admin and moderation tooling suitable for public servers.
 - Protocol compatibility and migration handling for saved server databases.
 - Better compatibility paths for client-side Lua scripts and mods, including multiplayer-safe state sync and server mediation where needed.
