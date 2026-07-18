@@ -384,6 +384,29 @@ CUSTOM: customdata.lua
             "Test[testinterface.lua]:\tFN\t4.5\n");
     }
 
+    TEST_F(LuaScriptsContainerTest, AutoStartCanBeSuppressedUntilSavedStateIsReady)
+    {
+        LuaUtil::ScriptsContainer scripts(&mLua, "Test");
+        scripts.setAutoStartConf(mCfg.getPlayerConf());
+        scripts.setAutoStartSuppressed(true);
+
+        testing::internal::CaptureStdout();
+        scripts.receiveEvent("ForceLazyLoad", "");
+        scripts.addAutoStartedScripts();
+        scripts.update(1.5f);
+        EXPECT_EQ(internal::GetCapturedStdout(), "");
+
+        scripts.setAutoStartSuppressed(false);
+        testing::internal::CaptureStdout();
+        scripts.addAutoStartedScripts();
+        scripts.update(1.5f);
+        EXPECT_EQ(internal::GetCapturedStdout(),
+            "Test[overrideinterface.lua]:\toverride\n"
+            "Test[overrideinterface.lua]:\tinit\n"
+            "Test[overrideinterface.lua]:\tNEW FN\t4.5\n"
+            "Test[testinterface.lua]:\tFN\t4.5\n");
+    }
+
     TEST_F(LuaScriptsContainerTest, Interface)
     {
         LuaUtil::ScriptsContainer scripts(&mLua, "Test");

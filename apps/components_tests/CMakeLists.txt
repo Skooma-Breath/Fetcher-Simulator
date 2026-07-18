@@ -13,6 +13,7 @@ file(GLOB UNITTEST_SRC_FILES
     lua/testinputactions.cpp
     lua/testl10n.cpp
     lua/testlua.cpp
+    lua/testplayerscriptstate.cpp
     lua/testscriptscontainer.cpp
     lua/testserialization.cpp
     lua/teststorage.cpp

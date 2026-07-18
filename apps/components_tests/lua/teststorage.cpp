@@ -183,4 +183,57 @@ namespace
         });
     }
 
+    TEST(LuaUtilStorageTest, ReplaceOverBaselinePreservesNewDefaultsAndClearsPreviousCharacter)
+    {
+        LuaUtil::LuaState luaState{ nullptr, nullptr };
+        luaState.protectedCall([](LuaUtil::LuaView& view) {
+            LuaUtil::LuaStorage::initLuaBindings(view);
+            auto& lua = view.sol();
+            const auto suffix = std::chrono::steady_clock::now().time_since_epoch().count();
+            const auto tmpDir = std::filesystem::temp_directory_path()
+                / ("openmw-storage-baseline-test-" + std::to_string(suffix));
+            const auto characterAFile = tmpDir / "character-a.bin";
+
+            LuaUtil::LuaStorage characterA;
+            characterA.setActive(true);
+            lua["savedSettings"] = characterA.getMutableSection(lua, "SettingsTest");
+            lua.safe_script("savedSettings:set('existing', 42); savedSettings:set('flag', false); "
+                            "savedSettings:set('zero', 0); savedSettings:set('empty', {}); "
+                            "savedSettings:set('unknownOldKey', 7)");
+            characterA.save(lua, characterAFile);
+
+            LuaUtil::LuaStorage target;
+            target.setActive(true);
+            lua["settings"] = target.getMutableSection(lua, "SettingsTest");
+            lua["oldCharacterOnly"] = target.getMutableSection(lua, "OldCharacterOnly");
+            lua.safe_script("settings:set('existing', 10); settings:set('newDefault', 99); "
+                            "settings:set('flag', true)");
+            target.captureBaseline();
+
+            // Values written after the baseline represent the previously bound character.
+            lua.safe_script("settings:set('leakedValue', 123); oldCharacterOnly:set('value', 5)");
+
+            std::string error;
+            ASSERT_TRUE(target.replaceFromFileOverBaseline(lua, characterAFile, error)) << error;
+            EXPECT_EQ(get<int>(lua, "settings:get('existing')"), 42);
+            EXPECT_EQ(get<int>(lua, "settings:get('newDefault')"), 99);
+            EXPECT_FALSE(get<bool>(lua, "settings:get('flag')"));
+            EXPECT_EQ(get<int>(lua, "settings:get('zero')"), 0);
+            EXPECT_EQ(get<int>(lua, "#settings:get('empty')"), 0);
+            EXPECT_EQ(get<int>(lua, "settings:get('unknownOldKey')"), 7);
+            EXPECT_TRUE(get<bool>(lua, "settings:get('leakedValue') == nil"));
+            EXPECT_TRUE(get<bool>(lua, "oldCharacterOnly:get('value') == nil"));
+
+            // A character with no file gets the current defaults, not character A's values.
+            ASSERT_TRUE(target.replaceFromFileOverBaseline(lua, tmpDir / "character-b-missing.bin", error)) << error;
+            EXPECT_EQ(get<int>(lua, "settings:get('existing')"), 10);
+            EXPECT_EQ(get<int>(lua, "settings:get('newDefault')"), 99);
+            EXPECT_TRUE(get<bool>(lua, "settings:get('flag')"));
+            EXPECT_TRUE(get<bool>(lua, "settings:get('unknownOldKey') == nil"));
+
+            std::error_code ec;
+            std::filesystem::remove_all(tmpDir, ec);
+        });
+    }
+
 }

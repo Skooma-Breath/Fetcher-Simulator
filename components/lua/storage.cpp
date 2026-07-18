@@ -300,6 +300,20 @@ namespace LuaUtil
         }
     }
 
+    void LuaStorage::captureBaseline()
+    {
+        if (mBaselineCaptured)
+            return;
+        mBaseline.clear();
+        for (const auto& [sectionName, section] : mData)
+        {
+            auto& baselineSection = mBaseline[std::string(sectionName)];
+            for (const auto& [key, value] : section->mValues)
+                baselineSection.emplace(key, value.serialized());
+        }
+        mBaselineCaptured = true;
+    }
+
     void LuaStorage::load(lua_State* state, const std::filesystem::path& path)
     {
         assert(mData.empty()); // Shouldn't be used before loading
@@ -371,6 +385,73 @@ namespace LuaUtil
         {
             error = e.what();
             Log(Debug::Error) << "Cannot replace Lua storage from \"" << path << "\": " << error;
+            return false;
+        }
+    }
+
+    bool LuaStorage::replaceFromFileOverBaseline(
+        lua_State* state, const std::filesystem::path& path, std::string& error)
+    {
+        error.clear();
+        std::map<std::string, sol::table, std::less<>> loadedSections;
+        try
+        {
+            if (std::filesystem::exists(path))
+            {
+                const std::uintmax_t fileSize = std::filesystem::file_size(path);
+                Log(Debug::Info) << "Loading Lua storage over baseline \"" << path << "\" (" << fileSize
+                                 << " bytes)";
+                if (fileSize == 0)
+                    throw std::runtime_error("Storage file has zero length");
+
+                std::ifstream fin(path, std::fstream::binary);
+                if (!fin)
+                    throw std::runtime_error("Unable to open storage file");
+                std::string serializedData((std::istreambuf_iterator<char>(fin)), std::istreambuf_iterator<char>());
+                sol::table data = deserialize(state, serializedData);
+                for (const auto& [sectionName, sectionTable] : data)
+                    loadedSections.emplace(cast<std::string>(sectionName), cast<sol::table>(sectionTable));
+            }
+
+            std::set<std::string, std::less<>> sectionNames;
+            for (const auto& [sectionName, _] : mData)
+                sectionNames.emplace(sectionName);
+            for (const auto& [sectionName, _] : mBaseline)
+                sectionNames.emplace(sectionName);
+            for (const auto& [sectionName, _] : loadedSections)
+                sectionNames.emplace(sectionName);
+
+            for (const std::string& sectionName : sectionNames)
+            {
+                sol::table merged(state, sol::create);
+                bool hasValues = false;
+                if (const auto baselineIt = mBaseline.find(sectionName); baselineIt != mBaseline.end())
+                {
+                    for (const auto& [key, value] : baselineIt->second)
+                    {
+                        merged[key] = deserialize(state, value);
+                        hasValues = true;
+                    }
+                }
+                if (const auto loadedIt = loadedSections.find(sectionName); loadedIt != loadedSections.end())
+                {
+                    for (const auto& [key, value] : loadedIt->second)
+                    {
+                        merged[cast<std::string>(key)] = value;
+                        hasValues = true;
+                    }
+                }
+                if (hasValues)
+                    getSection(sectionName)->setAll(merged);
+                else
+                    getSection(sectionName)->setAll(sol::nullopt);
+            }
+            return true;
+        }
+        catch (const std::exception& e)
+        {
+            error = e.what();
+            Log(Debug::Error) << "Cannot replace Lua storage over baseline from \"" << path << "\": " << error;
             return false;
         }
     }

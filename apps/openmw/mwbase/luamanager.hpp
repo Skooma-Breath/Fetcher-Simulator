@@ -103,7 +103,10 @@ namespace MWBase
         virtual void savePermanentStorage(const std::filesystem::path& userConfigPath) = 0;
         virtual void prepareMultiplayerPlayerStorage() = 0;
         virtual bool bindMultiplayerPlayerStorage(std::string_view storageNamespace,
-            std::string_view characterKey, std::string_view characterName, std::string& error) = 0;
+            std::string_view characterKey, std::string_view characterName, bool restorePlayerScripts,
+            std::string& error) = 0;
+        virtual void restorePendingMultiplayerPlayerScripts() = 0;
+        virtual void requestMultiplayerPlayerScriptsCheckpoint() = 0;
 
         // TODO: notify LuaManager about other events
         // virtual void objectOnHit(const MWWorld::Ptr &ptr, float damage, bool ishealth, const MWWorld::Ptr &object,

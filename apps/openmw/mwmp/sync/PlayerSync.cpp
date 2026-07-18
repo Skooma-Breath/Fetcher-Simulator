@@ -2010,12 +2010,17 @@ void PlayerSync::snapshotDynamicStats()
 
 void PlayerSync::applyRestoredStatsToPlayer()
 {
-    if (!mHasPendingRestoredStats && !mLocal.hasSavedStats)
-        return;
-
     MWBase::World* world = MWBase::Environment::get().getWorld();
     MWWorld::Ptr player = world ? world->getPlayerPtr() : MWWorld::Ptr{};
     if (!world || player.isEmpty() || !player.getClass().isNpc())
+        return;
+
+    // Returning-player Lua onLoad runs immediately after this method. Install
+    // the authoritative inventory/equipment first so scripts see the restored
+    // character rather than the newGame template player.
+    applyPendingAuthoritativeState(player);
+
+    if (!mHasPendingRestoredStats && !mLocal.hasSavedStats)
         return;
 
     const BasePlayer& source = mHasPendingRestoredStats ? mPendingRestoredStats : mLocal;

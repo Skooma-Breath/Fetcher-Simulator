@@ -1,6 +1,7 @@
 #ifndef MWLUA_LUAMANAGERIMP_H
 #define MWLUA_LUAMANAGERIMP_H
 
+#include <chrono>
 #include <filesystem>
 #include <map>
 #include <memory>
@@ -11,6 +12,7 @@
 
 #include <osg/Stats>
 
+#include <components/esm/luascripts.hpp>
 #include <components/lua/inputactions.hpp>
 #include <components/lua/luastate.hpp>
 #include <components/lua/scripttracker.hpp>
@@ -57,7 +59,10 @@ namespace MWLua
         void savePermanentStorage(const std::filesystem::path& userConfigPath) override;
         void prepareMultiplayerPlayerStorage() override;
         bool bindMultiplayerPlayerStorage(std::string_view storageNamespace,
-            std::string_view characterKey, std::string_view characterName, std::string& error) override;
+            std::string_view characterKey, std::string_view characterName, bool restorePlayerScripts,
+            std::string& error) override;
+        void restorePendingMultiplayerPlayerScripts() override;
+        void requestMultiplayerPlayerScriptsCheckpoint() override { mPlayerScriptsCheckpointRequested = true; }
 
         // \brief Executes lua handlers. Defaults to running in parallel with OSG Cull.
         //
@@ -203,6 +208,9 @@ namespace MWLua
         void initConfiguration(bool reload);
         LocalScripts* createLocalScripts(const MWWorld::Ptr& ptr,
             std::optional<LuaUtil::ScriptIdsWithInitializationData> autoStartConf = std::nullopt);
+        void loadPendingMultiplayerPlayerScripts(
+            const std::filesystem::path& path, std::string_view characterName, bool restorePlayerScripts);
+        bool checkpointMultiplayerPlayerScripts(std::string& error);
         void reloadAllScriptsImpl();
         void synchronizedUpdateUnsafe();
 
@@ -271,9 +279,15 @@ namespace MWLua
         std::filesystem::path mDefaultPlayerStoragePath;
         std::optional<std::filesystem::path> mLoadedPlayerStoragePath;
         std::optional<std::filesystem::path> mBoundPlayerStoragePath;
+        std::optional<std::filesystem::path> mBoundPlayerScriptsPath;
+        std::optional<ESM::LuaScripts> mPendingPlayerScripts;
+        double mPendingPlayerScriptsSimulationTime = 0.0;
+        double mPendingPlayerScriptsGameTime = 0.0;
         std::unique_ptr<PlayerStorageLock> mPlayerStorageLock;
         bool mMultiplayerPlayerStorage = false;
         bool mIsolatedMultiplayerProfile = false;
+        bool mPlayerScriptsCheckpointRequested = false;
+        std::chrono::steady_clock::time_point mNextPlayerScriptsCheckpoint{};
 
         LuaUtil::InputAction::Registry mInputActions;
         LuaUtil::InputTrigger::Registry mInputTriggers;

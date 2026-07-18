@@ -172,6 +172,7 @@ namespace LuaUtil
 
         // Starts scripts according to `autoStartMode` and calls `onInit` for them. Not needed if `load` is used.
         void addAutoStartedScripts();
+        void setAutoStartSuppressed(bool suppressed) { mAutoStartSuppressed = suppressed; }
 
         // Removes all scripts including the auto started.
         void removeAllScripts();
@@ -182,7 +183,7 @@ namespace LuaUtil
 
         // Removes all scripts; starts scripts according to `autoStartMode` and
         // loads the savedScripts. Runs "onLoad" for each script.
-        void load(const ESM::LuaScripts& savedScripts);
+        void load(const ESM::LuaScripts& savedScripts, bool applySavedIdMapping = true);
 
         // Callbacks for serializable timers should be registered in advance.
         // The script with the given path should already present in the container.
@@ -386,6 +387,7 @@ namespace LuaUtil
 
         ScriptTracker* mTracker;
         bool mRequiredLoading = false;
+        bool mAutoStartSuppressed = false;
         friend class ScriptTracker;
 
         static int64_t sInstanceCount; // debug information, shown in Lua profiler

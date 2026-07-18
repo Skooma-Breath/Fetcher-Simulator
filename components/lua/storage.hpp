@@ -35,8 +35,14 @@ namespace LuaUtil
         };
 
         void clearTemporaryAndRemoveCallbacks();
+        // Captures the pre-character values (normally engine and menu-script defaults).
+        // A later character bind can rebuild storage from this baseline before
+        // overlaying that character's saved values.
+        void captureBaseline();
         void load(lua_State* state, const std::filesystem::path& path);
         bool replaceFromFile(lua_State* state, const std::filesystem::path& path, std::string& error, bool clearMissingSections = true);
+        bool replaceFromFileOverBaseline(
+            lua_State* state, const std::filesystem::path& path, std::string& error);
         void save(lua_State* state, const std::filesystem::path& path) const;
         std::vector<SerializedValue> getSerializedValues() const;
 
@@ -133,6 +139,8 @@ namespace LuaUtil
         const std::shared_ptr<Section>& getSection(std::string_view sectionName);
 
         std::map<std::string_view, std::shared_ptr<Section>> mData;
+        std::map<std::string, std::map<std::string, BinaryData, std::less<>>, std::less<>> mBaseline;
+        bool mBaselineCaptured = false;
         const Listener* mListener = nullptr;
         std::set<const Section*> mRunningCallbacks;
         bool mActive = false;

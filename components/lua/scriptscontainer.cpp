@@ -77,6 +77,8 @@ namespace LuaUtil
 
     void ScriptsContainer::addAutoStartedScripts()
     {
+        if (mAutoStartSuppressed)
+            return;
         mLua.protectedCall([&](LuaView& view) {
             for (const auto& [scriptId, data] : mAutoStartScripts)
             {
@@ -501,7 +503,7 @@ namespace LuaUtil
         }
     }
 
-    void ScriptsContainer::load(const ESM::LuaScripts& data)
+    void ScriptsContainer::load(const ESM::LuaScripts& data, bool applySavedIdMapping)
     {
         removeAllScripts();
         const ScriptsConfiguration& cfg = mLua.getConfiguration();
@@ -511,7 +513,11 @@ namespace LuaUtil
             scripts[scriptId] = { initData, nullptr };
         for (const ESM::LuaScript& s : data.mScripts)
         {
-            std::optional<int> scriptId = cfg.mapId(s.mScriptId);
+            std::optional<int> scriptId = applySavedIdMapping
+                ? cfg.mapId(s.mScriptId)
+                : (s.mScriptId >= 0 && static_cast<std::size_t>(s.mScriptId) < cfg.size()
+                        ? std::optional<int>(s.mScriptId)
+                        : std::nullopt);
             if (!scriptId)
             {
                 Log(Debug::Verbose) << "Ignoring " << mNamePrefix << "[" << s.mScriptId << "]; script not registered";
@@ -582,8 +588,11 @@ namespace LuaUtil
         const ScriptsConfiguration& cfg = mLua.getConfiguration();
 
         std::map<int, ScriptInfo> scripts;
-        for (const auto& [scriptId, initData] : mAutoStartScripts)
-            scripts[scriptId] = { initData, nullptr };
+        if (!mAutoStartSuppressed)
+        {
+            for (const auto& [scriptId, initData] : mAutoStartScripts)
+                scripts[scriptId] = { initData, nullptr };
+        }
         for (const ESM::LuaScript& s : savedScripts)
         {
             auto it = scripts.find(s.mScriptId);

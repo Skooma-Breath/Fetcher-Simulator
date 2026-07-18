@@ -39,6 +39,7 @@
 
 #include <components/l10n/manager.hpp>
 
+#include <components/lua/playerscriptstate.hpp>
 #include <components/lua_ui/registerscriptsettings.hpp>
 #include <components/lua_ui/util.hpp>
 
@@ -465,6 +466,11 @@ namespace MWLua
             else
                 mPlayerStorage.save(view.sol(), userConfigPath / "player_storage.bin");
         });
+
+        std::string scriptsError;
+        if (!checkpointMultiplayerPlayerScripts(scriptsError))
+            Log(Debug::Warning) << "[MP] Could not checkpoint player Lua scripts during shutdown: " << scriptsError;
+        mPlayerScriptsCheckpointRequested = false;
     }
 
     void LuaManager::prepareMultiplayerPlayerStorage()
@@ -473,7 +479,7 @@ namespace MWLua
     }
 
     bool LuaManager::bindMultiplayerPlayerStorage(std::string_view storageNamespace,
-        std::string_view characterKey, std::string_view characterName, std::string& error)
+        std::string_view characterKey, std::string_view characterName, bool restorePlayerScripts, std::string& error)
     {
         const auto isSafePathComponent = [](std::string_view value) {
             return !value.empty()
@@ -487,13 +493,26 @@ namespace MWLua
         }
 
         prepareMultiplayerPlayerStorage();
+        mPlayerStorage.captureBaseline();
         const std::filesystem::path storagePath = mIsolatedMultiplayerProfile
             ? mDefaultPlayerStoragePath
             : mDefaultPlayerStoragePath.parent_path() / "multiplayer-characters"
                 / std::string(storageNamespace) / std::string(characterKey) / "player_storage.bin";
+        const std::filesystem::path scriptsPath = storagePath.parent_path() / "player_scripts.bin";
 
         if (mBoundPlayerStoragePath && *mBoundPlayerStoragePath == storagePath && mPlayerStorageLock)
+        {
+            std::string checkpointError;
+            if (!checkpointMultiplayerPlayerScripts(checkpointError))
+            {
+                error = "Unable to checkpoint current character Lua scripts: " + checkpointError;
+                return false;
+            }
+            mPlayerScriptsCheckpointRequested = false;
+            mBoundPlayerScriptsPath = scriptsPath;
+            loadPendingMultiplayerPlayerScripts(scriptsPath, characterName, restorePlayerScripts);
             return true;
+        }
 
         auto nextLock = std::make_unique<PlayerStorageLock>();
         if (!nextLock->acquire(storagePath.parent_path() / "player_storage.lock", error))
@@ -505,6 +524,11 @@ namespace MWLua
 
         try
         {
+            std::string checkpointError;
+            if (!checkpointMultiplayerPlayerScripts(checkpointError))
+                throw std::runtime_error("Unable to checkpoint previous character Lua scripts: " + checkpointError);
+            mPlayerScriptsCheckpointRequested = false;
+
             if (!mIsolatedMultiplayerProfile && !std::filesystem::exists(storagePath)
                 && std::filesystem::exists(mDefaultPlayerStoragePath))
             {
@@ -542,9 +566,8 @@ namespace MWLua
             {
                 bool loaded = false;
                 std::string loadError;
-                const bool clearMissingSections = mLoadedPlayerStoragePath.has_value();
                 mLua.protectedCall([&](LuaUtil::LuaView& view) {
-                    loaded = mPlayerStorage.replaceFromFile(view.sol(), storagePath, loadError, clearMissingSections);
+                    loaded = mPlayerStorage.replaceFromFileOverBaseline(view.sol(), storagePath, loadError);
                 });
                 if (!loaded)
                 {
@@ -562,11 +585,123 @@ namespace MWLua
 
         mLoadedPlayerStoragePath = storagePath;
         mBoundPlayerStoragePath = storagePath;
+        mBoundPlayerScriptsPath = scriptsPath;
         mPlayerStorageLock = std::move(nextLock);
+        loadPendingMultiplayerPlayerScripts(scriptsPath, characterName, restorePlayerScripts);
+        mNextPlayerScriptsCheckpoint = std::chrono::steady_clock::now() + std::chrono::seconds(60);
         Log(Debug::Info) << "[MP] Bound character player Lua storage"
                          << " character=" << characterName
                          << " path=" << storagePath;
         return true;
+    }
+
+    void LuaManager::loadPendingMultiplayerPlayerScripts(
+        const std::filesystem::path& path, std::string_view characterName, bool restorePlayerScripts)
+    {
+        mPendingPlayerScripts.reset();
+        if (!restorePlayerScripts)
+        {
+            Log(Debug::Verbose) << "[MP] Starting new character without prior player Lua script state"
+                                << " character=" << characterName;
+            return;
+        }
+
+        LuaUtil::PlayerScriptStateLoadResult result;
+        std::string loadError;
+        if (!LuaUtil::PlayerScriptState::load(path, mConfiguration, result, loadError))
+        {
+            std::filesystem::path quarantinePath = path;
+            quarantinePath += ".corrupt-" + std::to_string(
+                std::chrono::duration_cast<std::chrono::seconds>(
+                    std::chrono::system_clock::now().time_since_epoch()).count());
+            std::error_code quarantineError;
+            std::filesystem::rename(path, quarantinePath, quarantineError);
+            Log(Debug::Warning) << "[MP] Ignoring corrupt player Lua script state"
+                                << " character=" << characterName
+                                << " path=" << path
+                                << " error=" << loadError
+                                << (quarantineError ? " quarantineError=" + quarantineError.message()
+                                                    : " quarantined=" + quarantinePath.string());
+            return;
+        }
+        if (!result.mExists)
+            return;
+
+        const std::size_t scriptCount = result.mScripts.mScripts.size();
+        mPendingPlayerScriptsSimulationTime = result.mSimulationTime;
+        mPendingPlayerScriptsGameTime = result.mGameTime;
+        mPendingPlayerScripts = std::move(result.mScripts);
+        if (MWBase::World* world = MWBase::Environment::get().getWorld())
+        {
+            MWWorld::Ptr player = world->getPlayerPtr();
+            if (!player.isEmpty())
+            {
+                if (LocalScripts* scripts = player.getRefData().getLuaScripts())
+                    scripts->setAutoStartSuppressed(true);
+            }
+        }
+        Log(result.mConfigurationMatches ? Debug::Info : Debug::Warning)
+            << "[MP] Loaded character player Lua script state"
+            << " character=" << characterName
+            << " scripts=" << scriptCount
+            << " configurationMatches=" << result.mConfigurationMatches
+            << " path=" << path;
+    }
+
+    bool LuaManager::checkpointMultiplayerPlayerScripts(std::string& error)
+    {
+        error.clear();
+        if (!mMultiplayerPlayerStorage || !mBoundPlayerScriptsPath || mPlayer.isEmpty())
+            return true;
+
+        LocalScripts* scripts = mPlayer.getRefData().getLuaScripts();
+        if (!scripts)
+            return true;
+
+        ESM::LuaScripts state;
+        scripts->save(state);
+        MWWorld::DateTimeManager& timeManager = *MWBase::Environment::get().getWorld()->getTimeManager();
+        if (!LuaUtil::PlayerScriptState::save(*mBoundPlayerScriptsPath, mConfiguration, state,
+                timeManager.getSimulationTime(), timeManager.getGameTime(), error))
+            return false;
+
+        Log(Debug::Verbose) << "[MP] Checkpointed character player Lua script state"
+                            << " scripts=" << state.mScripts.size()
+                            << " path=" << *mBoundPlayerScriptsPath;
+        return true;
+    }
+
+    void LuaManager::restorePendingMultiplayerPlayerScripts()
+    {
+        if (!mPendingPlayerScripts || mPlayer.isEmpty())
+            return;
+
+        LocalScripts* scripts = mPlayer.getRefData().getLuaScripts();
+        if (!scripts)
+            return;
+
+        scripts->setSavedDataDeserializer(mLocalSerializer.get());
+        const std::size_t restoredCount = mPendingPlayerScripts->mScripts.size();
+        MWWorld::DateTimeManager& timeManager = *MWBase::Environment::get().getWorld()->getTimeManager();
+        const double simulationTime = timeManager.getSimulationTime();
+        const double gameTime = timeManager.getGameTime();
+        for (ESM::LuaScript& script : mPendingPlayerScripts->mScripts)
+        {
+            for (ESM::LuaTimer& timer : script.mTimers)
+            {
+                const double savedTime = timer.mType == ESM::LuaTimer::Type::SIMULATION_TIME
+                    ? mPendingPlayerScriptsSimulationTime
+                    : mPendingPlayerScriptsGameTime;
+                const double currentTime
+                    = timer.mType == ESM::LuaTimer::Type::SIMULATION_TIME ? simulationTime : gameTime;
+                timer.mTime = currentTime + std::max(0.0, timer.mTime - savedTime);
+            }
+        }
+        scripts->load(*mPendingPlayerScripts, /*applySavedIdMapping=*/false);
+        scripts->setAutoStartSuppressed(false);
+        mPendingPlayerScripts.reset();
+        Log(Debug::Info) << "[MP] Restored character player Lua script container"
+                         << " scripts=" << restoredCount;
     }
 
     void LuaManager::sendLocalEvent(
@@ -864,6 +999,17 @@ namespace MWLua
         applyDelayedActions();
 #ifdef BUILD_MULTIPLAYER
         markPerf(perf.delayedActions);
+
+        if (mMultiplayerPlayerStorage && mBoundPlayerScriptsPath && !mPlayer.isEmpty()
+            && (mPlayerScriptsCheckpointRequested
+                || std::chrono::steady_clock::now() >= mNextPlayerScriptsCheckpoint))
+        {
+            mPlayerScriptsCheckpointRequested = false;
+            mNextPlayerScriptsCheckpoint = std::chrono::steady_clock::now() + std::chrono::seconds(60);
+            std::string checkpointError;
+            if (!checkpointMultiplayerPlayerScripts(checkpointError))
+                Log(Debug::Warning) << "[MP] Periodic player Lua script checkpoint failed: " << checkpointError;
+        }
 #endif
 
         if (mReloadAllScriptsRequested)
@@ -905,6 +1051,13 @@ namespace MWLua
 
     void LuaManager::clear()
     {
+        if (mPlayerScriptsCheckpointRequested)
+        {
+            std::string checkpointError;
+            if (!checkpointMultiplayerPlayerScripts(checkpointError))
+                Log(Debug::Warning) << "[MP] Player Lua script checkpoint before clear failed: " << checkpointError;
+            mPlayerScriptsCheckpointRequested = false;
+        }
         LuaUi::clearGameInterface();
         mUiResourceManager.clear();
         MWBase::Environment::get().getWorld()->getPostProcessor()->disableDynamicShaders();
@@ -945,11 +1098,25 @@ namespace MWLua
         mObjectLists.setPlayer(ptr);
         mPlayer = ptr;
         LocalScripts* localScripts = ptr.getRefData().getLuaScripts();
+        const bool scriptsAlreadyExisted = localScripts != nullptr;
         if (!localScripts)
-        {
             localScripts = createLocalScripts(ptr);
-            mQueuedAutoStartedScripts.push_back(localScripts->getWeakPointer());
+        localScripts->setAutoStartSuppressed(mPendingPlayerScripts.has_value());
+        if (mPendingPlayerScripts)
+        {
+            // objectAddedToScene can create and queue the player container before
+            // setupPlayer. A returning character must receive onLoad only.
+            std::vector<LuaUtil::ScriptsContainerWeakPtr> retained;
+            retained.reserve(mQueuedAutoStartedScripts.size());
+            for (const LuaUtil::ScriptsContainerWeakPtr& queued : mQueuedAutoStartedScripts)
+            {
+                if (asLocal(queued) != localScripts)
+                    retained.emplace_back(queued);
+            }
+            mQueuedAutoStartedScripts.swap(retained);
         }
+        else if (!scriptsAlreadyExisted)
+            mQueuedAutoStartedScripts.push_back(localScripts->getWeakPointer());
         mActiveLocalScripts.insert(localScripts->getWeakPointer());
         mEngineEvents.addToQueue(EngineEvents::OnActive{ getId(ptr) });
     }
@@ -1217,7 +1384,10 @@ namespace MWLua
         if (!localScripts)
         {
             localScripts = createLocalScripts(ptr);
-            localScripts->addAutoStartedScripts();
+            const bool restoringPlayer = mPendingPlayerScripts
+                && getLiveCellRefType(ptr.mRef) == ESM::REC_INTERNAL_PLAYER;
+            if (!restoringPlayer)
+                localScripts->addAutoStartedScripts();
             if (ptr.isInCell() && MWBase::Environment::get().getWorldScene()->isCellActive(*ptr.getCell()))
             {
                 localScripts->setActive(true, false);
@@ -1239,6 +1409,7 @@ namespace MWLua
         {
             scripts = std::make_shared<PlayerScripts>(&mLua, LObject(getId(ptr)));
             scripts->setAutoStartConf(mConfiguration.getPlayerConf());
+            scripts->setAutoStartSuppressed(mPendingPlayerScripts.has_value());
             for (const auto& [name, package] : mPlayerPackages)
                 scripts->addPackage(name, package);
         }

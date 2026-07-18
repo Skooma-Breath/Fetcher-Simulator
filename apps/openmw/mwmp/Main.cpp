@@ -566,6 +566,7 @@ void Main::disconnect(const std::string& reason)
     {
         if (mPlayerSync)
             mPlayerSync->flushPersistentStats();
+        MWBase::Environment::get().getLuaManager()->requestMultiplayerPlayerScriptsCheckpoint();
         mClient->disconnect(reason);
     }
 }
@@ -641,7 +642,7 @@ bool Main::enterSelectedCharacterWorld(bool allowNewCharacterUi)
         : "name-" + crypto::sha256hex(normalizedIdentityPart(worldName));
     std::string storageError;
     if (!MWBase::Environment::get().getLuaManager()->bindMultiplayerPlayerStorage(
-            storageNamespace, characterKey, worldName, storageError))
+            storageNamespace, characterKey, worldName, !isNew, storageError))
     {
         Log(Debug::Error) << "[MP] " << storageError;
         windowManager->messageBox(storageError);
@@ -718,6 +719,7 @@ bool Main::enterSelectedCharacterWorld(bool allowNewCharacterUi)
     applySelectedCharacterSpawn(spawnCell, "returning player");
 
     getPlayerSync().applyRestoredStatsToPlayer();
+    MWBase::Environment::get().getLuaManager()->restorePendingMultiplayerPlayerScripts();
     Log(Debug::Info) << "[MP] Returning player restore complete - sending full sync";
     getPlayerSync().forceFullSync(false);
     return true;
