@@ -15,6 +15,7 @@
     {
       "id": "starwind-vanilla-mp-v2",
       "name": "Fetcher Starwind vanilla/multiplayer compatibility",
+      "repository": "Skooma-Breath/Fetcher-Starwind",
       "releaseTag": "fetcher-starwind-compat-patch-v2",
       "assetName": "fetcher-starwind-compat-patch-v2.zip",
       "targetPlugin": "StarwindRemasteredV1.15.esm",

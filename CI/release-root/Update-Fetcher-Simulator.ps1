@@ -139,10 +139,13 @@ function Assert-SafeArchivePaths {
 }
 
 function Get-GitHubRelease {
-    param([Parameter(Mandatory = $true)][string] $Tag)
+    param(
+        [Parameter(Mandatory = $true)][string] $Tag,
+        [string] $ReleaseRepository = $Repository
+    )
 
     $encodedTag = [Uri]::EscapeDataString($Tag)
-    $url = "$($GitHubApiBaseUrl.TrimEnd('/'))/repos/$Repository/releases/tags/$encodedTag"
+    $url = "$($GitHubApiBaseUrl.TrimEnd('/'))/repos/$ReleaseRepository/releases/tags/$encodedTag"
     $response = Invoke-WithRetry -Description "Reading GitHub release $Tag" -Action {
         Invoke-RestMethod -UseBasicParsing -Uri $url -Headers $headers
     }
@@ -156,7 +159,8 @@ function Get-ReleaseAsset {
     param(
         [Parameter(Mandatory = $true)] $Release,
         [Parameter(Mandatory = $true)][string] $AssetName,
-        [Parameter(Mandatory = $true)][string] $ReleaseTag
+        [Parameter(Mandatory = $true)][string] $ReleaseTag,
+        [string] $ReleaseRepository = $Repository
     )
 
     $assetMatches = @($Release.assets | Where-Object { [string]$_.name -eq $AssetName })
@@ -171,7 +175,7 @@ function Get-ReleaseAsset {
 
     return [pscustomobject]@{
         Name = $AssetName
-        Url = "$($GitHubDownloadBaseUrl.TrimEnd('/'))/$Repository/releases/download/$([Uri]::EscapeDataString($ReleaseTag))/$([Uri]::EscapeDataString($AssetName))"
+        Url = "$($GitHubDownloadBaseUrl.TrimEnd('/'))/$ReleaseRepository/releases/download/$([Uri]::EscapeDataString($ReleaseTag))/$([Uri]::EscapeDataString($AssetName))"
         Sha256 = $Matches[1].ToLowerInvariant()
         Digest = $digest.ToLowerInvariant()
         Size = [int64]$assetMatches[0].size
@@ -515,9 +519,15 @@ function Install-ClientModPatch {
         return
     }
 
-    $release = Get-GitHubRelease -Tag ([string]$Patch.releaseTag)
+    $patchRepository = $Repository
+    if ($Patch.PSObject.Properties.Name -contains "repository" -and
+        -not [string]::IsNullOrWhiteSpace([string]$Patch.repository)) {
+        $patchRepository = [string]$Patch.repository
+    }
+
+    $release = Get-GitHubRelease -Tag ([string]$Patch.releaseTag) -ReleaseRepository $patchRepository
     $asset = Get-ReleaseAsset -Release $release -AssetName ([string]$Patch.assetName) `
-        -ReleaseTag ([string]$Patch.releaseTag)
+        -ReleaseTag ([string]$Patch.releaseTag) -ReleaseRepository $patchRepository
     $cacheRoot = Join-Path $UpdateRoot ("patches\{0}" -f [string]$Patch.id)
     New-Item -ItemType Directory -Force -Path $cacheRoot | Out-Null
     $archivePath = Join-Path $cacheRoot ("{0}-{1}.zip" -f [string]$Patch.id, $asset.Sha256)
