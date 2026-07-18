@@ -6,19 +6,23 @@
 #include <set>
 #include <unordered_map>
 
+#include <osg/BufferIndexBinding>
+#include <osg/BufferTemplate>
+#include <osg/DispatchCompute>
 #include <osg/Group>
 #include <osg/Light>
 #include <osg/NodeVisitor>
 #include <osg/observer_ptr>
 
+#include <components/misc/constants.hpp>
+#include <components/resource/resourcesystem.hpp>
+#include <components/sceneutil/clusteredlighting.hpp>
 #include <components/sceneutil/nodecallback.hpp>
-
-#include "lightingmethod.hpp"
 
 namespace SceneUtil
 {
-    class LightBuffer;
-    struct StateSetGenerator;
+    template <class T>
+    using DoubleBuffer = std::array<T, 2>;
 
     class PPLightBuffer
     {
@@ -78,9 +82,9 @@ namespace SceneUtil
         }
 
     private:
-        std::array<int, 2> mIndex;
-        std::array<osg::ref_ptr<osg::Uniform>, 2> mUniformBuffers;
-        std::array<osg::ref_ptr<osg::Uniform>, 2> mUniformCount;
+        DoubleBuffer<int> mIndex;
+        DoubleBuffer<osg::ref_ptr<osg::Uniform>> mUniformBuffers;
+        DoubleBuffer<osg::ref_ptr<osg::Uniform>> mUniformCount;
     };
 
     /// LightSource managed by a LightManager.
@@ -97,7 +101,7 @@ namespace SceneUtil
     class LightSource : public osg::Node
     {
         // double buffered osg::Light's, since one of them may be in use by the draw thread at any given time
-        std::array<osg::ref_ptr<osg::Light>, 2> mLight;
+        DoubleBuffer<osg::ref_ptr<osg::Light>> mLight;
 
         // LightSource will affect objects within this radius
         float mRadius;
@@ -153,51 +157,24 @@ namespace SceneUtil
         size_t getLastAppliedFrame() const { return mLastAppliedFrame; }
     };
 
-    class UBOManager : public osg::StateAttribute
-    {
-    public:
-        UBOManager(int lightCount = 1);
-        UBOManager(const UBOManager& copy, const osg::CopyOp& copyop = osg::CopyOp::SHALLOW_COPY);
-
-        void releaseGLObjects(osg::State* state) const override;
-
-        int compare(const StateAttribute& sa) const override;
-
-        META_StateAttribute(SceneUtil, UBOManager, osg::StateAttribute::LIGHT)
-
-        void apply(osg::State& state) const override;
-
-        auto& getLightBuffer(size_t frameNum) { return mLightBuffers[frameNum % 2]; }
-
-    private:
-        std::string generateDummyShader(int maxLightsInScene);
-        void initSharedLayout(osg::GLExtensions* ext, int handle, unsigned int frame) const;
-
-        osg::ref_ptr<osg::Program> mDummyProgram;
-        mutable bool mInitLayout;
-        mutable std::array<osg::ref_ptr<LightBuffer>, 2> mLightBuffers;
-        mutable std::array<bool, 2> mDirty;
-        osg::ref_ptr<LightBuffer> mTemplate;
-    };
-
     struct LightSettings
     {
-        LightingMethod mLightingMethod = LightingMethod::FFP;
-        int mMaxLights = 0;
-        float mMaximumLightDistance = 0;
+        bool mClusteredLighting = false;
+        int mMaxLights = 8;
+        float mMaximumLightDistance = Constants::CellSizeInUnits;
         float mLightFadeStart = 0;
-        float mLightBoundsMultiplier = 0;
+        float mLightRadiusMultiplier = 1;
+        osg::Vec3i mClusteredGridSize = { 16, 8, 24 };
+        int mClusteredWorkGroupSize = 512;
     };
+
+    class LightManagerCullCallback;
 
     /// @brief Decorator node implementing the rendering of any number of LightSources that can be anywhere in the
     /// subgraph.
     class LightManager : public osg::Group
     {
     public:
-        static LightingMethod getLightingMethodFromString(const std::string& value);
-        /// Returns string as used in settings file, or the empty string if the method is undefined
-        static std::string getLightingMethodString(LightingMethod method);
-
         struct LightSourceTransform
         {
             LightSource* mLightSource;
@@ -208,6 +185,7 @@ namespace SceneUtil
         {
             LightSource* mLightSource;
             osg::BoundingSphere mViewBound;
+            bool mCulled = false;
         };
 
         using LightList = std::vector<const LightSourceViewBound*>;
@@ -215,7 +193,8 @@ namespace SceneUtil
 
         META_Node(SceneUtil, LightManager)
 
-        explicit LightManager(const LightSettings& settings = LightSettings{});
+        explicit LightManager(
+            const LightSettings& settings = LightSettings{}, Resource::ResourceSystem* resourceSystem = nullptr);
 
         LightManager(const LightManager& copy, const osg::CopyOp& copyop);
 
@@ -225,11 +204,6 @@ namespace SceneUtil
         /// the lightingMask for a much faster cull and rendering.
         void setLightingMask(size_t mask);
         size_t getLightingMask() const;
-
-        /// Set the first light index that should be used by this manager, typically the number of directional lights in
-        /// the scene.
-        void setStartLight(int start);
-        int getStartLight() const;
 
         /// Internal use only, called automatically by the LightManager's UpdateCallback
         void update(size_t frameNum);
@@ -246,24 +220,11 @@ namespace SceneUtil
         void setSunlight(osg::ref_ptr<osg::Light> sun);
         osg::ref_ptr<osg::Light> getSunlight();
 
-        bool usingFFP() const;
-
-        LightingMethod getLightingMethod() const;
+        bool getClusteredLighting() const;
 
         int getMaxLights() const;
 
-        int getMaxLightsInScene() const;
-
-        auto& getDummies() { return mDummies; }
-
-        auto& getLightIndexMap(size_t frameNum) { return mLightIndexMaps[frameNum % 2]; }
-
-        auto& getUBOManager() { return mUBOManager; }
-
-        osg::Matrixf getSunlightBuffer(size_t frameNum) const { return mSunlightBuffers[frameNum % 2]; }
-        void setSunlightBuffer(const osg::Matrixf& buffer, size_t frameNum) { mSunlightBuffers[frameNum % 2] = buffer; }
-
-        SupportedMethods getSupportedLightingMethods() { return mSupported; }
+        bool isClusteredSupported() { return mSupportsClustered; }
 
         std::map<std::string, std::string> getLightDefines() const;
 
@@ -272,58 +233,41 @@ namespace SceneUtil
         /// Not thread safe, it is the responsibility of the caller to stop/start threading on the viewer
         void updateMaxLights(int maxLights);
 
-        osg::ref_ptr<osg::Uniform> generateLightBufferUniform(const osg::Matrixf& sun);
+        osg::ref_ptr<osg::Uniform> generateLightBufferUniform();
 
         // Whether to collect main scene camera points lights into a buffer to be later sent to postprocessing shaders
         void setCollectPPLights(bool enabled);
 
         std::shared_ptr<PPLightBuffer> getPPLightsBuffer() { return mPPLightBuffer; }
 
+        float getPointLightRadiusMultiplier() const { return mPointLightRadiusMultiplier; }
+
+        float getPointLightFadeEnd() const { return mPointLightFadeEnd; }
+
+        void enableClustered(bool enabled);
+
+        Resource::ResourceSystem* getResourceSystem() { return mResourceSystem; }
+
     private:
-        void initFFP(int targetLights);
         void initPerObjectUniform(int targetLights);
-        void initSingleUBO(int targetLights);
+        void initClustered();
 
         void updateSettings(float lightBoundsMultiplier, float maximumLightDistance, float lightFadeStart);
 
-        void setLightingMethod(LightingMethod method);
         void setMaxLights(int value);
 
-        void updateGPUPointLight(
-            int index, LightSource* lightSource, size_t frameNum, const osg::RefMatrix* viewMatrix);
+        Resource::ResourceSystem* mResourceSystem;
 
         std::vector<LightSourceTransform> mLights;
 
         using LightSourceViewBoundCollection = std::vector<LightSourceViewBound>;
         std::map<osg::observer_ptr<osg::Camera>, LightSourceViewBoundCollection> mLightsInViewSpace;
 
-        using LightIdList = std::vector<int>;
-        struct HashLightIdList
-        {
-            size_t operator()(const LightIdList&) const;
-        };
-        using LightStateSetMap = std::unordered_map<LightIdList, osg::ref_ptr<osg::StateSet>, HashLightIdList>;
-        LightStateSetMap mStateSetCache[2];
-
-        std::vector<osg::ref_ptr<osg::StateAttribute>> mDummies;
-
-        int mStartLight;
-
         size_t mLightingMask;
 
         osg::ref_ptr<osg::Light> mSun;
 
-        osg::Matrixf mSunlightBuffers[2];
-
-        // < Light ID , Buffer Index >
-        using LightIndexMap = std::unordered_map<int, int>;
-        LightIndexMap mLightIndexMaps[2];
-
-        std::unique_ptr<StateSetGenerator> mStateSetGenerator;
-
-        osg::ref_ptr<UBOManager> mUBOManager;
-
-        LightingMethod mLightingMethod;
+        bool mClusteredLighting;
 
         float mPointLightRadiusMultiplier;
         float mPointLightFadeEnd;
@@ -331,9 +275,49 @@ namespace SceneUtil
 
         int mMaxLights;
 
-        SupportedMethods mSupported;
+        bool mSupportsClustered;
 
         std::shared_ptr<PPLightBuffer> mPPLightBuffer;
+
+        osg::ref_ptr<LightManagerCullCallback> mCullCallback;
+    };
+
+    class LightManagerCullCallback
+        : public SceneUtil::NodeCallback<LightManagerCullCallback, LightManager*, osgUtil::CullVisitor*>
+    {
+    public:
+        LightManagerCullCallback(const LightSettings& settings = LightSettings{});
+
+        void operator()(LightManager* node, osgUtil::CullVisitor* cv);
+
+        void reset() { mCache.clear(); }
+
+        struct ViewData
+        {
+            DoubleBuffer<osg::Matrixd> mProjection;
+            DoubleBuffer<osg::ref_ptr<osg::BufferTemplate<std::vector<PointLight>>>> mGPULights;
+            DoubleBuffer<osg::ref_ptr<osg::StateSet>> mStateSet;
+            DoubleBuffer<osg::ref_ptr<osg::ShaderStorageBufferBinding>> mPointLightSSBB;
+            DoubleBuffer<osg::ref_ptr<osg::ShaderStorageBufferBinding>> mLightGridSSBB;
+            DoubleBuffer<osg::ref_ptr<osg::ShaderStorageBufferBinding>> mLightIndexListSSBB;
+            DoubleBuffer<osg::ref_ptr<osg::ShaderStorageBufferBinding>> mLightIndexCounterSSBB;
+            DoubleBuffer<osg::ref_ptr<osg::DispatchCompute>> mClusterComputeNode;
+            DoubleBuffer<osg::ref_ptr<osg::DispatchCompute>> mCullComputeNode;
+            osg::ref_ptr<osg::ShaderStorageBufferBinding> mClusterSSBB;
+
+            float clusterFar = 1.f;
+            size_t mLastFrameNumber = 0;
+        };
+
+        std::unordered_map<osg::Camera*, ViewData> mCache;
+
+        const int mGridSizeX;
+        const int mGridSizeY;
+        const int mGridSizeZ;
+        const int mNumClusters;
+        const int mWorkGroupSize;
+
+        const int mMaxLightsPerCluster = 512;
     };
 
     /// To receive lighting, objects must be decorated by a LightListCallback. Light list callbacks must be added via
@@ -377,9 +361,10 @@ namespace SceneUtil
         std::set<SceneUtil::LightSource*> mIgnoredLightSources;
     };
 
-    void configureStateSetSunOverride(LightManager* lightManager, const osg::Light* light, osg::StateSet* stateset,
+    void configureStateSetSunOverride(const osg::Light* light, osg::StateSet* stateset,
         int mode = osg::StateAttribute::ON | osg::StateAttribute::OVERRIDE);
 
+    void configureSunAmbientOverride(const osg::Vec4f& ambient, osg::StateSet* stateset);
 }
 
 #endif

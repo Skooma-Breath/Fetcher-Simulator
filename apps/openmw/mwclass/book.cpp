@@ -38,8 +38,8 @@ namespace
         if (!record || !Misc::StringUtils::ciStartsWith(record->mId.serializeText(), "sw_"))
             return false;
 
-        return Misc::StringUtils::ciFind(record->mModel, "datapad.nif") != std::string_view::npos
-            || Misc::StringUtils::ciFind(record->mIcon, "datapad") != std::string_view::npos
+        return Misc::StringUtils::ciFind(record->mModel.getOriginal(), "datapad.nif") != std::string_view::npos
+            || Misc::StringUtils::ciFind(record->mIcon.getOriginal(), "datapad") != std::string_view::npos
             || Misc::StringUtils::ciFind(record->mName, "datapad") != std::string_view::npos;
     }
 }
@@ -60,7 +60,7 @@ namespace MWClass
         }
     }
 
-    std::string_view Book::getModel(const MWWorld::ConstPtr& ptr) const
+    VFS::Path::NormalizedView Book::getModel(const MWWorld::ConstPtr& ptr) const
     {
         return getClassModel<ESM::Book>(ptr);
     }
@@ -116,11 +116,11 @@ namespace MWClass
         return isStarwindDatapad(ptr) ? datapadSound : bookSound;
     }
 
-    const std::string& Book::getInventoryIcon(const MWWorld::ConstPtr& ptr) const
+    VFS::Path::NormalizedView Book::getInventoryIcon(const MWWorld::ConstPtr& ptr) const
     {
         const MWWorld::LiveCellRef<ESM::Book>* ref = ptr.get<ESM::Book>();
 
-        return ref->mBase->mIcon;
+        return ref->mBase->mIcon.getNormalized();
     }
 
     MWGui::ToolTipInfo Book::getToolTipInfo(const MWWorld::ConstPtr& ptr, int count) const
@@ -130,7 +130,7 @@ namespace MWClass
         MWGui::ToolTipInfo info;
         std::string_view name = getName(ptr);
         info.caption = MyGUI::TextIterator::toTagsString(MyGUI::UString(name)) + MWGui::ToolTips::getCountString(count);
-        info.icon = ref->mBase->mIcon;
+        info.icon = ref->mBase->mIcon.getOriginal();
 
         std::string text;
 

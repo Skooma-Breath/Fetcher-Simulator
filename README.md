@@ -7,6 +7,12 @@ OpenMW is an open-source open-world RPG engine for playing Morrowind by Bethesda
 
 This fork includes multiplayer work based on and derived from [TES3MP](https://github.com/TES3MP/TES3MP), adapted for a newer OpenMW codebase and a GameNetworkingSockets-based transport instead of TES3MP's original RakNet layer.
 
+* Version: 0.52.0
+* License: GPLv3 (see [LICENSE](https://gitlab.com/OpenMW/openmw/-/raw/master/LICENSE) for more information)
+* Website: https://www.openmw.org
+* IRC: #openmw on irc.libera.chat
+* Discord: https://discord.gg/bWuqq2e
+
 TES3MP has not had a public release since 2022, and upstream OpenMW multiplayer is still set for 2090, so after years of playing and scripting in TES3MP on and off, I decided to:
 
 ![Shia LaBeouf JUST DO IT over Fetcher Simulator gameplay](docs/media/fetcher-simulator-just-do-it.gif)

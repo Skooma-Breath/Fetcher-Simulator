@@ -58,10 +58,16 @@ namespace Files
                 }
                 if (result == ERROR_SUCCESS && len % sizeof(wchar_t) == 0)
                 {
-                    buffer.resize(len / sizeof(wchar_t));
-                    while (!buffer.empty() && buffer.back() == L'\0')
-                        buffer.pop_back();
-                    return std::filesystem::path(buffer);
+                    // This should always be true. Note that we don't need to care above because of the trailing \0
+                    if (len % sizeof(wchar_t) == 0)
+                    {
+                        std::wstring_view view(buffer.data(), len / sizeof(wchar_t));
+                        // Strip trailing \0 because the path constructor won't do it for us
+                        const auto pos = view.find(L'\0');
+                        if (pos != std::wstring_view::npos)
+                            view = view.substr(0, pos);
+                        return std::filesystem::path(view);
+                    }
                 }
             }
             return {};

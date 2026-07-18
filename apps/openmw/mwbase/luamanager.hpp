@@ -11,6 +11,7 @@
 #include <SDL_events.h>
 
 #include "../mwgui/mode.hpp"
+#include "../mwmechanics/attacktype.hpp"
 #include "../mwmechanics/damagesourcetype.hpp"
 #include "../mwrender/animationpriority.hpp"
 #include <components/sdlutil/events.hpp>
@@ -98,6 +99,7 @@ namespace MWBase
         virtual void questUpdated(const ESM::RefId& questId, int stage) = 0;
         // `arg` is either forwarded from MWGui::pushGuiMode or empty
         virtual void uiModeChanged(const MWWorld::Ptr& arg) = 0;
+        virtual void viewportResized(int width, int height) = 0;
         virtual void savePermanentStorage(const std::filesystem::path& userConfigPath) = 0;
         virtual void prepareMultiplayerPlayerStorage() = 0;
         virtual bool bindMultiplayerPlayerStorage(std::string_view storageNamespace,
@@ -146,7 +148,7 @@ namespace MWBase
             float mSideMovement = 0;
             float mPitchChange = 0;
             float mYawChange = 0;
-            int mUse = 0;
+            MWMechanics::AttackType mUse = MWMechanics::AttackType::NoAttack;
         };
 
         virtual ActorControls* getActorControls(const MWWorld::Ptr&) const = 0;

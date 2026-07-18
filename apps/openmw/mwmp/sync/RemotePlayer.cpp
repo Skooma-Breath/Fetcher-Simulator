@@ -2275,11 +2275,11 @@ namespace mwmp
                 MWRender::Animation* anim = world->getAnimation(mNpcPtr);
                 if (anim && handsStatic && !handsStatic->mModel.empty())
                 {
-                    const VFS::Path::Normalized model = Misc::ResourceHelpers::correctMeshPath(
-                        VFS::Path::Normalized(handsStatic->mModel));
+                    const VFS::Path::Normalized model
+                        = Misc::ResourceHelpers::correctMeshPath(handsStatic->mModel.getNormalized());
 
-                    anim->addEffect(model.value(), "", false, "Bip01 L Hand", lastEffect->mParticle);
-                    anim->addEffect(model.value(), "", false, "Bip01 R Hand", lastEffect->mParticle);
+                    anim->addEffect(model.value(), "", false, "Bip01 L Hand", lastEffect->mParticle.getOriginal());
+                    anim->addEffect(model.value(), "", false, "Bip01 R Hand", lastEffect->mParticle.getOriginal());
                 }
 
                 MWMechanics::CastSpell cast(mNpcPtr, MWWorld::Ptr(), false, false);

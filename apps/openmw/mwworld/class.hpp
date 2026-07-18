@@ -260,7 +260,7 @@ namespace MWWorld
         virtual float getArmorRating(const MWWorld::Ptr& ptr, bool useLuaInterfaceIfAvailable = false) const;
         ///< @return combined armor rating of this actor
 
-        virtual const std::string& getInventoryIcon(const MWWorld::ConstPtr& ptr) const;
+        virtual VFS::Path::NormalizedView getInventoryIcon(const MWWorld::ConstPtr& ptr) const;
         ///< Return name of inventory icon.
 
         virtual ESM::RefId getEnchantment(const MWWorld::ConstPtr& ptr) const;
@@ -278,14 +278,15 @@ namespace MWWorld
 
         virtual int getServices(const MWWorld::ConstPtr& actor) const;
 
-        virtual std::string_view getModel(const MWWorld::ConstPtr& ptr) const;
+        virtual VFS::Path::NormalizedView getModel(const MWWorld::ConstPtr& ptr) const;
 
         virtual VFS::Path::Normalized getCorrectedModel(const MWWorld::ConstPtr& ptr) const;
 
         virtual bool useAnim() const;
         ///< Whether or not to use animated variant of model (default false)
 
-        virtual void getModelsToPreload(const MWWorld::ConstPtr& ptr, std::vector<std::string_view>& models) const;
+        virtual void getModelsToPreload(
+            const MWWorld::ConstPtr& ptr, std::vector<VFS::Path::NormalizedView>& models) const;
         ///< Get a list of models to preload that this object may use (directly or indirectly). default implementation:
         ///< list getModel().
 

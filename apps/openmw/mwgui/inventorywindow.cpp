@@ -60,8 +60,8 @@ namespace
         if (!record || !Misc::StringUtils::ciStartsWith(record->mId.serializeText(), "sw_"))
             return false;
 
-        return Misc::StringUtils::ciFind(record->mModel, "datapad.nif") != std::string_view::npos
-            || Misc::StringUtils::ciFind(record->mIcon, "datapad") != std::string_view::npos
+        return Misc::StringUtils::ciFind(record->mModel.getOriginal(), "datapad.nif") != std::string_view::npos
+            || Misc::StringUtils::ciFind(record->mIcon.getOriginal(), "datapad") != std::string_view::npos
             || Misc::StringUtils::ciFind(record->mName, "datapad") != std::string_view::npos;
     }
 

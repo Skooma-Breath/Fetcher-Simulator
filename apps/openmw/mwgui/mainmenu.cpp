@@ -85,6 +85,12 @@ namespace MWGui
         mVideo->setVisible(true);
     }
 
+    void MenuVideo::commitFrame()
+    {
+        if (mVideo)
+            mVideo->commitFrame();
+    }
+
     MenuVideo::~MenuVideo()
     {
         mRunning = false;
@@ -117,6 +123,8 @@ namespace MWGui
 
         updateMenu();
     }
+
+    MainMenu::~MainMenu() = default;
 
     void MainMenu::onResChange(int w, int h)
     {
@@ -335,6 +343,18 @@ namespace MWGui
         }
     }
 
+    void MainMenu::onFrame(float dt)
+    {
+        if (mVideo)
+            mVideo->commitFrame();
+#ifdef BUILD_MULTIPLAYER
+        if (mCharSelectDialog && mCharSelectDialog->isVisible())
+            mCharSelectDialog->onFrame(dt);
+#else
+        static_cast<void>(dt);
+#endif
+    }
+
     bool MainMenu::exit()
     {
         if (MWBase::Environment::get().getWindowManager()->isSettingsWindowVisible())
@@ -346,15 +366,7 @@ namespace MWGui
         return MWBase::Environment::get().getStateManager()->getState() == MWBase::StateManager::State_Running;
     }
 
-    void MainMenu::onFrame(float dt)
-    {
-#ifdef BUILD_MULTIPLAYER
-        if (mCharSelectDialog && mCharSelectDialog->isVisible())
-            mCharSelectDialog->onFrame(dt);
-#endif
-    }
-
-        void MainMenu::updateMenu()
+    void MainMenu::updateMenu()
     {
         setCoord(0, 0, mWidth, mHeight);
 

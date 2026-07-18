@@ -53,7 +53,7 @@ target_compile_definitions(openmw-server PRIVATE
 target_link_libraries(openmw-server
     components
     GameNetworkingSockets::GameNetworkingSockets_s
-    SQLite::SQLite3
+    SQLite3::SQLite3
     ${LUA_LIBRARIES}
 )
 

@@ -45,25 +45,25 @@ else {
 }
 
 if ($null -eq $scriptPath) {
-    Write-Host "Zerkish Hotkeys Improved is not installed; skipping its multiplayer compatibility fix."
+    Write-Host "Zerkish Hotkeys Improved is not installed; no legacy compatibility edit needs removal."
     return
 }
 
 $marker = "Fetcher multiplayer compatibility: suppress the first-time modal during character creation."
 $source = [IO.File]::ReadAllText($scriptPath)
-if ($source.Contains($marker)) {
-    Write-Host "Zerkish Hotkeys Improved character-creation popup is already disabled."
+if (-not $source.Contains($marker)) {
+    Write-Host "Zerkish Hotkeys Improved has no legacy Fetcher compatibility edit."
     return
 }
 
 $original = "if not (ZHISaveData.onCloseQuickKeyMenuFirstTimeFlag or sDisableFirstTimeNotification) then"
 $replacement = "if false and not (ZHISaveData.onCloseQuickKeyMenuFirstTimeFlag or sDisableFirstTimeNotification) then -- $marker"
-$occurrences = ([regex]::Matches($source, [regex]::Escape($original))).Count
+$occurrences = ([regex]::Matches($source, [regex]::Escape($replacement))).Count
 if ($occurrences -ne 1) {
-    throw "Expected one compatible ZHI first-time notification guard, found $occurrences. The installed mod version may need a new compatibility fix."
+    throw "Expected one legacy Fetcher ZHI edit, found $occurrences. Refusing to modify an unexpected script."
 }
 
-$updated = $source.Replace($original, $replacement)
+$updated = $source.Replace($replacement, $original)
 $temporaryPath = "$scriptPath.$([Guid]::NewGuid().ToString('N')).tmp"
 try {
     $encoding = [Text.UTF8Encoding]::new($source.StartsWith([char]0xFEFF))
@@ -76,5 +76,5 @@ finally {
     }
 }
 
-Write-Host "Disabled the Zerkish Hotkeys Improved first-time character-creation popup:"
+Write-Host "Removed the legacy Fetcher edit from Zerkish Hotkeys Improved:"
 Write-Host "  $scriptPath"

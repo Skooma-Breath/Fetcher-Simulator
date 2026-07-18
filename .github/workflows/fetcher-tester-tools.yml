@@ -15,30 +15,14 @@ jobs:
   publish:
     runs-on: windows-2022
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
-      - name: Build digest-backed compatibility and tester tools packages
+      - name: Build digest-backed tester tools package
         shell: pwsh
         run: |
-          .\CI\zhi-patch\Build-FetcherZhiPatch.ps1 `
-            -OutputDirectory "${{ github.workspace }}\release-assets" `
-            -SourceCommit "${{ github.sha }}"
           .\CI\Build-FetcherTesterTools.ps1 `
             -OutputDir "${{ github.workspace }}\release-assets" `
             -SourceCommit "${{ github.sha }}"
-
-      - name: Replace stable ZHI compatibility patch release
-        shell: pwsh
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          .\CI\Publish-StableGitHubRelease.ps1 `
-            -Repository "${{ github.repository }}" `
-            -Tag "fetcher-zhi-compat-patch-v1" `
-            -TargetCommit "${{ github.sha }}" `
-            -Title "Fetcher ZHI Multiplayer Compatibility Patch v1" `
-            -Notes "Disables Zerkish Hotkeys Improved's first-time modal because it can trap multiplayer users during character creation." `
-            -Assets "${{ github.workspace }}\release-assets\fetcher-zhi-compat-patch-v1.zip"
 
       - name: Replace stable tester tools prerelease
         shell: pwsh

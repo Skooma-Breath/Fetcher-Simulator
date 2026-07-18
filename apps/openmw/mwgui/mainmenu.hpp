@@ -18,12 +18,14 @@ namespace VFS
     class Manager;
 }
 
+#ifdef BUILD_MULTIPLAYER
 namespace mwmp
 {
+    class CharacterSelectDialog;
     class ServerAddressDialog;
     class ServerBrowserDialog;
-    class CharacterSelectDialog;
 }
+#endif
 
 namespace MWGui
 {
@@ -42,6 +44,7 @@ namespace MWGui
     public:
         MenuVideo(const VFS::Manager* vfs);
         void resize(int w, int h);
+        void commitFrame();
         ~MenuVideo();
     };
 
@@ -54,6 +57,7 @@ namespace MWGui
 
     public:
         MainMenu(int w, int h, const VFS::Manager* vfs, const std::string& versionDescription);
+        ~MainMenu() override;
 
         void onResChange(int w, int h) override;
         bool onControllerButtonEvent(const SDL_ControllerButtonEvent& arg) override;
@@ -77,17 +81,21 @@ namespace MWGui
 
         void onButtonClicked(MyGUI::Widget* sender);
         void onNewGameConfirmed();
+#ifdef BUILD_MULTIPLAYER
         void onMainMenuConfirmed();
+#endif
         void onExitConfirmed();
 
         void showBackground(bool show);
 
         void updateMenu();
 
-        std::unique_ptr<SaveGameDialog>           mSaveGameDialog;
-        std::unique_ptr<mwmp::ServerAddressDialog>   mServerAddressDialog;
-        std::unique_ptr<mwmp::ServerBrowserDialog>   mServerBrowserDialog;
+        std::unique_ptr<SaveGameDialog> mSaveGameDialog;
+#ifdef BUILD_MULTIPLAYER
+        std::unique_ptr<mwmp::ServerAddressDialog> mServerAddressDialog;
+        std::unique_ptr<mwmp::ServerBrowserDialog> mServerBrowserDialog;
         std::unique_ptr<mwmp::CharacterSelectDialog> mCharSelectDialog;
+#endif
     };
 
 }

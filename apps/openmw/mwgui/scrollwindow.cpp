@@ -48,8 +48,8 @@ namespace
         if (id.rfind("sw_", 0) != 0)
             return false;
 
-        return scrollContainsCaseInsensitive(record->mModel, "datapad.nif")
-            || scrollContainsCaseInsensitive(record->mIcon, "datapad")
+        return scrollContainsCaseInsensitive(record->mModel.getOriginal(), "datapad.nif")
+            || scrollContainsCaseInsensitive(record->mIcon.getOriginal(), "datapad")
             || scrollContainsCaseInsensitive(record->mName, "datapad");
     }
 }
@@ -97,8 +97,8 @@ namespace MWGui
             const ESM::Book* debugRecord = scroll.get<ESM::Book>()->mBase;
             Log(Debug::Info) << "[StarwindDatapad] ScrollWindow::setPtr id=" << debugRecord->mId.serializeText()
                              << " name=" << debugRecord->mName
-                             << " model=" << debugRecord->mModel
-                             << " icon=" << debugRecord->mIcon
+                             << " model=" << debugRecord->mModel.getOriginal()
+                             << " icon=" << debugRecord->mIcon.getOriginal()
                              << " isDatapad=" << (starwindDatapad ? "true" : "false")
                              << " texture=" << scrollTexture;
         }

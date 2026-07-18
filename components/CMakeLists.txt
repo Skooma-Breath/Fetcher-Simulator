@@ -137,10 +137,10 @@ add_component_dir (shader
     )
 
 add_component_dir (sceneutil
-    clone attach visitor util statesetupdater controller skeleton riggeometry morphgeometry lightcontroller
+    clone attach visitor util statesetupdater stateupdater controller skeleton riggeometry morphgeometry lightcontroller
     lightmanager lightutil positionattitudetransform workqueue pathgridutil waterutil writescene serialize optimizer
     detourdebugdraw navmesh agentpath animblendrules shadow mwshadowtechnique recastmesh shadowsbin osgacontroller rtt
-    screencapture depth color riggeometryosgaextension extradata unrefqueue lightcommon lightingmethod clearcolor
+    screencapture depth color riggeometryosgaextension extradata unrefqueue lightcommon clearcolor
     cullsafeboundsvisitor keyframe nodecallback textkeymap glextensions
     )
 
@@ -149,7 +149,7 @@ add_component_dir (nif
     )
 
 add_component_dir (nifosg
-    nifloader controller particle matrixtransform fog
+    autotransform nifloader controller particle matrixtransform fog
     )
 
 add_component_dir (nifbullet
@@ -586,6 +586,13 @@ endif()
 
 include_directories(${BULLET_INCLUDE_DIRS} ${CMAKE_CURRENT_BINARY_DIR})
 
+if (OPENMW_USE_SYSTEM_SQLITE3)
+    find_package(SQLite3 REQUIRED)
+    if(NOT TARGET SQLite3::SQLite3) # CMake < 4.3
+        add_library(SQLite3::SQLite3 ALIAS SQLite::SQLite3)
+    endif()
+endif()
+
 add_library(components STATIC ${COMPONENT_FILES})
 
 if (ANDROID)
@@ -597,8 +604,6 @@ if (APPLE)
 endif()
 
 target_link_libraries(components
-    ${COLLADA_DOM_LIBRARIES}
-
     # CMake's built-in OSG finder does not use pkgconfig, so we have to
     # manually ensure the order is correct for inter-library dependencies.
     # This only makes a difference with `-DOPENMW_USE_SYSTEM_OSG=ON -DOSG_STATIC=ON`.
@@ -628,7 +633,7 @@ target_link_libraries(components
     RecastNavigation::Recast
 
     Base64
-    SQLite::SQLite3
+    SQLite3::SQLite3
     smhasher
     ${ICU_LIBRARIES}
     ZLIB::ZLIB
@@ -709,7 +714,7 @@ if(OSG_STATIC)
     # We use --whole-archive because OSG plugins use registration.
     get_whole_archive_options(_opts ${_osg_plugins_static_files})
     target_link_options(components_osg_plugins INTERFACE ${_opts})
-    target_link_libraries(components components_osg_plugins)
+    target_link_libraries(components components_osg_plugins ${COLLADA_DOM_LIBRARIES})
 
     if(OPENMW_USE_SYSTEM_OSG)
         # OSG plugin pkgconfig files are missing these dependencies.

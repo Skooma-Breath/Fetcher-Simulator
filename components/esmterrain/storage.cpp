@@ -17,6 +17,7 @@
 #include <components/misc/resourcehelpers.hpp>
 #include <components/misc/strings/algorithm.hpp>
 #include <components/vfs/manager.hpp>
+#include <components/vfs/pathutil.hpp>
 
 #include "gridsampling.hpp"
 
@@ -372,12 +373,13 @@ namespace ESMTerrain
 
     VFS::Path::Normalized Storage::getTextureName(UniqueTextureId id)
     {
-        std::string_view texture = "_land_default.dds";
+        constexpr VFS::Path::NormalizedView defaultTexture("_land_default.dds");
+        VFS::Path::NormalizedView texture = defaultTexture;
         if (id.first != 0)
         {
             // NB: All vtex ids are +1 compared to the ltex ids
-            const std::string* ltex = getLandTexture(id.first - 1, id.second);
-            if (ltex)
+            const VFS::Path::Normalized* ltex = getLandTexture(id.first - 1, id.second);
+            if (ltex != nullptr)
                 texture = *ltex;
             else
             {
@@ -386,7 +388,7 @@ namespace ESMTerrain
             }
         }
         // this is needed due to MWs messed up texture handling
-        return Misc::ResourceHelpers::correctTexturePath(VFS::Path::Normalized(texture), *mVFS);
+        return Misc::ResourceHelpers::correctTexturePath(texture, *mVFS);
     }
 
     void Storage::getEsm4Blendmaps(float chunkSize, const osg::Vec2f& chunkCenter, ImageVector& blendmaps,
@@ -467,7 +469,7 @@ namespace ESMTerrain
                     }
                     size_t index = static_cast<size_t>((starty + y) * blendmapSize + startx + x);
                     auto delta = static_cast<unsigned char>(std::clamp(static_cast<int>(v.opacity * 255.f), 0, 255));
-                    baseBlendmap[index] = std::max<unsigned char>(0, baseBlendmap[index] - delta);
+                    baseBlendmap[index] -= std::min(baseBlendmap[index], delta);
                     layerBlendmap[index] = delta;
                 }
             }

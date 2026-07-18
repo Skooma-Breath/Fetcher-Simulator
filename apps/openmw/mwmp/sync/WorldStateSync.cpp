@@ -24,6 +24,7 @@
 #include "../../mwbase/environment.hpp"
 #include "../../mwbase/statemanager.hpp"
 #include "../../mwbase/world.hpp"
+#include "../../mwlua/magictypebindings.hpp"
 #include "../../mwlua/types/types.hpp"
 #include "../../mwworld/cell.hpp"
 #include "../../mwworld/cellstore.hpp"

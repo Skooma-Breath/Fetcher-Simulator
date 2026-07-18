@@ -18,6 +18,14 @@
 #include "../mwbase/environment.hpp"
 #include "../mwbase/windowmanager.hpp"
 
+namespace sol
+{
+    template <>
+    struct is_automagical<LuaUi::Layer> : std::false_type
+    {
+    };
+}
+
 namespace MWLua
 {
     namespace
@@ -126,11 +134,12 @@ namespace MWLua
         };
         api["content"] = LuaUi::loadContentConstructor(context.mLua);
 
-        api["create"] = [luaManager = context.mLuaManager, menu](const sol::table& layout) {
-            auto element = LuaUi::Element::make(layout, menu);
-            luaManager->addAction([element] { element->create(); }, "Create UI");
-            return element;
-        };
+        api["create"]
+            = [luaManager = context.mLuaManager, menu](const sol::table& layout, sol::optional<sol::table> options) {
+                  auto element = LuaUi::Element::make(layout, menu, options);
+                  luaManager->addAction([element] { element->create(); }, "Create UI");
+                  return element;
+              };
 
         api["updateAll"] = [luaManager = context.mLuaManager, menu]() {
             LuaUi::Element::forEach(menu, [](LuaUi::Element* e) {
@@ -302,6 +311,17 @@ namespace MWLua
     {
         if (context.initializeOnce("openmw_ui_usertypes"))
         {
+            auto textureResource = context.sol().new_usertype<LuaUi::TextureResource>("TextureResource");
+            textureResource[sol::meta_function::to_string] = [](const LuaUi::TextureResource& resource) {
+                return "TextureResource[" + resource.mPath.value() + "]";
+            };
+            textureResource["path"] = sol::readonly_property(
+                [](const LuaUi::TextureResource& resource) -> std::string_view { return resource.mPath; });
+            textureResource["offset"]
+                = sol::readonly_property([](const LuaUi::TextureResource& resource) { return resource.mOffset; });
+            textureResource["size"]
+                = sol::readonly_property([](const LuaUi::TextureResource& resource) { return resource.mSize; });
+
             auto uiElement = context.sol().new_usertype<LuaUi::Element>("UiElement");
             uiElement[sol::meta_function::to_string] = [](const LuaUi::Element& element) {
                 std::stringstream res;

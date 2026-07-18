@@ -138,52 +138,6 @@ namespace MWWorld
             return {};
         }
 
-        std::vector<std::pair<std::string_view, ESM::Variant>> generateDefaultGameSettings()
-        {
-            return {
-                // Companion (tribunal)
-                { "sCompanionShare", ESM::Variant("Companion Share") },
-                { "sCompanionWarningMessage", ESM::Variant("Warning message") },
-                { "sCompanionWarningButtonOne", ESM::Variant("Button 1") },
-                { "sCompanionWarningButtonTwo", ESM::Variant("Button 2") },
-                { "sProfitValue", ESM::Variant("Profit Value") },
-                { "sTeleportDisabled", ESM::Variant("Teleport disabled") },
-                { "sLevitateDisabled", ESM::Variant("Levitate disabled") },
-                // Missing in unpatched MW 1.0
-                { "sDifficulty", ESM::Variant("Difficulty") },
-                { "fDifficultyMult", ESM::Variant(5.f) },
-                { "sAuto_Run", ESM::Variant("Auto Run") },
-                { "sServiceRefusal", ESM::Variant("Service Refusal") },
-                { "sNeedOneSkill", ESM::Variant("Need one skill") },
-                { "sNeedTwoSkills", ESM::Variant("Need two skills") },
-                { "sEasy", ESM::Variant("Easy") },
-                { "sHard", ESM::Variant("Hard") },
-                { "sDeleteNote", ESM::Variant("Delete Note") },
-                { "sEditNote", ESM::Variant("Edit Note") },
-                { "sAdmireSuccess", ESM::Variant("Admire Success") },
-                { "sAdmireFail", ESM::Variant("Admire Fail") },
-                { "sIntimidateSuccess", ESM::Variant("Intimidate Success") },
-                { "sIntimidateFail", ESM::Variant("Intimidate Fail") },
-                { "sTauntSuccess", ESM::Variant("Taunt Success") },
-                { "sTauntFail", ESM::Variant("Taunt Fail") },
-                { "sBribeSuccess", ESM::Variant("Bribe Success") },
-                { "sBribeFail", ESM::Variant("Bribe Fail") },
-                { "fNPCHealthBarTime", ESM::Variant(5.f) },
-                { "fNPCHealthBarFade", ESM::Variant(1.f) },
-                { "fFleeDistance", ESM::Variant(3000.f) },
-                { "sMaxSale", ESM::Variant("Max Sale") },
-                { "sAnd", ESM::Variant("and") },
-                // Werewolf (BM)
-                { "fWereWolfRunMult", ESM::Variant(1.3f) },
-                { "fWereWolfSilverWeaponDamageMult", ESM::Variant(2.f) },
-                { "iWerewolfFightMod", ESM::Variant(100) },
-                { "iWereWolfFleeMod", ESM::Variant(100) },
-                { "iWereWolfLevelToAttack", ESM::Variant(20) },
-                { "iWereWolfBounty", ESM::Variant(1000) },
-                { "fCombatDistanceWerewolfMod", ESM::Variant(0.3f) },
-            };
-        }
-
         std::vector<std::pair<GlobalVariableName, ESM::Variant>> generateDefaultGlobals()
         {
             return {
@@ -550,18 +504,6 @@ namespace MWWorld
 
     void World::ensureNeededRecords()
     {
-        for (const auto& [id, value] : generateDefaultGameSettings())
-        {
-            if (mStore.get<ESM::GameSetting>().search(id) == nullptr)
-            {
-                ESM::GameSetting record;
-                record.mId = ESM::RefId::stringRefId(id);
-                record.mValue = value;
-                record.mRecordFlags = 0;
-                mStore.insertStatic(record);
-            }
-        }
-
         for (const auto& [name, value] : generateDefaultGlobals())
         {
             if (mStore.get<ESM::Global>().search(ESM::RefId::stringRefId(name.getValue())) == nullptr)
@@ -915,6 +857,11 @@ namespace MWWorld
     int World::getSecundaPhase() const
     {
         return mRendering->skyGetSecundaPhase();
+    }
+
+    std::vector<MWWorld::Moon> World::getCurrentMoons() const
+    {
+        return mWeatherManager->getCurrentMoons(getTimeStamp());
     }
 
     void World::setMoonColour(bool red)
@@ -1809,14 +1756,17 @@ namespace MWWorld
         MWWorld::Ptr focusObject;
         MWRender::RenderingManager::RayResult rayToObject;
 
+        const bool ignoreTerrain = !Settings::game().mTerrainObstructsFocus;
+
         if (MWBase::Environment::get().getWindowManager()->isGuiMode())
         {
             float x, y;
             MWBase::Environment::get().getWindowManager()->getMousePosition(x, y);
-            rayToObject = mRendering->castCameraToViewportRay(x, y, maxDistance, ignorePlayer);
+            rayToObject = mRendering->castCameraToViewportRay(x, y, maxDistance, ignorePlayer, false, ignoreTerrain);
         }
         else
-            rayToObject = mRendering->castCameraToViewportRay(0.5f, 0.5f, maxDistance, ignorePlayer);
+            rayToObject
+                = mRendering->castCameraToViewportRay(0.5f, 0.5f, maxDistance, ignorePlayer, false, ignoreTerrain);
 
         focusObject = rayToObject.mHitObject;
         if (focusObject.isEmpty() && rayToObject.mHitRefnum.isSet())
@@ -1829,10 +1779,10 @@ namespace MWWorld
     }
 
     bool World::castRenderingRay(MWPhysics::RayCastingResult& res, const osg::Vec3f& from, const osg::Vec3f& to,
-        bool ignorePlayer, bool ignoreActors, std::span<const MWWorld::Ptr> ignoreList)
+        bool ignorePlayer, bool ignoreActors, bool ignoreTerrain, std::span<const MWWorld::Ptr> ignoreList)
     {
         MWRender::RenderingManager::RayResult rayRes
-            = mRendering->castRay(from, to, ignorePlayer, ignoreActors, ignoreList);
+            = mRendering->castRay(from, to, ignorePlayer, ignoreActors, ignoreTerrain, ignoreList);
         res.mHit = rayRes.mHit;
         res.mHitPos = rayRes.mHitPointWorld;
         res.mHitNormal = rayRes.mHitNormalWorld;
@@ -1929,9 +1879,14 @@ namespace MWWorld
         mWeatherManager->changeWeather(region, id);
     }
 
-    void World::modRegion(const ESM::RefId& regionid, const std::vector<uint8_t>& chances)
+    void World::modRegion(const ESM::RefId& regionid, std::span<const uint8_t> chances)
     {
         mWeatherManager->modRegion(regionid, chances);
+    }
+
+    std::span<const uint8_t> World::getRegionWeatherChances(const ESM::RefId& regionid) const
+    {
+        return mWeatherManager->getRegionChances(regionid);
     }
 
     struct GetDoorMarkerVisitor
@@ -2036,7 +1991,7 @@ namespace MWWorld
         const float maxDist = 200.f;
 
         MWRender::RenderingManager::RayResult result
-            = mRendering->castCameraToViewportRay(cursorX, cursorY, maxDist, true, true);
+            = mRendering->castCameraToViewportRay(cursorX, cursorY, maxDist, true, true, false);
 
         CellStore* cell = getPlayerPtr().getCell();
 
@@ -2065,7 +2020,7 @@ namespace MWWorld
     {
         const float maxDist = 200.f;
         MWRender::RenderingManager::RayResult result
-            = mRendering->castCameraToViewportRay(cursorX, cursorY, maxDist, true, true);
+            = mRendering->castCameraToViewportRay(cursorX, cursorY, maxDist, true, true, false);
 
         if (result.mHit)
         {
@@ -2169,7 +2124,7 @@ namespace MWWorld
 
         float len = 1000000.0;
 
-        MWRender::RenderingManager::RayResult result = mRendering->castRay(orig, orig + dir * len, true, true);
+        MWRender::RenderingManager::RayResult result = mRendering->castRay(orig, orig + dir * len, true, true, false);
         if (result.mHit)
             pos.pos[2] = result.mHitPointWorld.z();
 
@@ -3086,7 +3041,8 @@ namespace MWWorld
                         * osg::Quat(actor.getRefData().getPosition().rot[2], osg::Vec3f(0, 0, -1));
                     const osg::Vec3f direction = orient * osg::Vec3f(0, 1, 0);
                     const osg::Vec3f dest = origin + direction * getMaxActivationDistance();
-                    const MWRender::RenderingManager::RayResult result = mRendering->castRay(origin, dest, true, true);
+                    const MWRender::RenderingManager::RayResult result
+                        = mRendering->castRay(origin, dest, true, true, false);
                     if (result.mHit)
                         target = result.mHitObject;
                 }

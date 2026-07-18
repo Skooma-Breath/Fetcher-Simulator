@@ -18,15 +18,6 @@ permissions:
   contents: write
 
 jobs:
-  Output-Envs:
-    name: Read .env file and expose it as output
-    runs-on: ubuntu-latest
-    outputs:
-      VCPKG_DEPS_TAG: ${{ env.VCPKG_DEPS_TAG }}
-    steps:
-      - uses: actions/checkout@v4
-      - run: cat "${{ github.workspace }}/CI/github.env" >> $GITHUB_ENV
-
   Tester-Tools:
     if: ${{ github.ref == 'refs/heads/main' }}
     uses: ./.github/workflows/fetcher-tester-tools.yml
@@ -35,12 +26,10 @@ jobs:
   Windows-Test:
     if: ${{ github.ref == 'refs/heads/main' }}
     needs:
-      - Output-Envs
       - Tester-Tools
     uses: ./.github/workflows/windows.yml
     with:
       image: "2022"
-      vcpkg-deps-tag: ${{ needs.Output-Envs.outputs.VCPKG_DEPS_TAG }}
       build-type: RelWithDebInfo
       package: true
       release: true
@@ -54,14 +43,12 @@ jobs:
     secrets: inherit
 
   Windows-Clean:
-    if: ${{ always() && needs.Output-Envs.result == 'success' && (github.ref != 'refs/heads/main' || (github.event_name == 'workflow_dispatch' && inputs.publish-clean && needs.Windows-Test.result == 'success')) }}
+    if: ${{ always() && (github.ref != 'refs/heads/main' || (github.event_name == 'workflow_dispatch' && inputs.publish-clean && needs.Windows-Test.result == 'success')) }}
     needs:
-      - Output-Envs
       - Windows-Test
     uses: ./.github/workflows/windows.yml
     with:
       image: "2022"
-      vcpkg-deps-tag: ${{ needs.Output-Envs.outputs.VCPKG_DEPS_TAG }}
       build-type: ${{ github.ref == 'refs/heads/main' && 'RelWithDebInfo' || 'Release' }}
       package: true
       release: true
@@ -71,3 +58,15 @@ jobs:
       release-include-installer: ${{ github.ref != 'refs/heads/main' }}
       include-tester-tools: false
     secrets: inherit
+
+  MacOS:
+    strategy:
+      fail-fast: true
+      matrix:
+        args:
+          - image: macos-15
+          - image: macos-15-intel
+    uses: ./.github/workflows/macos.yml
+    with:
+      image: ${{ matrix.args.image }}
+      build-type: Release

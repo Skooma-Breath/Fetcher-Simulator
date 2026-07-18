@@ -177,10 +177,14 @@
 -- * @{openmw.types#ContainerRecord},
 -- * @{openmw.types#CreatureRecord},
 -- * @{openmw.types#DoorRecord},
+-- * @{openmw.core#Enchantment},
+-- * @{openmw.types#IngredientRecord},
 -- * @{openmw.types#LightRecord},
 -- * @{openmw.types#MiscellaneousRecord},
 -- * @{openmw.types#NpcRecord},
 -- * @{openmw.types#PotionRecord},
+-- * @{openmw.types#ProbeRecord},
+-- * @{openmw.core#Spell},
 -- * @{openmw.types#StaticRecord},
 -- * @{openmw.types#WeaponRecord}
 -- @function [parent=#world] createRecord

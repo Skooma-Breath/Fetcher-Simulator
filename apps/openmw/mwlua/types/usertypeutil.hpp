@@ -7,115 +7,170 @@
 #include "apps/openmw/mwbase/environment.hpp"
 #include "apps/openmw/mwworld/esmstore.hpp"
 
+#include <components/esm/path.hpp>
+#include <components/misc/finitevalues.hpp>
 #include <components/resource/resourcesystem.hpp>
+
+#include <concepts>
 
 namespace MWLua::Types
 {
-    template <class Record, class Type>
-    const Record& asRecord(const Type& rec)
-    {
-        return rec;
-    }
-
-    template <class Record>
-    const Record& asRecord(const MutableRecord<Record>& rec)
-    {
-        return rec.find();
-    }
-
-    template <class R, class T>
-    using Member = R T::*;
-
-    template <class Record, class Type, class M>
+    template <class Type, class M>
     struct Getter
     {
-        auto operator()(Member<M, Record> member) const
+        template <class Accessor>
+        auto operator()(Accessor&& accessor) const
         {
-            return [member](const Type& rec) -> const M& { return asRecord<Record>(rec).*member; };
-        }
-
-        template <class Data>
-        auto operator()(Member<Data, Record> dm, Member<M, Data> member) const
-        {
-            return [dm, member](const Type& rec) -> const M& {
-                const Record& record = asRecord<Record>(rec);
-                const Data& data = record.*dm;
-                return data.*member;
-            };
+            return [=](Type& rec) -> const M& { return accessor(rec); };
         }
     };
 
-    template <class Record, class M>
+    template <class Type>
+    struct Getter<Type, ESM::Path>
+    {
+        template <class Accessor>
+        auto operator()(Accessor&& accessor) const
+        {
+            return [=](Type& rec) -> std::string_view { return accessor(rec).getOriginal(); };
+        }
+    };
+
+    template <class Type, class M>
     struct Setter
     {
-        auto operator()(Member<M, Record> member) const
+        template <class Accessor>
+        auto operator()(Accessor&& accessor) const
         {
-            return [member](MutableRecord<Record>& rec, const M& value) {
-                Record& record = rec.find();
-                record.*member = value;
-            };
+            return [=](Type& rec, const M& value) { accessor(rec) = value; };
         }
+    };
 
-        template <class Data>
-        auto operator()(Member<Data, Record> dm, Member<M, Data> member) const
+    template <class Type>
+    struct Setter<Type, ESM::RefId>
+    {
+        template <class Accessor>
+        auto operator()(Accessor&& accessor) const
         {
-            return [dm, member](MutableRecord<Record>& rec, const M& value) {
-                Record& record = rec.find();
-                Data& data = record.*dm;
-                data.*member = value;
+            return [=](Type& rec, std::optional<std::string_view> value) {
+                accessor(rec) = ESM::RefId::deserializeText(value.value_or(std::string_view()));
             };
         }
     };
 
-    template <class Record>
-    struct Setter<Record, ESM::RefId>
+    template <class Type>
+    struct Setter<Type, std::string>
     {
-        auto operator()(Member<ESM::RefId, Record> member) const
+        template <class Accessor>
+        auto operator()(Accessor&& accessor) const
         {
-            return [member](MutableRecord<Record>& rec, std::string_view value) {
-                Record& record = rec.find();
-                record.*member = ESM::RefId::deserializeText(value);
-            };
+            return [=](Type& rec, std::string_view value) { accessor(rec) = value; };
         }
+    };
 
-        template <class Data>
-        auto operator()(Member<Data, Record> dm, Member<ESM::RefId, Data> member) const
+    template <class Type, std::floating_point Float>
+    struct Setter<Type, Float>
+    {
+        template <class Accessor>
+        auto operator()(Accessor&& accessor) const
         {
-            return [dm, member](MutableRecord<Record>& rec, std::string_view value) {
-                Record& record = rec.find();
-                Data& data = record.*dm;
-                data.*member = ESM::RefId::deserializeText(value);
-            };
+            return [=](Type& rec, Misc::FiniteValue<Float> value) { accessor(rec) = value; };
+        }
+    };
+
+    template <class Type>
+    struct Setter<Type, ESM::Path>
+    {
+        template <class Accessor>
+        auto operator()(Accessor&& accessor) const
+        {
+            return [=](Type& rec, std::string_view value) { accessor(rec) = value; };
         }
     };
 
     template <class T>
-    constexpr bool isMutable = false;
-    template <class T>
-    constexpr bool isMutable<MutableRecord<T>> = true;
-
-    template <class Record, class Type, class M>
-    void addProperty(sol::usertype<Type>& type, std::string_view key, Member<M, Record> member)
+    struct RecordType
     {
-        if constexpr (isMutable<Type>)
-            type[key] = sol::property(Getter<Record, Type, M>{}(member), Setter<Record, M>{}(member));
+        using Record = T;
+        constexpr static bool isMutable = false;
+
+        static const Record& asRecord(const T& rec) { return rec; }
+    };
+
+    template <class T>
+    struct RecordType<MutableRecord<T>>
+    {
+        using Record = T;
+        constexpr static bool isMutable = true;
+
+        static const Record& asRecord(const MutableRecord<T>& rec) { return rec.find(); }
+    };
+
+    template <class Type, class... Member>
+    void addProperty(sol::usertype<Type>& type, std::string_view key, Member... members)
+    {
+        using Record = RecordType<Type>::Record;
+        const auto getter = [=](const Type& rec) -> const auto&
+        {
+            const Record& record = RecordType<Type>::asRecord(rec);
+            return (record.*....*members);
+        };
+        using MemberType = std::remove_cvref_t<std::invoke_result_t<decltype(getter), const Type&>>;
+        auto getProp = Getter<Type, MemberType>{}(std::move(getter));
+        if constexpr (RecordType<Type>::isMutable)
+            type[key] = sol::property(std::move(getProp), Setter<Type, MemberType>{}([=](Type& rec) -> MemberType& {
+                Record& record = rec.find();
+                return (record.*....*members);
+            }));
         else
-            type[key] = sol::readonly_property(Getter<Record, Type, M>{}(member));
+            type[key] = sol::readonly_property(std::move(getProp));
     }
 
-    template <class Record, class Type, class Data, class M>
-    void addProperty(sol::usertype<Type>& type, std::string_view key, Member<Data, Record> dm, Member<M, Data> member)
+    template <class Type, class Flag, class... Member>
+    void addFlagProperty(sol::usertype<Type>& type, std::string_view key, Flag flag, Member... members)
     {
-        if constexpr (isMutable<Type>)
-            type[key] = sol::property(Getter<Record, Type, M>{}(dm, member), Setter<Record, M>{}(dm, member));
+        using Record = RecordType<Type>::Record;
+        const auto getter = [=](const Type& rec) -> bool {
+            const Record& record = RecordType<Type>::asRecord(rec);
+            return (record.*....*members) & flag;
+        };
+        if constexpr (RecordType<Type>::isMutable)
+            type[key] = sol::property(std::move(getter), [=](Type& rec, bool value) {
+                Record& record = rec.find();
+                auto& data = (record.*....*members);
+                if (value)
+                    data |= flag;
+                else
+                    data &= ~flag;
+            });
         else
-            type[key] = sol::readonly_property(Getter<Record, Type, M>{}(dm, member));
+            type[key] = sol::readonly_property(std::move(getter));
+    }
+
+    template <class Type, class Flag, class... Member>
+    void addReverseFlagProperty(sol::usertype<Type>& type, std::string_view key, Flag flag, Member... members)
+    {
+        using Record = RecordType<Type>::Record;
+        const auto getter = [=](const Type& rec) -> bool {
+            const Record& record = RecordType<Type>::asRecord(rec);
+            return !((record.*....*members) & flag);
+        };
+        if constexpr (RecordType<Type>::isMutable)
+            type[key] = sol::property(std::move(getter), [=](Type& rec, bool value) {
+                Record& record = rec.find();
+                auto& data = (record.*....*members);
+                if (value)
+                    data &= ~flag;
+                else
+                    data |= flag;
+            });
+        else
+            type[key] = sol::readonly_property(std::move(getter));
     }
 
     template <class T>
     void addModelProperty(sol::usertype<T>& type)
     {
-        if constexpr (isMutable<T>)
+        if constexpr (RecordType<T>::isMutable)
             ::MWLua::addMutableModelProperty(type);
         else
             ::MWLua::addModelProperty(type);
@@ -125,10 +180,10 @@ namespace MWLua::Types
     void addIconProperty(sol::usertype<T>& type)
     {
         auto vfs = MWBase::Environment::get().getResourceSystem()->getVFS();
-        if constexpr (isMutable<T>)
+        if constexpr (RecordType<T>::isMutable)
             type["icon"] = sol::property(
                 [vfs](const T& mutRec) -> std::string {
-                    return Misc::ResourceHelpers::correctIconPath(VFS::Path::toNormalized(mutRec.find().mIcon), *vfs);
+                    return Misc::ResourceHelpers::correctIconPath(mutRec.find().mIcon.getNormalized(), *vfs);
                 },
                 [](T& mutRec, std::string_view path) {
                     auto& recordValue = mutRec.find();
@@ -136,7 +191,7 @@ namespace MWLua::Types
                 });
         else
             type["icon"] = sol::readonly_property([vfs](const T& rec) -> std::string {
-                return Misc::ResourceHelpers::correctIconPath(VFS::Path::toNormalized(rec.mIcon), *vfs);
+                return Misc::ResourceHelpers::correctIconPath(rec.mIcon.getNormalized(), *vfs);
             });
     }
 

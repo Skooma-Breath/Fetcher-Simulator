@@ -48,8 +48,8 @@ namespace
         if (id.rfind("sw_", 0) != 0)
             return false;
 
-        return containsCaseInsensitive(record->mModel, "datapad.nif")
-            || containsCaseInsensitive(record->mIcon, "datapad")
+        return containsCaseInsensitive(record->mModel.getOriginal(), "datapad.nif")
+            || containsCaseInsensitive(record->mIcon.getOriginal(), "datapad")
             || containsCaseInsensitive(record->mName, "datapad");
     }
 }
@@ -137,8 +137,8 @@ namespace MWGui
             const ESM::Book* debugRecord = book.get<ESM::Book>()->mBase;
             Log(Debug::Info) << "[StarwindDatapad] BookWindow::setPtr id=" << debugRecord->mId.serializeText()
                              << " name=" << debugRecord->mName
-                             << " model=" << debugRecord->mModel
-                             << " icon=" << debugRecord->mIcon
+                             << " model=" << debugRecord->mModel.getOriginal()
+                             << " icon=" << debugRecord->mIcon.getOriginal()
                              << " isDatapad=" << (starwindDatapad ? "true" : "false")
                              << " texture=" << bookTexture;
         }

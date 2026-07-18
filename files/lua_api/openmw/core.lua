@@ -166,6 +166,7 @@
 -- @field openmw.util#Vector3 position Object position.
 -- @field #number scale Object scale.
 -- @field openmw.util#Transform rotation Object rotation.
+-- @field #Cell startingCell The object's original cell. Returns nil if `cell` of the object is nil.
 -- @field openmw.util#Vector3 startingPosition The object original position
 -- @field openmw.util#Transform startingRotation The object original rotation
 -- @field #ObjectOwner owner Ownership information
@@ -371,7 +372,7 @@
 -- @field #boolean temporary If set, this spell effect is temporary and should end on its own. Either after a single application or after its duration has run out.
 -- @field #boolean affectsBaseValues If set, this spell affects the base values of affected stats, rather than modifying current values.
 -- @field #boolean stackable If set, this spell can be applied multiple times. If not set, the same spell can only be applied once from the same source (where source is determined by caster + item). In vanilla rules, consumables are stackable while spells and enchantments are not.
--- @field #number activeSpellId A number uniquely identifying this active spell within the affected actor's list of active spells.
+-- @field #string activeSpellId Uniquely identifies this active spell within the affected actor's list of active spells.
 -- @field #list<#ActiveSpellEffect> effects The active effects (@{#ActiveSpellEffect}) of this spell.
 
 ---
@@ -678,6 +679,13 @@
 --- @{#Spells}: Spells
 -- @field [parent=#Magic] #Spells spells
 
+---
+-- Creates a @{#Spell} without adding it to the world database.
+-- Use @{openmw_world#(world).createRecord} to add the record to the world.
+-- @function [parent=#Spells] createRecordDraft
+-- @param #Spell spell A Lua table with the fields of a Spell, with an optional field `template` that accepts a @{#Spell} as a base.
+-- @return #Spell A strongly typed Spell record.
+
 --- List of all @{#Spell}s.
 -- @field [parent=#Spells] #list<#Spell> records A read-only list of all @{#Spell} records in the world database, may be indexed by recordId.
 -- Implements [iterables#List](iterables.html#List) of #Spell.
@@ -707,6 +715,13 @@
 
 --- @{#Enchantments}: Enchantments
 -- @field [parent=#Magic] #Enchantments enchantments
+
+---
+-- Creates an @{#Enchantment} without adding it to the world database.
+-- Use @{openmw_world#(world).createRecord} to add the record to the world.
+-- @function [parent=#Enchantments] createRecordDraft
+-- @param #Enchantment enchantment A Lua table with the fields of an Enchantment, with an optional field `template` that accepts an @{#Enchantment} as a base.
+-- @return #Enchantment A strongly typed Enchantment record.
 
 --- A read-only list of all @{#Enchantment} records in the world database, may be indexed by recordId.
 -- Implements [iterables#List](iterables.html#List) and [iterables#Map](iterables.html#map-iterable) of #Enchantment.
@@ -738,6 +753,7 @@
 -- @field #string id Effect ID
 -- @field #string icon Effect Icon Path
 -- @field #string name Localized name of the effect
+-- @field #string description Localized description of the effect
 -- @field #string school Skill ID that is this effect's school
 -- @field #number baseCost
 -- @field openmw.util#Color color
@@ -757,6 +773,16 @@
 -- @field #string hitSound Identifier of the sound used on hit
 -- @field #string areaSound Identifier of the sound used for AOE spells
 -- @field #string boltSound Identifier of the projectile sound used for ranged spells
+-- @field #boolean hasAttribute True if the effect requires an attribute parameter
+-- @field #boolean hasSkill True if the effect requires a skill parameter
+-- @field #boolean onSelf True if the effect can be cast on self
+-- @field #boolean onTouch True if the effect can be cast on touch
+-- @field #boolean onTarget True if the effect can be cast on target
+-- @field #boolean unreflectable True if the effect cannot be reflected
+-- @field #boolean allowsSpellmaking True if the effect is available for spellmaking
+-- @field #boolean allowsEnchanting True if the effect is available for enchanting
+-- @field #boolean negativeLight True if the effect casts negative light
+-- @field #number speed Projectile speed
 
 
 ---
@@ -1290,6 +1316,7 @@
 -- @field [parent=#Regions] #list<#RegionRecord> records
 -- @usage local record = core.regions.records['bitter coast region']
 -- @usage local record = core.regions.records[1]
+
 ---
 -- Region data record
 -- @type RegionRecord
@@ -1303,6 +1330,32 @@
 -- Valid weather ids include:
 --   `"clear"`, `"cloudy"`, `"foggy"`, `"overcast"`, `"rain"`, `"thunderstorm"`, `"ashstorm"`, `"blight"`, `"snow"`, `"blizzard"`
 -- @usage print(region.weatherProbabilities["rain"])
+
+---
+-- Set one weather probability entry for this region at runtime.
+-- Throws an error if `weatherId` is not a valid weather id.
+-- Value is clamped to the range [0, 100].
+-- Multiple calls modify the current runtime weather table.
+-- Keep total weather probabilities at 100 after modifications.
+--
+-- For a full table replacement, zero the current table first, then set the new values.
+-- @function [parent=#RegionRecord] setProbability
+-- @param self
+-- @param #string weatherId Weather id to modify.
+-- @param #number value New probability value.
+-- @usage region:setProbability('rain', 30)
+-- @usage
+-- for weatherId, _ in pairs(region.weatherProbabilities) do
+--     region:setProbability(weatherId, 0)
+-- end
+-- region:setProbability('clear', 70)
+-- region:setProbability('rain', 30)
+
+---
+-- Reset this region's runtime weather probabilities to defaults from the loaded records.
+-- @function [parent=#RegionRecord] resetProbability
+-- @param self
+-- @usage region:resetProbability()
 
 ---
 -- Region sound reference
@@ -1370,6 +1423,34 @@
 --         print(weather.name)
 --     end
 -- end
+
+--- `core.weather.MOON_PHASE`
+-- @type MOON_PHASE
+-- @field [parent=#MOON_PHASE] #number Full
+-- @field [parent=#MOON_PHASE] #number WaningGibbous
+-- @field [parent=#MOON_PHASE] #number ThirdQuarter
+-- @field [parent=#MOON_PHASE] #number WaningCrescent
+-- @field [parent=#MOON_PHASE] #number New
+-- @field [parent=#MOON_PHASE] #number WaxingCrescent
+-- @field [parent=#MOON_PHASE] #number FirstQuarter
+-- @field [parent=#MOON_PHASE] #number WaxingGibbous
+
+--- Moon phases.
+-- @field [parent=#Weather] #MOON_PHASE MOON_PHASE
+
+---
+-- Data for a moon in the current sky.
+-- @type Moon
+-- @field #string name The moon's name. For Morrowind, "Masser" or "Secunda".
+-- @field #number phase One of @{#MOON_PHASE}.
+-- @field #number phaseValue MWScript-compatible phase value: 0 new, 1 crescent, 2 quarter, 3 gibbous, or 4 full.
+-- @field #number alpha The alpha of the moon between 0 and 1. 0 when the moon is not visible in the sky.
+
+---
+-- Get all moons in the current sky.
+-- @function [parent=#Weather] getCurrentMoons
+-- @param #Cell cell The cell to get moons for.
+-- @return #list<#Moon> Can be nil if the cell is inactive or has no sky.
 
 ---
 -- Get the current weather

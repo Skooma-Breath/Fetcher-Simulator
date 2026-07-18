@@ -19,12 +19,12 @@ void MWWorld::InventoryStore::copySlots(const InventoryStore& store)
 {
     for (const MWWorld::ContainerStoreIterator& it : store.mSlots)
     {
-        if (it == store.end())
+        const std::ptrdiff_t distance = store.index(it);
+        if (distance == -1)
         {
             mSlots.push_back(end());
             continue;
         }
-        const std::ptrdiff_t distance = store.index(it);
         ContainerStoreIterator slot = begin();
         std::advance(slot, distance);
         mSlots.push_back(slot);
@@ -137,7 +137,7 @@ MWWorld::InventoryStore& MWWorld::InventoryStore::operator=(InventoryStore&& sto
 }
 
 MWWorld::ContainerStoreIterator MWWorld::InventoryStore::add(
-    const Ptr& itemPtr, int count, bool allowAutoEquip, bool resolve)
+    const ConstPtr& itemPtr, int count, bool allowAutoEquip, bool resolve)
 {
     const MWWorld::ContainerStoreIterator& retVal
         = MWWorld::ContainerStore::add(itemPtr, count, allowAutoEquip, resolve);

@@ -86,27 +86,10 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  Output-Envs:
-    name: Read .env file and expose it as output
-    runs-on: ubuntu-latest
-    outputs:
-      VCPKG_DEPS_TAG: ${{ steps.github-env.outputs.VCPKG_DEPS_TAG }}
-    steps:
-      - uses: actions/checkout@v4
-      - name: Load CI/github.env
-        id: github-env
-        shell: bash
-        run: |
-          cat "${{ github.workspace }}/CI/github.env" >> "$GITHUB_ENV"
-          cat "${{ github.workspace }}/CI/github.env" >> "$GITHUB_OUTPUT"
-
   Windows:
-    needs:
-      - Output-Envs
     uses: ./.github/workflows/windows.yml
     with:
       image: ${{ inputs.image }}
-      vcpkg-deps-tag: ${{ needs.Output-Envs.outputs.VCPKG_DEPS_TAG }}
       build-type: ${{ inputs.build-type }}
       package: ${{ inputs.package }}
       release: ${{ inputs.release }}

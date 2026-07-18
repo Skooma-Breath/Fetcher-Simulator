@@ -20,6 +20,7 @@ set(BUILTIN_DATA_FILES
     textures/menu_serverbrowser.dds
     textures/menu_serverbrowser_over.dds
     textures/menu_serverbrowser_pressed.dds
+    textures/omw_mouse_emulation_cursor.dds
     textures/omw_psx_button_circle.dds
     textures/omw_psx_button_dpad.dds
     textures/omw_psx_button_square.dds

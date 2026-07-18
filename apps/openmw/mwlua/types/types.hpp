@@ -31,8 +31,10 @@ namespace MWLua
     void addActivatorBindings(sol::table activator, const Context& context);
     ESM::Activator tableToActivator(const sol::table& rec);
     void addMutableActivatorType(sol::state_view& lua);
+    void addBodyPartBindings(sol::table list, const Context& context);
     void addBookBindings(sol::table book, const Context& context);
     ESM::Book tableToBook(const sol::table& rec);
+    void addMutableBookType(sol::state_view& lua);
     void addContainerBindings(sol::table container, const Context& context);
     ESM::Container tableToContainer(const sol::table& rec);
     void addDoorBindings(sol::table door, const Context& context);
@@ -48,17 +50,23 @@ namespace MWLua
     void addCreatureBindings(sol::table creature, const Context& context);
     ESM::Creature tableToCreature(const sol::table& rec);
     void addLockpickBindings(sol::table lockpick, const Context& context);
+    ESM::Lockpick tableToLockpick(const sol::table& rec);
+    void addMutableLockpickType(sol::state_view& lua);
     void addProbeBindings(sol::table probe, const Context& context);
+    ESM::Probe tableToProbe(const sol::table& rec);
+    void addMutableProbeType(sol::state_view& lua);
     void addApparatusBindings(sol::table apparatus, const Context& context);
     void addRepairBindings(sol::table repair, const Context& context);
+    ESM::Repair tableToRepair(const sol::table& rec);
+    void addMutableRepairType(sol::state_view& lua);
     void addMiscellaneousBindings(sol::table miscellaneous, const Context& context);
     ESM::Miscellaneous tableToMisc(const sol::table& rec);
     void addMutableMiscType(sol::state_view& lua);
     void addPotionBindings(sol::table potion, const Context& context);
     ESM::Potion tableToPotion(const sol::table& rec);
-    ESM::Spell tableToSpell(const sol::table& rec);
-    ESM::Enchantment tableToEnchantment(const sol::table& rec);
     void addIngredientBindings(sol::table ingredient, const Context& context);
+    void addMutableIngredientType(sol::state_view& lua);
+    ESM::Ingredient tableToIngredient(const sol::table& rec);
     void addArmorBindings(sol::table armor, const Context& context);
     ESM::Armor tableToArmor(const sol::table& rec);
     void addLockableBindings(sol::table lockable);
@@ -69,6 +77,7 @@ namespace MWLua
     void addMutableStaticType(sol::state_view& lua);
     void addLightBindings(sol::table light, const Context& context);
     ESM::Light tableToLight(const sol::table& rec);
+    void addMutableLightType(sol::state_view& lua);
     void addLevelledCreatureBindings(sol::table list, const Context& context);
 
     void addESM4DoorBindings(sol::table door, const Context& context);

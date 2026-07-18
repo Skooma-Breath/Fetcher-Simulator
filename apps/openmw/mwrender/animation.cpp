@@ -1,15 +1,15 @@
 #include "animation.hpp"
 
 #include <algorithm>
-#include <iomanip>
 #include <limits>
 
 #include <osg/BlendFunc>
-#include <osg/LightModel>
 #include <osg/Material>
+#include <osg/Matrix>
 #include <osg/MatrixTransform>
 #include <osg/Switch>
 
+#include <osg/Vec4f>
 #include <osgParticle/ParticleProcessor>
 #include <osgParticle/ParticleSystem>
 
@@ -67,21 +67,6 @@
 
 namespace
 {
-    class MarkDrawablesVisitor : public osg::NodeVisitor
-    {
-    public:
-        MarkDrawablesVisitor(osg::Node::NodeMask mask)
-            : osg::NodeVisitor(TRAVERSE_ALL_CHILDREN)
-            , mMask(mask)
-        {
-        }
-
-        void apply(osg::Drawable& drawable) override { drawable.setNodeMask(mMask); }
-
-    private:
-        osg::Node::NodeMask mMask = 0;
-    };
-
     /// Removes all particle systems and related nodes in a subgraph.
     class RemoveParticlesVisitor : public osg::NodeVisitor
     {
@@ -682,17 +667,19 @@ namespace MWRender
     }
 
     std::shared_ptr<Animation::AnimSource> Animation::addSingleAnimSource(
-        const std::string& kfname, const std::string& baseModel)
+        VFS::Path::NormalizedView kfname, const std::string& baseModel)
     {
         if (!mResourceSystem->getVFS()->exists(kfname))
             return nullptr;
 
-        auto animsrc = std::make_shared<AnimSource>();
-        animsrc->mKeyframes = mResourceSystem->getKeyframeManager()->get(VFS::Path::toNormalized(kfname));
+        osg::ref_ptr<const SceneUtil::KeyframeHolder> keyframes = mResourceSystem->getKeyframeManager()->get(kfname);
 
-        if (!animsrc->mKeyframes || animsrc->mKeyframes->mTextKeys.empty()
-            || animsrc->mKeyframes->mKeyframeControllers.empty())
+        if (keyframes == nullptr || keyframes->mTextKeys.empty() || keyframes->mKeyframeControllers.empty())
             return nullptr;
+
+        std::shared_ptr<AnimSource> animsrc = std::make_shared<AnimSource>();
+
+        animsrc->mKeyframes = std::move(keyframes);
 
         const NodeMap& nodeMap = getNodeMap();
         const auto& controllerMap = animsrc->mKeyframes->mKeyframeControllers;
@@ -1717,7 +1704,7 @@ namespace MWRender
     }
 
     void Animation::addEffect(std::string_view model, std::string_view effectId, bool loop, std::string_view bonename,
-        std::string_view texture, bool useAmbientLight)
+        std::string_view texture, bool useAmbientLight, bool autoTransform, const std::optional<osg::Matrix>& transform)
     {
         if (!mObjectRoot.get())
             return;
@@ -1750,12 +1737,15 @@ namespace MWRender
         }
 
         osg::ref_ptr<SceneUtil::PositionAttitudeTransform> trans = new SceneUtil::PositionAttitudeTransform;
-        if (!mPtr.getClass().isNpc())
+
+        osg::Matrix finalTransform;
+
+        if (!mPtr.getClass().isNpc() && autoTransform)
         {
             osg::Vec3f bounds(MWBase::Environment::get().getWorld()->getHalfExtents(mPtr) * 2.f);
             float scale = std::max({ bounds.x(), bounds.y(), bounds.z() / 2.f }) / 64.f;
             if (scale > 1.f)
-                trans->setScale(osg::Vec3f(scale, scale, scale));
+                finalTransform = osg::Matrix::scale(scale, scale, scale);
             float offset = 0.f;
             if (bounds.z() < 128.f)
                 offset = bounds.z() - 128.f;
@@ -1763,8 +1753,19 @@ namespace MWRender
                 offset = 128.f - bounds.z();
             if (MWBase::Environment::get().getWorld()->isFlying(mPtr))
                 offset /= 20.f;
-            trans->setPosition(osg::Vec3f(0.f, 0.f, offset * scale));
+
+            finalTransform.setTrans(osg::Vec3f(0.f, 0.f, offset * scale));
         }
+
+        if (transform)
+        {
+            finalTransform *= (*transform);
+        }
+
+        trans->setScale(finalTransform.getScale());
+        trans->setAttitude(finalTransform.getRotate());
+        trans->setPosition(finalTransform.getTrans());
+
         parentNode->addChild(trans);
 
         osg::ref_ptr<osg::Node> node
@@ -1773,8 +1774,7 @@ namespace MWRender
         if (useAmbientLight)
         {
             // Morrowind has a white ambient light attached to the root VFX node of the scenegraph
-            node->getOrCreateStateSet()->setAttributeAndModes(
-                getVFXLightModelInstance(), osg::StateAttribute::ON | osg::StateAttribute::OVERRIDE);
+            SceneUtil::configureSunAmbientOverride(osg::Vec4f(1, 1, 1, 1), node->getOrCreateStateSet());
         }
 
         mResourceSystem->getSceneManager()->setUpNormalsRTForStateSet(node->getOrCreateStateSet(), false);
@@ -1783,9 +1783,6 @@ namespace MWRender
         node->accept(findMaxLengthVisitor);
 
         node->setNodeMask(Mask_Effect);
-
-        MarkDrawablesVisitor markVisitor(Mask_Effect);
-        node->accept(markVisitor);
 
         params.mMaxControllerLength = findMaxLengthVisitor.getMaxLength();
         params.mLoop = loop;
