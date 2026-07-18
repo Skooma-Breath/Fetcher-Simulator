@@ -32,34 +32,28 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          $tag = "fetcher-zhi-compat-patch-v1"
-          gh release delete $tag --repo "${{ github.repository }}" --yes --cleanup-tag 2>$null
-          git tag -f $tag "${{ github.sha }}"
-          git push origin "refs/tags/$tag" --force
-          gh release create $tag `
-            "${{ github.workspace }}\release-assets\fetcher-zhi-compat-patch-v1.zip" `
-            --repo "${{ github.repository }}" `
-            --target "${{ github.sha }}" `
-            --title "Fetcher ZHI Multiplayer Compatibility Patch v1" `
-            --notes "Disables Zerkish Hotkeys Improved's first-time modal because it can trap multiplayer users during character creation." `
-            --prerelease
+          .\CI\Publish-StableGitHubRelease.ps1 `
+            -Repository "${{ github.repository }}" `
+            -Tag "fetcher-zhi-compat-patch-v1" `
+            -TargetCommit "${{ github.sha }}" `
+            -Title "Fetcher ZHI Multiplayer Compatibility Patch v1" `
+            -Notes "Disables Zerkish Hotkeys Improved's first-time modal because it can trap multiplayer users during character creation." `
+            -Assets "${{ github.workspace }}\release-assets\fetcher-zhi-compat-patch-v1.zip"
 
       - name: Replace stable tester tools prerelease
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          $tag = "fetcher-tester-tools"
-          gh release delete $tag --repo "${{ github.repository }}" --yes --cleanup-tag 2>$null
-          git tag -f $tag "${{ github.sha }}"
-          git push origin "refs/tags/$tag" --force
-          gh release create $tag `
-            "${{ github.workspace }}\release-assets\fetcher-tester-tools.zip" `
-            "${{ github.workspace }}\release-assets\Install-Fetcher-Tester-Tools.ps1" `
-            "${{ github.workspace }}\release-assets\Join-Fetcher-Test-Channel.bat" `
-            "${{ github.workspace }}\release-assets\fetcher-bardcraft-umo.json" `
-            --repo "${{ github.repository }}" `
-            --target "${{ github.sha }}" `
-            --title "Fetcher Simulator Tester Tools" `
-            --notes "Install or refresh the Fetcher test channel without copying individual files. Download and double-click Join-Fetcher-Test-Channel.bat once; subsequent updates are handled by Update-Fetcher-Simulator.bat." `
-            --prerelease
+          .\CI\Publish-StableGitHubRelease.ps1 `
+            -Repository "${{ github.repository }}" `
+            -Tag "fetcher-tester-tools" `
+            -TargetCommit "${{ github.sha }}" `
+            -Title "Fetcher Simulator Tester Tools" `
+            -Notes "Install or refresh the Fetcher test channel without copying individual files. Download and double-click Join-Fetcher-Test-Channel.bat once; subsequent updates are handled by Update-Fetcher-Simulator.bat." `
+            -Assets @(
+              "${{ github.workspace }}\release-assets\fetcher-tester-tools.zip"
+              "${{ github.workspace }}\release-assets\Install-Fetcher-Tester-Tools.ps1"
+              "${{ github.workspace }}\release-assets\Join-Fetcher-Test-Channel.bat"
+              "${{ github.workspace }}\release-assets\fetcher-bardcraft-umo.json"
+            )
