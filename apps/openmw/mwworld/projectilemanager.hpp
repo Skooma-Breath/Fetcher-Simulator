@@ -54,7 +54,8 @@ namespace MWWorld
             ESM::RefNum item, bool visualOnly = false);
 
         void launchProjectile(const MWWorld::Ptr& actor, const MWWorld::ConstPtr& projectile, const osg::Vec3f& pos,
-            const osg::Quat& orient, const MWWorld::Ptr& bow, float speed, float attackStrength);
+            const osg::Quat& orient, const MWWorld::Ptr& bow, float speed, float attackStrength,
+            bool visualOnly = false);
 
         void updateCasters();
 
@@ -122,6 +123,7 @@ namespace MWWorld
 
             osg::Vec3f mVelocity;
             float mAttackStrength;
+            bool mVisualOnly = false;
         };
 
         std::vector<MagicBoltState> mMagicBolts;

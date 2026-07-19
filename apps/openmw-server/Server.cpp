@@ -600,6 +600,8 @@ namespace
     bool inventoryContainsItemIdentity(const std::vector<mwmp::Item>& items, const mwmp::Item& target)
     {
         return std::any_of(items.begin(), items.end(), [&](const mwmp::Item& item) {
+            if (target.instanceId != 0)
+                return item.instanceId == target.instanceId && item.refId == target.refId;
             return sameItemIdentity(item, target);
         });
     }
@@ -4746,6 +4748,8 @@ void MPServer::handleCharacterSelect(ConnectedClient& c, const uint8_t* data, si
     c.playerEquipmentRestoreGuardUntilMs = 0;
     c.lastPlayerInventoryRestoreCorrectionLogMs = 0;
     c.lastPlayerEquipmentRestoreCorrectionLogMs = 0;
+    c.lastPlayerEquipmentInstanceCorrectionLogMs = 0;
+    c.pendingInventoryTransfers.clear();
 
     for (int slot = 0; slot < BasePlayer::NUM_EQUIPMENT_SLOTS; ++slot)
         c.player.equipment[slot].slot = slot;
@@ -4897,6 +4901,26 @@ void MPServer::handleCharacterSelect(ConnectedClient& c, const uint8_t* data, si
                                          << " name=" << sel.charName
                                          << " stacks=" << c.player.inventoryChanges.items.size()
                                          << " equipped=" << equippedItemCount(c.player.equipment);
+                    }
+                }
+
+                if (sendSavedInventory)
+                {
+                    const bool assignedIds
+                        = reconcileInventoryInstanceIds(c, c.player.inventoryChanges.items);
+                    c.restoredInventorySnapshot = c.player.inventoryChanges.items;
+                    if (assignedIds && mPlayerDb && c.dbCharacterId != 0)
+                        mPlayerDb->saveCharacterInventory(c.dbCharacterId, c.player.inventoryChanges.items, false);
+                }
+                if (sendSavedEquipment)
+                {
+                    reconcileEquipmentInstanceIds(c);
+                    c.restoredEquipmentSnapshot = c.player.equipment;
+                    if (mPlayerDb && c.dbCharacterId != 0)
+                    {
+                        const std::vector<EquipmentItem> equipment(
+                            c.player.equipment.begin(), c.player.equipment.end());
+                        mPlayerDb->saveCharacterEquipment(c.dbCharacterId, equipment, false);
                     }
                 }
 
@@ -5442,6 +5466,27 @@ void MPServer::handlePlayerEquipment(ConnectedClient& c, const uint8_t* data, si
     }
 
     c.player.equipment = incoming.equipment;
+    const bool correctedInstanceIds = reconcileEquipmentInstanceIds(c);
+    if (correctedInstanceIds
+        && (c.lastPlayerEquipmentInstanceCorrectionLogMs == 0
+            || nowMs - c.lastPlayerEquipmentInstanceCorrectionLogMs >= 1000))
+    {
+        c.lastPlayerEquipmentInstanceCorrectionLogMs = nowMs;
+        for (int slot = 0; slot < BasePlayer::NUM_EQUIPMENT_SLOTS; ++slot)
+        {
+            const Item& requested = incoming.equipment[slot].item;
+            const Item& reconciled = c.player.equipment[slot].item;
+            if (requested.instanceId == reconciled.instanceId)
+                continue;
+            Log(Debug::Info) << "[MPDIAG] PlayerEquipment instance correction"
+                             << " player=" << c.slotName
+                             << " slot=" << slot
+                             << " refId=" << requested.refId
+                             << " requested=" << requested.instanceId
+                             << " reconciled=" << reconciled.instanceId;
+            break;
+        }
+    }
     c.acceptedPlayerEquipmentThisSession = true;
     c.restoredEquipmentSnapshot = c.player.equipment;
     c.hasRestoredEquipmentSnapshot = true;
@@ -5461,7 +5506,13 @@ void MPServer::handlePlayerEquipment(ConnectedClient& c, const uint8_t* data, si
     }
 
     scheduleGeneratedDynamicRecordGc("player_equipment");
-    broadcastToAll(std::vector<uint8_t>(data, data + size), c.conn);
+    // A normal equipment packet already describes the sender's live state.
+    // Reconciliation below only normalizes hidden inventory identity metadata;
+    // it must not visually re-equip the originating client. Doing so can never
+    // make a transient local RefNum stick and creates an echo/restore/ack loop.
+    // Persist and relay the reconciled identity to peers, while startup/login
+    // corrections continue to use the explicit self-directed path above.
+    sendAuthoritativeEquipment(c, true, false);
 }
 
 // ---------------------------------------------------------------------------
@@ -5498,6 +5549,114 @@ void MPServer::handlePlayerCast(ConnectedClient& c, const uint8_t* data, size_t 
     pkt.setPlayer(&c.player);
     if (!pkt.decode(data, size)) return;
     broadcastToAll(std::vector<uint8_t>(data, data + size), c.conn);
+}
+
+// ---------------------------------------------------------------------------
+bool MPServer::reconcileInventoryInstanceIds(ConnectedClient& c, std::vector<Item>& items)
+{
+    const uint64_t nowMs = currentServerTimeMs();
+    c.pendingInventoryTransfers.erase(
+        std::remove_if(c.pendingInventoryTransfers.begin(), c.pendingInventoryTransfers.end(),
+            [&](const ConnectedClient::PendingInventoryTransfer& transfer) { return transfer.expiresAtMs < nowMs; }),
+        c.pendingInventoryTransfers.end());
+
+    const std::vector<Item>& previous = c.player.inventoryChanges.items;
+    std::unordered_set<uint32_t> used;
+    bool changed = false;
+
+    for (Item& item : items)
+    {
+        if (item.refId.empty() || item.count <= 0)
+            continue;
+
+        auto previousById = std::find_if(previous.begin(), previous.end(), [&](const Item& old) {
+            return item.instanceId != 0 && old.instanceId == item.instanceId && old.refId == item.refId;
+        });
+        auto transferById = std::find_if(c.pendingInventoryTransfers.begin(), c.pendingInventoryTransfers.end(),
+            [&](const ConnectedClient::PendingInventoryTransfer& transfer) {
+                return item.instanceId != 0 && transfer.instanceId == item.instanceId
+                    && transfer.refId == item.refId;
+            });
+        const bool suppliedIdIsValid = item.instanceId != 0 && used.count(item.instanceId) == 0
+            && (previousById != previous.end() || transferById != c.pendingInventoryTransfers.end());
+        if (!suppliedIdIsValid && item.instanceId != 0)
+        {
+            item.instanceId = 0;
+            changed = true;
+        }
+
+        if (item.instanceId == 0)
+        {
+            const auto previousMatch = std::find_if(previous.begin(), previous.end(), [&](const Item& old) {
+                return old.instanceId != 0 && used.count(old.instanceId) == 0 && sameItemIdentity(old, item);
+            });
+            if (previousMatch != previous.end())
+                item.instanceId = previousMatch->instanceId;
+        }
+
+        if (item.instanceId == 0)
+        {
+            const auto transfer = std::find_if(c.pendingInventoryTransfers.begin(), c.pendingInventoryTransfers.end(),
+                [&](const ConnectedClient::PendingInventoryTransfer& pending) {
+                    return pending.instanceId != 0 && used.count(pending.instanceId) == 0
+                        && pending.refId == item.refId;
+                });
+            if (transfer != c.pendingInventoryTransfers.end())
+            {
+                item.instanceId = transfer->instanceId;
+                transferById = transfer;
+            }
+        }
+
+        if (item.instanceId == 0)
+        {
+            const std::optional<uint32_t> allocated = reserveWorldMpNum();
+            if (!allocated)
+            {
+                Log(Debug::Warning) << "[Server] Inventory instance ID space exhausted for " << c.name;
+                continue;
+            }
+            item.instanceId = *allocated;
+            changed = true;
+        }
+
+        used.insert(item.instanceId);
+        if (transferById != c.pendingInventoryTransfers.end())
+            c.pendingInventoryTransfers.erase(transferById);
+    }
+
+    return changed;
+}
+
+bool MPServer::reconcileEquipmentInstanceIds(ConnectedClient& c)
+{
+    bool changed = false;
+    for (EquipmentItem& equipped : c.player.equipment)
+    {
+        if (equipped.item.refId.empty() || equipped.item.count <= 0)
+        {
+            changed = changed || equipped.item.instanceId != 0;
+            equipped.item.instanceId = 0;
+            continue;
+        }
+
+        auto inventoryItem = std::find_if(c.player.inventoryChanges.items.begin(),
+            c.player.inventoryChanges.items.end(), [&](const Item& item) {
+                return equipped.item.instanceId != 0 && item.instanceId == equipped.item.instanceId
+                    && item.refId == equipped.item.refId;
+            });
+        if (inventoryItem == c.player.inventoryChanges.items.end())
+        {
+            inventoryItem = std::find_if(c.player.inventoryChanges.items.begin(),
+                c.player.inventoryChanges.items.end(),
+                [&](const Item& item) { return sameItemIdentity(item, equipped.item); });
+        }
+        const uint32_t reconciledInstanceId
+            = inventoryItem != c.player.inventoryChanges.items.end() ? inventoryItem->instanceId : 0;
+        changed = changed || equipped.item.instanceId != reconciledInstanceId;
+        equipped.item.instanceId = reconciledInstanceId;
+    }
+    return changed;
 }
 
 // ---------------------------------------------------------------------------
@@ -5542,25 +5701,24 @@ void MPServer::handlePlayerInventory(ConnectedClient& c, const uint8_t* data, si
         return;
     }
 
-    if (c.player.inventoryChanges.action != InventoryAction::Set)
-        c.player.inventoryChanges.action = InventoryAction::Set;
+    std::vector<Item> nextItems = c.player.inventoryChanges.items;
 
     if (incoming.inventoryChanges.action == InventoryAction::Set)
     {
-        c.player.inventoryChanges = incoming.inventoryChanges;
+        nextItems = incoming.inventoryChanges.items;
     }
     else if (incoming.inventoryChanges.action == InventoryAction::Add)
     {
         for (const auto& item : incoming.inventoryChanges.items)
         {
             auto it = std::find_if(
-                c.player.inventoryChanges.items.begin(),
-                c.player.inventoryChanges.items.end(),
+                nextItems.begin(),
+                nextItems.end(),
                 [&](const Item& existing) { return sameStack(existing, item); });
-            if (it != c.player.inventoryChanges.items.end())
+            if (it != nextItems.end())
                 it->count += item.count;
             else
-                c.player.inventoryChanges.items.push_back(item);
+                nextItems.push_back(item);
         }
     }
     else if (incoming.inventoryChanges.action == InventoryAction::Remove)
@@ -5568,17 +5726,21 @@ void MPServer::handlePlayerInventory(ConnectedClient& c, const uint8_t* data, si
         for (const auto& item : incoming.inventoryChanges.items)
         {
             auto it = std::find_if(
-                c.player.inventoryChanges.items.begin(),
-                c.player.inventoryChanges.items.end(),
+                nextItems.begin(),
+                nextItems.end(),
                 [&](const Item& existing) { return sameStack(existing, item); });
-            if (it == c.player.inventoryChanges.items.end())
+            if (it == nextItems.end())
                 continue;
 
             it->count -= item.count;
             if (it->count <= 0)
-                c.player.inventoryChanges.items.erase(it);
+                nextItems.erase(it);
         }
     }
+
+    const bool correctedInstanceIds = reconcileInventoryInstanceIds(c, nextItems);
+    c.player.inventoryChanges.action = InventoryAction::Set;
+    c.player.inventoryChanges.items = std::move(nextItems);
 
     c.acceptedPlayerInventoryThisSession = true;
     c.restoredInventorySnapshot = c.player.inventoryChanges.items;
@@ -5599,7 +5761,17 @@ void MPServer::handlePlayerInventory(ConnectedClient& c, const uint8_t* data, si
 
     syncLuaSnapshot();
     scheduleGeneratedDynamicRecordGc("player_inventory");
-    broadcastToAll(std::vector<uint8_t>(data, data + size), c.conn);
+    PacketPlayerInventory authoritative;
+    authoritative.setPlayer(&c.player);
+    const std::vector<uint8_t> encoded = authoritative.encode();
+    // Ordinary client inventory changes already describe the sender's live
+    // inventory. Echoing the full Set snapshot makes the client rebuild every
+    // stack for routine mutations such as consuming one arrow. Only return a
+    // snapshot when the server actually assigned or corrected hidden identity
+    // metadata; peers still receive the accepted authoritative state.
+    if (correctedInstanceIds)
+        sendTo(c.conn, encoded);
+    broadcastToAll(encoded, c.conn);
 }
 
 // ---------------------------------------------------------------------------
@@ -8493,7 +8665,7 @@ void MPServer::handleObjectPlace(ConnectedClient& c, const uint8_t* data, size_t
     PacketObjectPlace pkt;
     if (!pkt.decode(data, size)) return;
 
-    if (!acceptPlacedObject(pkt.object))
+    if (!acceptPlacedObject(pkt.object, &c))
         return;
 
     Log(Debug::Info) << "[Server] ObjectPlace accepted: player=" << c.name
@@ -8565,6 +8737,21 @@ void MPServer::handleObjectDelete(ConnectedClient& c, const uint8_t* data, size_
         }
     }
 
+    std::optional<PlacedObject> takenObject;
+    if (pkt.takenIntoInventory)
+    {
+        for (const auto& [cellId, objects] : mWorld.placedObjects)
+        {
+            const auto it = std::find_if(objects.begin(), objects.end(),
+                [&](const PlacedObject& object) { return object.mpNum == pkt.mpNum; });
+            if (it != objects.end())
+            {
+                takenObject = *it;
+                break;
+            }
+        }
+    }
+
     if (!removePlacedObjectAuthoritative(pkt.mpNum, pkt.cellId))
     {
         Log(Debug::Verbose) << "[Server] Ignoring ObjectDelete from " << c.name
@@ -8572,6 +8759,16 @@ void MPServer::handleObjectDelete(ConnectedClient& c, const uint8_t* data, size_
                             << " cell=" << pkt.cellId
                             << " because no matching placed object exists";
         return;
+    }
+
+    if (takenObject)
+    {
+        c.pendingInventoryTransfers.push_back({ takenObject->mpNum, takenObject->refId, takenObject->count,
+            currentServerTimeMs() + 5000 });
+        Log(Debug::Verbose) << "[Server] Preserving world instance identity for inventory transfer"
+                            << " player=" << c.name
+                            << " refId=" << takenObject->refId
+                            << " instanceId=" << takenObject->mpNum;
     }
 
     Log(Debug::Info) << "[Server] ObjectDelete accepted: player=" << c.name
@@ -9606,13 +9803,30 @@ int MPServer::getPlayerCount() const
     return count;
 }
 
-bool MPServer::acceptPlacedObject(PlacedObject& object)
+bool MPServer::acceptPlacedObject(PlacedObject& object, ConnectedClient* source)
 {
     if (object.refId.empty() || object.cellId.empty() || object.count <= 0)
         return false;
 
+    const uint32_t requestedInstanceId = object.mpNum;
+    object.mpNum = 0;
+    if (source && requestedInstanceId != 0)
+    {
+        const auto sourceStack = std::find_if(source->player.inventoryChanges.items.begin(),
+            source->player.inventoryChanges.items.end(), [&](const Item& item) {
+                return item.instanceId == requestedInstanceId && item.refId == object.refId && item.count > 0;
+            });
+        // Only a whole-stack drop transfers its identity. A split remains in
+        // inventory under the old ID and the dropped portion gets a new one.
+        if (sourceStack != source->player.inventoryChanges.items.end() && object.count == sourceStack->count
+            && !worldMpNumInUse(requestedInstanceId))
+            object.mpNum = requestedInstanceId;
+    }
+
     do
     {
+        if (object.mpNum != 0)
+            break;
         const std::optional<uint32_t> reservedMpNum = reserveWorldMpNum();
         if (!reservedMpNum)
         {
@@ -9702,12 +9916,13 @@ void MPServer::sendAuthoritativeInventory(ConnectedClient& c)
 }
 
 // ---------------------------------------------------------------------------
-void MPServer::sendAuthoritativeEquipment(ConnectedClient& c, bool includeOthers)
+void MPServer::sendAuthoritativeEquipment(ConnectedClient& c, bool includeOthers, bool includeSelf)
 {
     PacketPlayerEquipment equipment;
     equipment.setPlayer(&c.player);
     const std::vector<uint8_t> encoded = equipment.encode();
-    sendTo(c.conn, encoded);
+    if (includeSelf)
+        sendTo(c.conn, encoded);
     if (includeOthers)
         broadcastToAll(encoded, c.conn);
 }
@@ -9895,6 +10110,7 @@ bool MPServer::grantInventoryItem(ConnectedClient& c, const std::string& refId, 
     }
 
     c.player.inventoryChanges.action = BasePlayer::InventoryChanges::Action::Set;
+    reconcileInventoryInstanceIds(c, c.player.inventoryChanges.items);
 
     if (mPlayerDb && c.dbCharacterId != 0)
         mPlayerDb->saveCharacterInventory(c.dbCharacterId, c.player.inventoryChanges.items);

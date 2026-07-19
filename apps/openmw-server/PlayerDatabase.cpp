@@ -241,6 +241,7 @@ CREATE TABLE IF NOT EXISTS character_inventory (
     charge                INTEGER NOT NULL DEFAULT -1,
     enchantment_charge    REAL    NOT NULL DEFAULT -1,
     soul                  TEXT    NOT NULL DEFAULT '',
+    instance_id           INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY(character_id, item_index)
 );
 
@@ -252,6 +253,7 @@ CREATE TABLE IF NOT EXISTS character_equipment (
     charge                INTEGER NOT NULL DEFAULT -1,
     enchantment_charge    REAL    NOT NULL DEFAULT -1,
     soul                  TEXT    NOT NULL DEFAULT '',
+    instance_id           INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY(character_id, slot)
 );
 
@@ -372,6 +374,8 @@ CREATE INDEX IF NOT EXISTS idx_character_lua_storage_namespace
         "ALTER TABLE characters ADD COLUMN stats_saved INTEGER NOT NULL DEFAULT 0",
         "ALTER TABLE characters ADD COLUMN level INTEGER NOT NULL DEFAULT 1",
         "ALTER TABLE characters ADD COLUMN level_progress REAL NOT NULL DEFAULT 0",
+        "ALTER TABLE character_inventory ADD COLUMN instance_id INTEGER NOT NULL DEFAULT 0",
+        "ALTER TABLE character_equipment ADD COLUMN instance_id INTEGER NOT NULL DEFAULT 0",
         "CREATE TABLE IF NOT EXISTS character_inventory ("
         "  character_id INTEGER NOT NULL REFERENCES characters(id) ON DELETE CASCADE,"
         "  item_index INTEGER NOT NULL,"
@@ -973,7 +977,7 @@ CREATE INDEX IF NOT EXISTS idx_character_lua_storage_namespace
     std::vector<Item> PlayerDatabase::loadCharacterInventory(int64_t characterId)
     {
         sqlite3_stmt* s = prepare(
-            "SELECT ref_id, item_count, charge, enchantment_charge, soul"
+            "SELECT ref_id, item_count, charge, enchantment_charge, soul, instance_id"
             " FROM character_inventory WHERE character_id=?1 ORDER BY item_index");
         sqlite3_bind_int64(s, 1, characterId);
 
@@ -991,6 +995,7 @@ CREATE INDEX IF NOT EXISTS idx_character_lua_storage_namespace
             item.charge = sqlite3_column_int(s, 2);
             item.enchantmentCharge = static_cast<float>(sqlite3_column_double(s, 3));
             item.soul = col(4);
+            item.instanceId = static_cast<uint32_t>(sqlite3_column_int64(s, 5));
             items.push_back(std::move(item));
         }
 
@@ -1011,8 +1016,8 @@ CREATE INDEX IF NOT EXISTS idx_character_lua_storage_namespace
 
             sqlite3_stmt* insert = prepare(
                 "INSERT INTO character_inventory(character_id, item_index, ref_id, item_count, charge, "
-                "enchantment_charge, soul)"
-                " VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7)");
+                "enchantment_charge, soul, instance_id)"
+                " VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)");
 
             for (std::size_t i = 0; i < items.size(); ++i)
             {
@@ -1024,6 +1029,7 @@ CREATE INDEX IF NOT EXISTS idx_character_lua_storage_namespace
                 sqlite3_bind_int(insert, 5, item.charge);
                 sqlite3_bind_double(insert, 6, item.enchantmentCharge);
                 sqlite3_bind_text(insert, 7, item.soul.c_str(), static_cast<int>(item.soul.size()), SQLITE_TRANSIENT);
+                sqlite3_bind_int64(insert, 8, item.instanceId);
                 checkSqlite(sqlite3_step(insert), mDb, "insertCharacterInventory");
                 sqlite3_reset(insert);
                 sqlite3_clear_bindings(insert);
@@ -1042,7 +1048,8 @@ CREATE INDEX IF NOT EXISTS idx_character_lua_storage_namespace
                 " VALUES(?1, ?2, ?3, ?4, ?5, ?6)");
             for (std::size_t i = 0; i < items.size(); ++i)
                 insertDynamicRecordLink(
-                    mDb, insertLink, items[i].refId, "inventory_item", characterKey, "", "", static_cast<int64_t>(i));
+                    mDb, insertLink, items[i].refId, "inventory_item", characterKey, "", "",
+                    items[i].instanceId != 0 ? items[i].instanceId : static_cast<int64_t>(i));
             sqlite3_finalize(insertLink);
 
             sqlite3_stmt* mark
@@ -1078,7 +1085,7 @@ CREATE INDEX IF NOT EXISTS idx_character_lua_storage_namespace
     std::vector<EquipmentItem> PlayerDatabase::loadCharacterEquipment(int64_t characterId)
     {
         sqlite3_stmt* s = prepare(
-            "SELECT slot, ref_id, item_count, charge, enchantment_charge, soul"
+            "SELECT slot, ref_id, item_count, charge, enchantment_charge, soul, instance_id"
             " FROM character_equipment WHERE character_id=?1 ORDER BY slot");
         sqlite3_bind_int64(s, 1, characterId);
 
@@ -1097,6 +1104,7 @@ CREATE INDEX IF NOT EXISTS idx_character_lua_storage_namespace
             entry.item.charge = sqlite3_column_int(s, 3);
             entry.item.enchantmentCharge = static_cast<float>(sqlite3_column_double(s, 4));
             entry.item.soul = col(5);
+            entry.item.instanceId = static_cast<uint32_t>(sqlite3_column_int64(s, 6));
             equipment.push_back(std::move(entry));
         }
 
@@ -1118,8 +1126,8 @@ CREATE INDEX IF NOT EXISTS idx_character_lua_storage_namespace
 
             sqlite3_stmt* insert = prepare(
                 "INSERT INTO character_equipment(character_id, slot, ref_id, item_count, charge, enchantment_charge, "
-                "soul)"
-                " VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7)");
+                "soul, instance_id)"
+                " VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)");
 
             for (const EquipmentItem& entry : equipment)
             {
@@ -1135,6 +1143,7 @@ CREATE INDEX IF NOT EXISTS idx_character_lua_storage_namespace
                 sqlite3_bind_double(insert, 6, entry.item.enchantmentCharge);
                 sqlite3_bind_text(
                     insert, 7, entry.item.soul.c_str(), static_cast<int>(entry.item.soul.size()), SQLITE_TRANSIENT);
+                sqlite3_bind_int64(insert, 8, entry.item.instanceId);
                 checkSqlite(sqlite3_step(insert), mDb, "insertCharacterEquipment");
                 sqlite3_reset(insert);
                 sqlite3_clear_bindings(insert);
@@ -1156,7 +1165,8 @@ CREATE INDEX IF NOT EXISTS idx_character_lua_storage_namespace
                 if (entry.item.refId.empty())
                     continue;
                 insertDynamicRecordLink(
-                    mDb, insertLink, entry.item.refId, "equipment_item", characterKey, "", "", entry.slot);
+                    mDb, insertLink, entry.item.refId, "equipment_item", characterKey, "", "",
+                    entry.item.instanceId != 0 ? entry.item.instanceId : static_cast<uint32_t>(entry.slot));
             }
             sqlite3_finalize(insertLink);
 

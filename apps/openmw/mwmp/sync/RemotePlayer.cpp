@@ -198,19 +198,6 @@ namespace mwmp
             return true;
         }
 
-        bool sameCosmeticEquipment(
-            const std::array<EquipmentItem, BasePlayer::NUM_EQUIPMENT_SLOTS>& left,
-            const std::array<EquipmentItem, BasePlayer::NUM_EQUIPMENT_SLOTS>& right)
-        {
-            for (int slot = 0; slot < BasePlayer::NUM_EQUIPMENT_SLOTS; ++slot)
-            {
-                if (!sameCosmeticItem(left[slot].item, right[slot].item))
-                    return false;
-            }
-
-            return true;
-        }
-
         bool equipmentSlotsMatchState(
             MWWorld::InventoryStore& inv,
             const std::array<EquipmentItem, BasePlayer::NUM_EQUIPMENT_SLOTS>& equipment)
@@ -247,6 +234,20 @@ namespace mwmp
             MWWorld::ManualRef ref(world->getStore(), ESM::RefId::stringRefId(item.refId), std::max(1, item.count));
             if (ref.getPtr().isEmpty())
                 return;
+
+            // A ranged shot is replicated as an inventory decrement for its
+            // arrow, bolt, or thrown weapon. Treating that decrement like a
+            // manual drop plays Item Ammo Down on observers after every shot.
+            // The firing animation already supplies the correct spatial cue.
+            if (!pickedUp && ref.getPtr().getType() == ESM::Weapon::sRecordId)
+            {
+                const int weaponType = ref.getPtr().get<ESM::Weapon>()->mBase->mData.mType;
+                if (weaponType == ESM::Weapon::Arrow || weaponType == ESM::Weapon::Bolt
+                    || weaponType == ESM::Weapon::MarksmanThrown)
+                {
+                    return;
+                }
+            }
 
             const ESM::RefId& soundId = pickedUp
                 ? ref.getPtr().getClass().getUpSoundId(ref.getPtr())
@@ -382,6 +383,8 @@ namespace mwmp
     void RemotePlayer::update(float dt)
     {
         const float safeDt = std::max(0.f, dt);
+        mRangedAttackLocomotionSuppressTimer
+            = std::max(0.f, mRangedAttackLocomotionSuppressTimer - safeDt);
         mMovementDiagFrameDtMax = std::max(mMovementDiagFrameDtMax, safeDt);
         if (safeDt >= (1.f / 30.f))
             ++mMovementDiagFrameStalls;
@@ -1714,8 +1717,14 @@ namespace mwmp
         }
 
         MWWorld::InventoryStore& inv = mNpcPtr.getClass().getInventoryStore(mNpcPtr);
-        if (sameCosmeticEquipment(previousEquipment, state.equipment)
-            && equipmentSlotsMatchState(inv, state.equipment))
+        // Stack-count changes do not alter the rendered equipment. In
+        // particular, consuming an arrow or bolt decrements the ammunition
+        // stack after every ranged shot. Rebuilding NpcAnimation for that
+        // count-only update recreates the attached projectile while the
+        // crossbow's ArrowBone is still traversing its reload path, producing
+        // an observer-only yo-yo effect. If every equipped record already
+        // matches, retain the current parts and animation attachments.
+        if (equipmentSlotsMatchState(inv, state.equipment))
         {
             return;
         }
@@ -2079,6 +2088,14 @@ namespace mwmp
         mState.attack = state.attack;
         const Attack& atk = state.attack;
 
+        // Ranged animation root motion produces a few units of replicated XY
+        // jitter even when the sender has no movement input. Keep that settling
+        // motion from reviving a stale buffered run cycle on observers. Genuine
+        // movement is still allowed immediately because the cadence gate below
+        // only suppresses frames whose authoritative input axes are idle.
+        if (atk.type == 2 || atk.type == 3)
+            mRangedAttackLocomotionSuppressTimer = 1.f;
+
         Log(Debug::Info) << "[MP] RemotePlayer " << mName << ": onAttack"
                          << " pressed=" << atk.pressed
                          << " hit=" << atk.hit << " block=" << atk.block
@@ -2361,15 +2378,57 @@ namespace mwmp
         switch (changes.action)
         {
             case Action::Set:
-                store.clear();
+            {
+                // Full inventory snapshots are emitted for ordinary count
+                // changes such as consuming one arrow or bolt. Clearing and
+                // rebuilding the whole remote InventoryStore in that case
+                // replaces every equipped stack with a new RefNum. Besides
+                // rebuilding the rendered weapon, that makes unchanged
+                // constant-effect equipment look newly equipped and replays
+                // its one-shot VFX and sound after every ranged attack.
+                //
+                // Remote inventories are presentation state, so reconcile the
+                // aggregate record counts in place. Unchanged stacks retain
+                // their native identity while additions/removals still
+                // converge to the authoritative snapshot.
+                std::unordered_map<std::string, int> currentCounts;
+                for (MWWorld::ContainerStoreIterator it = store.begin(); it != store.end(); ++it)
+                {
+                    const int count = it->getCellRef().getCount();
+                    if (count > 0)
+                        currentCounts[it->getCellRef().getRefId().serializeText()] += count;
+                }
+
+                std::unordered_map<std::string, int> targetCounts;
                 for (const auto& item : changes.items)
                 {
                     if (!item.refId.empty() && item.count > 0)
-                        store.add(ESM::RefId::stringRefId(item.refId), item.count);
+                        targetCounts[item.refId] += item.count;
                 }
+
+                for (const auto& [refId, currentCount] : currentCounts)
+                {
+                    const auto targetIt = targetCounts.find(refId);
+                    const int targetCount = targetIt == targetCounts.end() ? 0 : targetIt->second;
+                    if (currentCount > targetCount)
+                    {
+                        store.remove(ESM::RefId::stringRefId(refId), currentCount - targetCount,
+                            /*equipReplacement=*/false);
+                    }
+                }
+
+                for (const auto& [refId, targetCount] : targetCounts)
+                {
+                    const auto currentIt = currentCounts.find(refId);
+                    const int currentCount = currentIt == currentCounts.end() ? 0 : currentIt->second;
+                    if (targetCount > currentCount)
+                        store.add(ESM::RefId::stringRefId(refId), targetCount - currentCount);
+                }
+
                 Log(Debug::Verbose) << "[MP] RemotePlayer " << mName << ": inventory Set (" << changes.items.size()
                                     << " items)";
                 break;
+            }
 
             case Action::Add:
                 for (const auto& item : changes.items)
@@ -2762,8 +2821,11 @@ namespace mwmp
                 // Even if the interpolator is still settling the remaining error, an idle
                 // actor should not play movement animations. Zeroing the speed
                 // immediately kills the CharacterController's footstep cadence.
-                mInterpPlanarSpeed = (isInputIdle && !usingSnapshotTimeline) ? 0.f
-                                                                            : std::min(interpPlanarSpeed, 1000.f);
+                const bool suppressRangedAttackJitter
+                    = isInputIdle && mRangedAttackLocomotionSuppressTimer > 0.f;
+                mInterpPlanarSpeed = (suppressRangedAttackJitter || (isInputIdle && !usingSnapshotTimeline))
+                    ? 0.f
+                    : std::min(interpPlanarSpeed, 1000.f);
                 Log(Debug::Verbose) << "[MP] " << mName << " Cadence settling=" << mInterpPlanarSpeed;
             }
         }

@@ -99,7 +99,8 @@ namespace MWWorld
         }
 
         ContainerStoreIterator add(
-            const ConstPtr& itemPtr, int count, bool allowAutoEquip = true, bool resolve = true) override;
+            const ConstPtr& itemPtr, int count, bool allowAutoEquip = true, bool resolve = true,
+            bool forceNewStack = false) override;
         ///< Add the item pointed to by \a ptr to this container. (Stacks automatically if needed)
         /// Auto-equip items if specific conditions are fulfilled and allowAutoEquip is true (see the implementation).
         ///

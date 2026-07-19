@@ -69,7 +69,7 @@ namespace MWLua
     ESM::Ingredient tableToIngredient(const sol::table& rec);
     void addArmorBindings(sol::table armor, const Context& context);
     ESM::Armor tableToArmor(const sol::table& rec);
-    void addLockableBindings(sol::table lockable);
+    void addLockableBindings(sol::table lockable, const Context& context);
     void addClothingBindings(sol::table clothing, const Context& context);
     ESM::Clothing tableToClothing(const sol::table& rec);
     void addStaticBindings(sol::table stat, const Context& context);

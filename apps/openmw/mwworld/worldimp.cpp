@@ -3119,7 +3119,7 @@ namespace MWWorld
     }
 
     void World::launchProjectile(MWWorld::Ptr& actor, MWWorld::Ptr& projectile, const osg::Vec3f& worldPos,
-        const osg::Quat& orient, MWWorld::Ptr& bow, float speed, float attackStrength)
+        const osg::Quat& orient, MWWorld::Ptr& bow, float speed, float attackStrength, bool visualOnly)
     {
         // An initial position of projectile can be outside shooter's collision box, so any object between shooter and
         // launch position will be ignored. To avoid this issue, we should check for impact immediately before launch
@@ -3138,7 +3138,7 @@ namespace MWWorld
         MWPhysics::RayCastingResult result = mPhysics->castRay(
             sourcePos, worldPos, { actor }, targetActors, 0xff, MWPhysics::CollisionType_Projectile);
 
-        if (result.mHit)
+        if (result.mHit && !visualOnly)
         {
             MWMechanics::projectileHit(actor, result.mHitObject, bow, projectile, result.mHitPos, attackStrength);
             return;
@@ -3147,12 +3147,14 @@ namespace MWWorld
         // Bail out if the launch position is underwater
         if (isUnderwater(MWMechanics::getPlayer().getCell(), worldPos))
         {
-            MWMechanics::projectileHit(actor, Ptr(), bow, projectile, worldPos, attackStrength);
+            if (!visualOnly)
+                MWMechanics::projectileHit(actor, Ptr(), bow, projectile, worldPos, attackStrength);
             mRendering->emitWaterRipple(worldPos);
             return;
         }
 
-        mProjectileManager->launchProjectile(actor, projectile, worldPos, orient, bow, speed, attackStrength);
+        mProjectileManager->launchProjectile(
+            actor, projectile, worldPos, orient, bow, speed, attackStrength, visualOnly);
     }
 
     void World::launchMagicBolt(const ESM::RefId& spellId, const MWWorld::Ptr& caster,

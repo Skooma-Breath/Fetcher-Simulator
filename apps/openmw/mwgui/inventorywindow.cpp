@@ -33,6 +33,11 @@
 #include "../mwmechanics/actorutil.hpp"
 #include "../mwmechanics/npcstats.hpp"
 
+#ifdef BUILD_MULTIPLAYER
+#include "../mwmp/Main.hpp"
+#include "../mwmp/sync/WorldObjectSync.hpp"
+#endif
+
 #include "companionwindow.hpp"
 #include "container.hpp"
 #include "countdialog.hpp"
@@ -874,6 +879,11 @@ namespace MWGui
         // add to player inventory
         // can't use ActionTake here because we need an MWWorld::Ptr to the newly inserted object
         MWWorld::Ptr newObject = *player.getClass().getContainerStore(player).add(object, count);
+
+#ifdef BUILD_MULTIPLAYER
+        if (mwmp::Main::isConnected())
+            mwmp::Main::get().getWorldObjectSync().onLocalObjectTaken(object, newObject);
+#endif
 
         // remove from world
         MWBase::Environment::get().getWorld()->deleteObject(object);

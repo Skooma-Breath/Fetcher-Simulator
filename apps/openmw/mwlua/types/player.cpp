@@ -6,6 +6,7 @@
 
 #include "../birthsignbindings.hpp"
 #include "../luamanagerimp.hpp"
+#include "../mutationaudit.hpp"
 
 #include "apps/openmw/mwbase/dialoguemanager.hpp"
 #include "apps/openmw/mwbase/inputmanager.hpp"
@@ -330,6 +331,8 @@ namespace MWLua
         auto setQuestStage = [context](const Quest& self, int stage) {
             if (!self.mMutable)
                 throw std::runtime_error("Value can only be changed in global or player scripts!");
+            auditNativeMutation(context, "player.setQuestStage", "quest:" + self.mQuestId.serializeText(),
+                std::to_string(stage));
             context.mLuaManager->addAction(
                 [self, stage] { MWBase::Environment::get().getJournal()->setJournalIndex(self.mQuestId, stage); },
                 "setQuestStageAction");
@@ -349,6 +352,8 @@ namespace MWLua
             [journal, context](const Quest& q, bool finished) {
                 if (!q.mMutable)
                     throw std::runtime_error("Value can only be changed in global or player scripts!");
+                auditNativeMutation(context, "player.setQuestFinished", "quest:" + q.mQuestId.serializeText(),
+                    finished ? "true" : "false");
                 context.mLuaManager->addAction(
                     [q, finished, journal] { journal->getOrStartQuest(q.mQuestId).setFinished(finished); },
                     "setQuestFinishedAction");
@@ -356,6 +361,8 @@ namespace MWLua
         quest["addJournalEntry"] = [context](const Quest& q, int stage, sol::optional<GObject> actor) {
             if (!q.mMutable)
                 throw std::runtime_error("Can only be used in global or player scripts!");
+            auditNativeMutation(context, "player.addJournalEntry", "quest:" + q.mQuestId.serializeText(),
+                std::to_string(stage));
             // The journal mwscript function has a try function here, we will make the lua function throw an
             // error. However, the addAction will cause it to error outside of this function.
             context.mLuaManager->addAction(
@@ -401,7 +408,7 @@ namespace MWLua
                 throw std::runtime_error("Only player and global scripts can toggle teleportation.");
             MWBase::Environment::get().getWorld()->enableTeleporting(state);
         };
-        player["addTopic"] = [](const Object& object, std::string_view topicId) {
+        player["addTopic"] = [context](const Object& object, std::string_view topicId) {
             verifyPlayer(object);
 
             ESM::RefId topic = ESM::RefId::deserializeText(topicId);
@@ -415,6 +422,7 @@ namespace MWLua
             if (dialogueRecord->mType != ESM::Dialogue::Topic)
                 throw std::runtime_error("Failed to add topic \"" + std::string(topicId) + "\": record is not a topic");
 
+            auditNativeMutation(context, "player.addTopic", object.ptr(), topicId);
             MWBase::Environment::get().getDialogueManager()->addTopic(topic);
         };
         player["sendMenuEvent"] = [context](const Object& object, std::string eventName, const sol::object& eventData) {
@@ -426,10 +434,11 @@ namespace MWLua
             const MWWorld::Class& cls = o.ptr().getClass();
             return cls.getNpcStats(o.ptr()).getBounty();
         };
-        player["setCrimeLevel"] = [](const Object& o, int amount) {
+        player["setCrimeLevel"] = [context](const Object& o, int amount) {
             verifyPlayer(o);
             if (!o.isGObject())
                 throw std::runtime_error("Only global scripts can change crime level");
+            auditNativeMutation(context, "player.setCrimeLevel", o.ptr(), std::to_string(amount));
             const MWWorld::Class& cls = o.ptr().getClass();
             cls.getNpcStats(o.ptr()).setBounty(amount);
             if (amount == 0)
@@ -447,7 +456,7 @@ namespace MWLua
                     { "Trespassing", MWBase::MechanicsManager::OffenseType::OT_Trespassing },
                     { "SleepingInOwnedBed", MWBase::MechanicsManager::OffenseType::OT_SleepingInOwnedBed },
                     { "Pickpocket", MWBase::MechanicsManager::OffenseType::OT_Pickpocket } }));
-        player["_runStandardCommitCrime"] = [](const Object& o, const sol::optional<Object> victim, int type,
+        player["_runStandardCommitCrime"] = [context](const Object& o, const sol::optional<Object> victim, int type,
                                                 std::string_view faction, int arg = 0, bool victimAware = false) {
             verifyPlayer(o);
             if (victim.has_value() && !victim->ptrOrEmpty().isEmpty())
@@ -462,6 +471,8 @@ namespace MWLua
             if (faction != "" && factionId == ESM::RefId())
                 throw std::runtime_error("Faction does not exist");
 
+            auditNativeMutation(context, "player.commitCrime", o.ptr(), std::to_string(type));
+
             MWWorld::Ptr victimObj = nullptr;
             if (victim.has_value())
                 victimObj = victim->ptrOrEmpty();
@@ -474,10 +485,11 @@ namespace MWLua
             verifyPlayer(object);
             return MWBase::Environment::get().getWorld()->getPlayer().getBirthSign().serializeText();
         };
-        player["setBirthSign"] = [](const Object& object, const sol::object& recordOrId) {
+        player["setBirthSign"] = [context](const Object& object, const sol::object& recordOrId) {
             verifyPlayer(object);
             if (!object.isGObject())
                 throw std::runtime_error("Only global scripts can change birth signs");
+            auditNativeMutation(context, "player.setBirthSign", object.ptr());
             MWBase::Environment::get().getWorld()->getPlayer().setBirthSign(toBirthSignId(recordOrId));
         };
     }

@@ -440,7 +440,7 @@ namespace MWWorld
     }
 
     void ProjectileManager::launchProjectile(const Ptr& actor, const ConstPtr& projectile, const osg::Vec3f& pos,
-        const osg::Quat& orient, const Ptr& bow, float speed, float attackStrength)
+        const osg::Quat& orient, const Ptr& bow, float speed, float attackStrength, bool visualOnly)
     {
         ProjectileState state;
         state.mCaster = actor.getCellRef().getRefNum();
@@ -449,6 +449,7 @@ namespace MWWorld
         state.mIdArrow = projectile.getCellRef().getRefId();
         state.mCasterHandle = actor;
         state.mAttackStrength = attackStrength;
+        state.mVisualOnly = visualOnly;
 
         MWWorld::ManualRef ref(*MWBase::Environment::get().getESMStore(), projectile.getCellRef().getRefId());
         MWWorld::Ptr ptr = ref.getPtr();
@@ -644,8 +645,11 @@ namespace MWWorld
             if (projectile->getHitWater())
                 mRendering->emitWaterRipple(hitPosition);
 
-            MWMechanics::projectileHit(
-                caster, target, bow, projectileRef.getPtr(), hitPosition, projectileState.mAttackStrength);
+            if (!projectileState.mVisualOnly)
+            {
+                MWMechanics::projectileHit(
+                    caster, target, bow, projectileRef.getPtr(), hitPosition, projectileState.mAttackStrength);
+            }
             projectileState.mToDelete = true;
         }
         const MWWorld::ESMStore& esmStore = *MWBase::Environment::get().getESMStore();
@@ -769,6 +773,9 @@ namespace MWWorld
     {
         for (const ProjectileState& projectile : mProjectiles)
         {
+            if (projectile.mVisualOnly)
+                continue;
+
             writer.startRecord(ESM::REC_PROJ);
 
             ESM::ProjectileState state;
@@ -913,7 +920,8 @@ namespace MWWorld
 
     size_t ProjectileManager::countSavedGameRecords() const
     {
-        return mProjectiles.size()
+        return static_cast<size_t>(std::count_if(mProjectiles.begin(), mProjectiles.end(),
+                   [](const ProjectileState& projectile) { return !projectile.mVisualOnly; }))
             + static_cast<size_t>(std::count_if(mMagicBolts.begin(), mMagicBolts.end(),
                 [](const MagicBoltState& bolt) { return !bolt.mVisualOnly; }));
     }

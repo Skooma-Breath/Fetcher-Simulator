@@ -32,6 +32,7 @@
 
 #include "luaevents.hpp"
 #include "luamanagerimp.hpp"
+#include "mutationaudit.hpp"
 #include "types/types.hpp"
 
 namespace sol
@@ -397,6 +398,7 @@ namespace MWLua
             auto setEnabled = [context](const GObject& object, bool enable) {
                 if (enable && object.ptr().mRef->isDeleted())
                     throw std::runtime_error("Object is removed");
+                auditNativeMutation(context, enable ? "object.enable" : "object.disable", object.ptr());
                 context.mLuaManager->addAction([object, enable] {
                     if (object.ptr().mRef->isDeleted())
                         return;
@@ -424,6 +426,7 @@ namespace MWLua
             if constexpr (std::is_same_v<ObjectT, GObject>)
             { // Only for global scripts
                 objectT["setScale"] = [context](const GObject& object, float scale) {
+                    auditNativeMutation(context, "object.setScale", object.ptr(), std::to_string(scale));
                     context.mLuaManager->addAction(
                         [object, scale] { MWBase::Environment::get().getWorld()->scaleObject(object.ptr(), scale); });
                 };
@@ -437,6 +440,7 @@ namespace MWLua
                             "Script without CUSTOM tag can not be added dynamically: " + std::string(path));
                     if (object.ptr().getType() == ESM::REC_STAT)
                         throw std::runtime_error("Attaching scripts to Static is not allowed: " + std::string(path));
+                    auditNativeMutation(context, "object.addScript", object.ptr(), path);
                     if (initData != sol::nil)
                         context.mLuaManager->addCustomLocalScript(object.ptr(), *scriptId,
                             LuaUtil::serialize(LuaUtil::cast<sol::table>(initData), context.mSerializer));
@@ -456,8 +460,8 @@ namespace MWLua
                     else
                         return false;
                 };
-                objectT["removeScript"] = [lua = context.mLua](const GObject& object, std::string_view path) {
-                    const LuaUtil::ScriptsConfiguration& cfg = lua->getConfiguration();
+                objectT["removeScript"] = [context](const GObject& object, std::string_view path) {
+                    const LuaUtil::ScriptsConfiguration& cfg = context.mLua->getConfiguration();
                     std::optional<int> scriptId = cfg.findId(VFS::Path::Normalized(path));
                     if (!scriptId)
                         throw std::runtime_error("Unknown script: " + std::string(path));
@@ -467,6 +471,7 @@ namespace MWLua
                         throw std::runtime_error("There is no script " + std::string(path) + " on " + ptr.toString());
                     if (localScripts->getAutoStartConf().count(*scriptId) > 0)
                         throw std::runtime_error("Autostarted script can not be removed: " + std::string(path));
+                    auditNativeMutation(context, "object.removeScript", object.ptr(), path);
                     localScripts->removeScript(*scriptId);
                 };
 
@@ -497,12 +502,15 @@ namespace MWLua
                     };
                 };
                 objectT["remove"] = [removeFn, context](const GObject& object, sol::optional<int> count) {
+                    auditNativeMutation(context, "object.remove", object.ptr(),
+                        std::to_string(count.value_or(object.ptr().getCellRef().getCount())));
                     std::optional<DelayedRemovalFn> delayed
                         = removeFn(object.ptr(), count.value_or(object.ptr().getCellRef().getCount()));
                     if (delayed.has_value())
                         context.mLuaManager->addAction([fn = *delayed, object] { fn(object.ptr()); });
                 };
                 objectT["split"] = [removeFn, context](const GObject& object, int count) -> GObject {
+                    auditNativeMutation(context, "object.split", object.ptr(), std::to_string(count));
                     // Doesn't matter which cell to use because the new instance will be in disabled state.
                     MWWorld::CellStore* cell = MWBase::Environment::get().getWorldScene()->getCurrentCell();
 
@@ -525,6 +533,7 @@ namespace MWLua
                     else
                         destPtr = LuaUtil::cast<Inventory<GObject>>(dest).mObj.ptr();
                     destPtr.getClass().getContainerStore(destPtr); // raises an error if there is no container store
+                    auditNativeMutation(context, "object.moveInto", ptr, destPtr.toString());
 
                     std::optional<DelayedRemovalFn> delayedRemovalFn = removeFn(ptr, count);
                     context.mLuaManager->addAction([item = object, count, cont = GObject(destPtr), delayedRemovalFn] {
@@ -545,6 +554,8 @@ namespace MWLua
                     int count = ptr.getCellRef().getCount();
                     if (count == 0)
                         throw std::runtime_error("Object is either removed or already in the process of teleporting");
+                    auditNativeMutation(context, "object.teleport", ptr,
+                        std::to_string(pos.x()) + "," + std::to_string(pos.y()) + "," + std::to_string(pos.z()));
                     osg::Vec3f rot = ptr.getRefData().getPosition().asRotationVec3();
                     bool placeOnGround = false;
                     if (LuaUtil::isTransform(options))

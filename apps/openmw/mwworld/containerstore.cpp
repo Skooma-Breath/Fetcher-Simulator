@@ -407,11 +407,11 @@ MWWorld::ContainerStoreIterator MWWorld::ContainerStore::add(const ESM::RefId& i
 }
 
 MWWorld::ContainerStoreIterator MWWorld::ContainerStore::add(
-    const ConstPtr& itemPtr, int count, bool /*allowAutoEquip*/, bool resolve)
+    const ConstPtr& itemPtr, int count, bool /*allowAutoEquip*/, bool resolve, bool forceNewStack)
 {
     Ptr player = MWBase::Environment::get().getWorld()->getPlayerPtr();
 
-    MWWorld::ContainerStoreIterator it = addImp(itemPtr, count, resolve);
+    MWWorld::ContainerStoreIterator it = addImp(itemPtr, count, resolve, forceNewStack);
 
     // The copy of the original item we just made
     MWWorld::Ptr item = *it;
@@ -470,7 +470,8 @@ MWWorld::ContainerStoreIterator MWWorld::ContainerStore::add(
     return it;
 }
 
-MWWorld::ContainerStoreIterator MWWorld::ContainerStore::addImp(const ConstPtr& ptr, int count, bool markModified)
+MWWorld::ContainerStoreIterator MWWorld::ContainerStore::addImp(
+    const ConstPtr& ptr, int count, bool markModified, bool forceNewStack)
 {
     if (markModified)
         resolve();
@@ -502,7 +503,7 @@ MWWorld::ContainerStoreIterator MWWorld::ContainerStore::addImp(const ConstPtr& 
     }
 
     // determine whether to stack or not
-    for (MWWorld::ContainerStoreIterator iter(begin(type)); iter != end(); ++iter)
+    for (MWWorld::ContainerStoreIterator iter(begin(type)); !forceNewStack && iter != end(); ++iter)
     {
         // Don't stack with equipped items
         if (auto* inventoryStore = dynamic_cast<InventoryStore*>(this))

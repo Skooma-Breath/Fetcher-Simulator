@@ -163,6 +163,19 @@ namespace LuaUtil
 
         const ScriptsConfiguration& getConfiguration() const { return *mConf; }
 
+        // Returns the script currently executing through LuaUtil::call. This is
+        // kept independently of the optional resource profiler so native API
+        // boundaries can reliably attribute multiplayer mutation attempts.
+        std::string_view getActiveScriptPath() const
+        {
+            if (mActiveScriptIdStack.empty())
+                return {};
+            const int index = mActiveScriptIdStack.back().mIndex;
+            if (index < 0 || static_cast<size_t>(index) >= mConf->size())
+                return {};
+            return (*mConf)[index].mScriptPath.value();
+        }
+
         // Load internal Lua library. All libraries are loaded in one sandbox and shouldn't be exposed to scripts
         // directly.
         void addInternalLibSearchPath(const std::filesystem::path& path) { mLibSearchPaths.push_back(path); }
@@ -197,6 +210,7 @@ namespace LuaUtil
         static void* trackingAllocator(void* ud, void* ptr, size_t osize, size_t nsize);
 
         static LuaStatePtr createLuaRuntime(LuaState* luaState);
+        static LuaState* fromLuaState(lua_State* state);
 
         struct AllocOwner
         {
@@ -256,11 +270,14 @@ namespace LuaUtil
     sol::protected_function_result call(ScriptId scriptId, const sol::protected_function& fn, Args&&... args)
     {
         LuaState* luaState = nullptr;
-        if (LuaState::sProfilerEnabled && scriptId.mContainer)
+        if (scriptId.mContainer)
         {
-            (void)lua_getallocf(fn.lua_state(), reinterpret_cast<void**>(&luaState));
+            luaState = LuaState::fromLuaState(fn.lua_state());
+            if (!luaState)
+                throw std::runtime_error("Lua function is not owned by LuaUtil::LuaState");
             luaState->mActiveScriptIdStack.push_back(scriptId);
-            luaState->mWatchdogInstructionCounter = 0;
+            if (LuaState::sProfilerEnabled)
+                luaState->mWatchdogInstructionCounter = 0;
         }
         try
         {

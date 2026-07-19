@@ -17,6 +17,7 @@ namespace mwmp
     public:
         uint32_t    mpNum  = 0;
         std::string cellId;
+        bool        takenIntoInventory = false;
 
         PacketObjectDelete() : BasePacket(PacketType::ObjectDelete) {}
 
@@ -25,12 +26,14 @@ namespace mwmp
         {
             ws.write(mpNum);
             ws.writeString(cellId);
+            ws.write(takenIntoInventory);
         }
 
         void unpack(ReadStream& rs) override
         {
             rs.read(mpNum);
             cellId = rs.readString();
+            rs.read(takenIntoInventory);
         }
     };
 

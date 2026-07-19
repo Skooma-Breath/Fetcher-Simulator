@@ -137,10 +137,10 @@ MWWorld::InventoryStore& MWWorld::InventoryStore::operator=(InventoryStore&& sto
 }
 
 MWWorld::ContainerStoreIterator MWWorld::InventoryStore::add(
-    const ConstPtr& itemPtr, int count, bool allowAutoEquip, bool resolve)
+    const ConstPtr& itemPtr, int count, bool allowAutoEquip, bool resolve, bool forceNewStack)
 {
     const MWWorld::ContainerStoreIterator& retVal
-        = MWWorld::ContainerStore::add(itemPtr, count, allowAutoEquip, resolve);
+        = MWWorld::ContainerStore::add(itemPtr, count, allowAutoEquip, resolve, forceNewStack);
 
     // Auto-equip items if an armor/clothing item is added, but not for the player nor werewolves
     const Ptr& actor = getPtr();

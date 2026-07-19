@@ -57,6 +57,7 @@
 #include "../../mwmechanics/weapontype.hpp"
 #include "../../mwworld/player.hpp"
 #include "../../mwworld/livecellref.hpp"
+#include "../../mwworld/manualref.hpp"
 #include <components/esm3/loadnpc.hpp>
 #include <components/esm3/loadskil.hpp>
 #include <components/esm3/loadweap.hpp>
@@ -67,6 +68,7 @@
 #include <components/openmw-mp/Packets/Player/PacketPlayerCast.hpp>
 
 #include "WorldObjectSync.hpp"
+#include "InventoryIdentity.hpp"
 
 namespace mwmp
 {
@@ -86,7 +88,8 @@ namespace
 
     bool sameItemIdentity(const Item& left, const Item& right)
     {
-        return left.refId == right.refId
+        return (left.instanceId == 0 || right.instanceId == 0 || left.instanceId == right.instanceId)
+            && left.refId == right.refId
             && left.charge == right.charge
             && std::abs(left.enchantmentCharge - right.enchantmentCharge) < 0.001f
             && left.soul == right.soul;
@@ -100,6 +103,29 @@ namespace
     bool sameEquipment(const EquipmentItem& left, const EquipmentItem& right)
     {
         return left.slot == right.slot && sameItem(left.item, right.item);
+    }
+
+    bool sameEquipmentStrict(const EquipmentItem& left, const EquipmentItem& right)
+    {
+        return left.slot == right.slot
+            && left.item.instanceId == right.item.instanceId
+            && left.item.count == right.item.count
+            && left.item.refId == right.item.refId
+            && left.item.charge == right.item.charge
+            && std::abs(left.item.enchantmentCharge - right.item.enchantmentCharge) < 0.001f
+            && left.item.soul == right.item.soul;
+    }
+
+    bool sameEquipmentStateStrict(
+        const std::array<EquipmentItem, BasePlayer::NUM_EQUIPMENT_SLOTS>& left,
+        const std::array<EquipmentItem, BasePlayer::NUM_EQUIPMENT_SLOTS>& right)
+    {
+        for (int slot = 0; slot < BasePlayer::NUM_EQUIPMENT_SLOTS; ++slot)
+        {
+            if (!sameEquipmentStrict(left[slot], right[slot]))
+                return false;
+        }
+        return true;
     }
 
     std::size_t equippedItemCount(const std::array<EquipmentItem, BasePlayer::NUM_EQUIPMENT_SLOTS>& equipment)
@@ -191,7 +217,8 @@ namespace
         if (std::abs(left.enchantmentCharge - right.enchantmentCharge) >= 0.001f)
             return left.enchantmentCharge < right.enchantmentCharge;
         if (left.soul != right.soul) return left.soul < right.soul;
-        return left.count < right.count;
+        if (left.count != right.count) return left.count < right.count;
+        return left.instanceId < right.instanceId;
     }
 
     int attackTypeFromWeapon(const MWWorld::Ptr& weapon)
@@ -491,7 +518,6 @@ void PlayerSync::queueAuthoritativeEquipment(const BasePlayer& authoritative)
     mAuthoritativeEquipment = authoritative.equipment;
     for (int slot = 0; slot < BasePlayer::NUM_EQUIPMENT_SLOTS; ++slot)
         mAuthoritativeEquipment[slot].slot = slot;
-    mPendingEquipmentRestore = true;
 
     Log(Debug::Verbose) << "[MP] PlayerSync: queued authoritative equipment"
                         << " guid=" << authoritative.guid
@@ -504,14 +530,41 @@ void PlayerSync::queueAuthoritativeEquipment(const BasePlayer& authoritative)
     // pre-game/template player; newGame(true) would recreate the player and wipe
     // the restored equipment. Keep it pending until the real world is running.
     if (MWBase::Environment::get().getStateManager()->getState() != MWBase::StateManager::State_Running)
+    {
+        mPendingEquipmentRestore = true;
         return;
+    }
 
     MWBase::World* world = MWBase::Environment::get().getWorld();
-    if (!world) return;
+    if (!world)
+    {
+        mPendingEquipmentRestore = true;
+        return;
+    }
 
     MWWorld::Ptr player = world->getPlayerPtr();
-    if (!player.isEmpty())
-        applyPendingAuthoritativeState(player);
+    if (player.isEmpty())
+    {
+        mPendingEquipmentRestore = true;
+        return;
+    }
+
+    // An accepted client equipment change may be echoed by an older server, and
+    // login restore acknowledgements can also arrive more than once. Reapplying
+    // an identical set calls unequipAll(), restarts equipment animations, and
+    // sends another acknowledgement. Treat an exact live match as the completed
+    // acknowledgement instead of feeding that loop.
+    captureEquipment(player);
+    if (sameEquipmentStateStrict(mLocal.equipment, mAuthoritativeEquipment))
+    {
+        mPendingEquipmentRestore = false;
+        snapshotEquipment();
+        Log(Debug::Verbose) << "[MP] PlayerSync: authoritative equipment already matches live state";
+        return;
+    }
+
+    mPendingEquipmentRestore = true;
+    applyPendingAuthoritativeState(player);
 }
 
 void PlayerSync::queueAuthoritativeInventory(const BasePlayer& authoritative)
@@ -1061,6 +1114,11 @@ void PlayerSync::sendBaseInfo()
 
 void PlayerSync::sendEquipment()
 {
+    // The server accepts normal runtime equipment selection without echoing it
+    // back to the sender. Keep the local authoritative fallback current so a
+    // later server-driven inventory rebuild restores the player's latest choice
+    // instead of an older login snapshot.
+    mAuthoritativeEquipment = mLocal.equipment;
     PacketPlayerEquipment pkt;
     pkt.setPlayer(&mLocal);
     mClient.sendReliable(pkt.encode(mSeqCounter++));
@@ -1934,7 +1992,29 @@ bool PlayerSync::equipmentChanged() const
     for (int i = 0; i < BasePlayer::NUM_EQUIPMENT_SLOTS; ++i)
     {
         if (!sameEquipment(mLocal.equipment[i], mLastEquip[i]))
+        {
+            static uint64_t sLastDiagnosticUs = 0;
+            const uint64_t nowUs = steadyTimeUs();
+            if (nowUs - sLastDiagnosticUs >= 1000000)
+            {
+                sLastDiagnosticUs = nowUs;
+                const Item& live = mLocal.equipment[i].item;
+                const Item& previous = mLastEquip[i].item;
+                Log(Debug::Info) << "[MPDIAG] PlayerEquipment delta"
+                                 << " slot=" << i
+                                 << " liveRef=" << live.refId
+                                 << " liveInstance=" << live.instanceId
+                                 << " liveCount=" << live.count
+                                 << " liveCharge=" << live.charge
+                                 << " liveEnchant=" << live.enchantmentCharge
+                                 << " previousRef=" << previous.refId
+                                 << " previousInstance=" << previous.instanceId
+                                 << " previousCount=" << previous.count
+                                 << " previousCharge=" << previous.charge
+                                 << " previousEnchant=" << previous.enchantmentCharge;
+            }
             return true;
+        }
     }
     return false;
 }
@@ -2119,6 +2199,7 @@ void PlayerSync::captureEquipment(const MWWorld::Ptr& player)
         {
             MWWorld::CellRef& cellRef = it->getCellRef();
             entry.item.refId = cellRef.getRefId().serializeText();
+            entry.item.instanceId = inventoryInstanceId(cellRef.getRefNum());
             entry.item.count = cellRef.getCount();
             entry.item.charge = cellRef.getCharge();
             entry.item.enchantmentCharge = cellRef.getEnchantmentCharge();
@@ -2127,6 +2208,7 @@ void PlayerSync::captureEquipment(const MWWorld::Ptr& player)
         else
         {
             entry.item.refId.clear();
+            entry.item.instanceId = 0;
             entry.item.count = 0;
             entry.item.charge = -1;
             entry.item.enchantmentCharge = -1.f;
@@ -2153,6 +2235,7 @@ void PlayerSync::captureInventory(const MWWorld::Ptr& player)
         Item item;
         const MWWorld::CellRef& cellRef = it->getCellRef();
         item.refId = cellRef.getRefId().serializeText();
+        item.instanceId = inventoryInstanceId(cellRef.getRefNum());
         item.count = cellRef.getCount();
         item.charge = cellRef.getCharge();
         item.enchantmentCharge = cellRef.getEnchantmentCharge();
@@ -2256,15 +2339,22 @@ void PlayerSync::applyPendingAuthoritativeState(const MWWorld::Ptr& player)
                 continue;
             }
 
-            MWWorld::ContainerStoreIterator it = containerStore.add(
-                ESM::RefId::stringRefId(item.refId), item.count, false);
+            MWWorld::ManualRef source(store, ESM::RefId::stringRefId(item.refId), item.count);
+            MWWorld::Ptr sourcePtr = source.getPtr();
+            MWWorld::CellRef& sourceCellRef = sourcePtr.getCellRef();
+            sourceCellRef.setCharge(item.charge);
+            sourceCellRef.setEnchantmentCharge(item.enchantmentCharge);
+            sourceCellRef.setSoul(item.soul.empty() ? ESM::RefId() : ESM::RefId::deserializeText(item.soul));
+            if (item.instanceId != 0)
+                sourceCellRef.setRefNum(inventoryInstanceRefNum(item.instanceId));
+
+            MWWorld::ContainerStoreIterator it = containerStore.add(sourcePtr, item.count, false, true, true);
             if (it == invStore.end())
                 continue;
 
-            MWWorld::CellRef& cellRef = it->getCellRef();
-            cellRef.setCharge(item.charge);
-            cellRef.setEnchantmentCharge(item.enchantmentCharge);
-            cellRef.setSoul(item.soul.empty() ? ESM::RefId() : ESM::RefId::deserializeText(item.soul));
+            // The preconfigured source RefNum is copied before registration,
+            // so every authoritative stack enters the WorldModel under its
+            // stable instance identity and cannot merge with an adjacent row.
         }
         mPendingInventoryRestore = false;
         applied = true;
@@ -2305,6 +2395,7 @@ void PlayerSync::applyPendingAuthoritativeState(const MWWorld::Ptr& player)
 
                 Item liveItem;
                 liveItem.refId = cellRef.getRefId().serializeText();
+                liveItem.instanceId = inventoryInstanceId(cellRef.getRefNum());
                 liveItem.count = cellRef.getCount();
                 liveItem.charge = cellRef.getCharge();
                 liveItem.enchantmentCharge = cellRef.getEnchantmentCharge();
@@ -2325,18 +2416,25 @@ void PlayerSync::applyPendingAuthoritativeState(const MWWorld::Ptr& player)
                     break;
                 }
 
-                MWWorld::ContainerStoreIterator added = containerStore.add(
-                    ESM::RefId::stringRefId(target.item.refId), std::max(1, target.item.count), false);
+                const int recoveredCount = std::max(1, target.item.count);
+                MWWorld::ManualRef source(
+                    store, ESM::RefId::stringRefId(target.item.refId), recoveredCount);
+                MWWorld::Ptr sourcePtr = source.getPtr();
+                MWWorld::CellRef& sourceCellRef = sourcePtr.getCellRef();
+                sourceCellRef.setCharge(target.item.charge);
+                sourceCellRef.setEnchantmentCharge(target.item.enchantmentCharge);
+                sourceCellRef.setSoul(
+                    target.item.soul.empty() ? ESM::RefId() : ESM::RefId::deserializeText(target.item.soul));
+                if (target.item.instanceId != 0)
+                    sourceCellRef.setRefNum(inventoryInstanceRefNum(target.item.instanceId));
+
+                MWWorld::ContainerStoreIterator added
+                    = containerStore.add(sourcePtr, recoveredCount, false, true, true);
                 if (added == invStore.end())
                 {
                     missingEquipRefId = target.item.refId;
                     break;
                 }
-
-                MWWorld::CellRef& cellRef = added->getCellRef();
-                cellRef.setCharge(target.item.charge);
-                cellRef.setEnchantmentCharge(target.item.enchantmentCharge);
-                cellRef.setSoul(target.item.soul.empty() ? ESM::RefId() : ESM::RefId::deserializeText(target.item.soul));
                 ++recoveredMissingEquippedItems;
             }
         }
@@ -2367,6 +2465,7 @@ void PlayerSync::applyPendingAuthoritativeState(const MWWorld::Ptr& player)
 
                 Item liveItem;
                 liveItem.refId = cellRef.getRefId().serializeText();
+                liveItem.instanceId = inventoryInstanceId(cellRef.getRefNum());
                 liveItem.count = cellRef.getCount();
                 liveItem.charge = cellRef.getCharge();
                 liveItem.enchantmentCharge = cellRef.getEnchantmentCharge();

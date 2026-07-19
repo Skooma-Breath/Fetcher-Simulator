@@ -60,7 +60,7 @@ add_openmw_dir (mwscript
 
 add_openmw_dir (mwlua
     luamanagerimp object objectlists userdataserializer luaevents engineevents objectvariant loadscripts contentbindings
-    context menuscripts globalscripts localscripts playerscripts luabindings objectbindings cellbindings coremwscriptbindings
+    context menuscripts globalscripts localscripts playerscripts luabindings objectbindings mutationaudit cellbindings coremwscriptbindings
     mwscriptbindings camerabindings vfsbindings uibindings soundbindings inputbindings nearbybindings dialoguebindings
     postprocessingbindings stats recordstore debugbindings corebindings worldbindings worker landbindings magicbindings factionbindings
     classbindings itemdata inputprocessor animationbindings birthsignbindings racebindings markupbindings weatherbindings regionbindings
@@ -121,7 +121,7 @@ if (BUILD_MULTIPLAYER)
         Client Protocol Serialization
     )
     add_openmw_dir (mwmp/sync
-        PlayerSync RemotePlayer Nameplate ActorSync CellSync ObjectSync WorldObjectSync WorldStateSync
+        PlayerSync RemotePlayer Nameplate ActorSync CellSync ObjectSync WorldObjectSync WorldStateSync InventoryIdentity
     )
     add_openmw_dir (mwmp/gui
         ChatWindow LoginDialog PlayerListWindow ServerBrowser

@@ -300,7 +300,8 @@ namespace MWWorld
         std::ptrdiff_t index(const ContainerStoreIterator& iter) const;
 
     private:
-        ContainerStoreIterator addImp(const ConstPtr& ptr, int count, bool markModified = true);
+        ContainerStoreIterator addImp(
+            const ConstPtr& ptr, int count, bool markModified = true, bool forceNewStack = false);
         void addInitialItem(
             const ESM::RefId& id, const ESM::RefId& owner, int count, Misc::Rng::Generator* prng, bool topLevel = true);
         void addInitialItemImp(const MWWorld::Ptr& ptr, const ESM::RefId& owner, int count, Misc::Rng::Generator* prng,
@@ -350,7 +351,8 @@ namespace MWWorld
         bool hasVisibleItems() const;
 
         virtual ContainerStoreIterator add(
-            const ConstPtr& itemPtr, int count, bool allowAutoEquip = true, bool resolve = true);
+            const ConstPtr& itemPtr, int count, bool allowAutoEquip = true, bool resolve = true,
+            bool forceNewStack = false);
         ///< Add the item pointed to by \a ptr to this container. (Stacks automatically if needed)
         ///
         /// \note The item pointed to is not required to exist beyond this function call.

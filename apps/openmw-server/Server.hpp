@@ -67,6 +67,15 @@ struct ConnectedClient
     uint64_t            playerEquipmentRestoreGuardUntilMs = 0;
     uint64_t            lastPlayerInventoryRestoreCorrectionLogMs = 0;
     uint64_t            lastPlayerEquipmentRestoreCorrectionLogMs = 0;
+    uint64_t            lastPlayerEquipmentInstanceCorrectionLogMs = 0;
+    struct PendingInventoryTransfer
+    {
+        uint32_t instanceId = 0;
+        std::string refId;
+        int count = 0;
+        uint64_t expiresAtMs = 0;
+    };
+    std::vector<PendingInventoryTransfer> pendingInventoryTransfers;
     bool                pendingScriptedTeleportAck = false;
     Position            scriptedTeleportTarget;
     uint64_t            scriptedTeleportGuardUntilMs = 0;
@@ -329,7 +338,8 @@ private:
     void syncLuaSnapshot();
     void syncLuaAuthorityState();
     void sendAuthoritativeInventory(ConnectedClient& c);
-    void sendAuthoritativeEquipment(ConnectedClient& c, bool includeOthers = true);
+    void sendAuthoritativeEquipment(
+        ConnectedClient& c, bool includeOthers = true, bool includeSelf = true);
     void sendAuthoritativeJournal(ConnectedClient& c);
     std::string journalGroupFor(const ConnectedClient& c) const;
     bool shouldShareJournal(const ConnectedClient& source, const ConnectedClient& target) const;
@@ -339,7 +349,9 @@ private:
     void stopAdminHttpServer();
     AdminHttpServer::Response handleAdminHttpRequest(
         std::string_view action, const std::map<std::string, std::string>& query);
-    bool acceptPlacedObject(PlacedObject& object);
+    bool acceptPlacedObject(PlacedObject& object, ConnectedClient* source = nullptr);
+    bool reconcileInventoryInstanceIds(ConnectedClient& c, std::vector<Item>& items);
+    bool reconcileEquipmentInstanceIds(ConnectedClient& c);
     bool grantInventoryItem(ConnectedClient& c, const std::string& refId, int count);
     struct ActorRegistryRecord;
     struct CellActorState;

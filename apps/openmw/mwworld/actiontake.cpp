@@ -10,6 +10,11 @@
 #include "class.hpp"
 #include "containerstore.hpp"
 
+#ifdef BUILD_MULTIPLAYER
+#include "../mwmp/Main.hpp"
+#include "../mwmp/sync/WorldObjectSync.hpp"
+#endif
+
 namespace MWWorld
 {
     ActionTake::ActionTake(const MWWorld::Ptr& object)
@@ -36,6 +41,10 @@ namespace MWWorld
 
         MWBase::Environment::get().getMechanicsManager()->itemTaken(actor, getTarget(), MWWorld::Ptr(), count);
         MWWorld::Ptr newitem = *actor.getClass().getContainerStore(actor).add(getTarget(), count);
+#ifdef BUILD_MULTIPLAYER
+        if (mwmp::Main::isConnected() && actor == MWBase::Environment::get().getWorld()->getPlayerPtr())
+            mwmp::Main::get().getWorldObjectSync().onLocalObjectTaken(getTarget(), newitem);
+#endif
         MWBase::Environment::get().getWorld()->deleteObject(getTarget());
         setTarget(newitem);
     }

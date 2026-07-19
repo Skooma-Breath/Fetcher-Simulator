@@ -29,6 +29,7 @@ namespace mwmp
     protected:
         void packItem(WriteStream& ws, const Item& item)
         {
+            ws.write(item.instanceId);
             ws.writeString(item.refId);
             ws.write(item.count);
             ws.write(item.charge);
@@ -38,6 +39,7 @@ namespace mwmp
 
         void unpackItem(ReadStream& rs, Item& item)
         {
+            rs.read(item.instanceId);
             item.refId             = rs.readString();
             rs.read(item.count);
             rs.read(item.charge);

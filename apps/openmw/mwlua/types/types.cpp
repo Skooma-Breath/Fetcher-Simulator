@@ -205,7 +205,8 @@ namespace MWLua
                     ESM::REC_ALCH, ESM::REC_WEAP, ESM::REC_APPA, ESM::REC_LOCK, ESM::REC_PROB, ESM::REC_REPA }),
             context);
         addLockableBindings(
-            addType(ObjectTypeName::Lockable, { ESM::REC_CONT, ESM::REC_DOOR, ESM::REC_CONT4, ESM::REC_DOOR4 }));
+            addType(ObjectTypeName::Lockable, { ESM::REC_CONT, ESM::REC_DOOR, ESM::REC_CONT4, ESM::REC_DOOR4 }),
+            context);
 
         addBodyPartBindings(addType(ObjectTypeName::BodyPart, { ESM::REC_BODY }), context);
         addCreatureBindings(addType(ObjectTypeName::Creature, { ESM::REC_CREA }, ObjectTypeName::Actor), context);

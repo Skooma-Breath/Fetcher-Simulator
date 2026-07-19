@@ -161,6 +161,7 @@ namespace mwmp
         float mBufferedAnimSide = 0.f;
         float mBufferedLocomotionSpeed = 0.f;
         uint32_t mBufferedLocomotionFlags = 0;
+        float mRangedAttackLocomotionSuppressTimer = 0.f;
         float mLastAppliedInterpPos[3] = { 0.f, 0.f, 0.f };
         bool mHasAppliedInterpPos = false;
 

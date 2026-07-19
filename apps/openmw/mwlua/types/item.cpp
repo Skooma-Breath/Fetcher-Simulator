@@ -4,6 +4,7 @@
 #include "../../mwworld/class.hpp"
 
 #include "../itemdata.hpp"
+#include "../mutationaudit.hpp"
 
 #include "types.hpp"
 
@@ -19,7 +20,8 @@ namespace MWLua
             else
                 return charge;
         };
-        item["setEnchantmentCharge"] = [](const GObject& object, sol::optional<float> charge) {
+        item["setEnchantmentCharge"] = [context](const GObject& object, sol::optional<float> charge) {
+            auditNativeMutation(context, "item.setEnchantmentCharge", object.ptr());
             object.ptr().getCellRef().setEnchantmentCharge(charge.value_or(-1));
         };
         item["isRestocking"]

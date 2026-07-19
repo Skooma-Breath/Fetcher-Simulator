@@ -174,6 +174,14 @@ namespace LuaUtil
         return state;
     }
 
+    LuaState* LuaState::fromLuaState(lua_State* state)
+    {
+        lua_getfield(state, LUA_REGISTRYINDEX, "openmw.LuaState");
+        LuaState* result = static_cast<LuaState*>(lua_touserdata(state, -1));
+        lua_pop(state, 1);
+        return result;
+    }
+
     LuaState::LuaState(const VFS::Manager* vfs, const ScriptsConfiguration* conf, const LuaStateSettings& settings)
         : mSettings(settings)
         , mLuaState([&] {
@@ -185,6 +193,9 @@ namespace LuaUtil
         , mConf(conf)
         , mVFS(vfs)
     {
+        lua_pushlightuserdata(mLuaState.get(), this);
+        lua_setfield(mLuaState.get(), LUA_REGISTRYINDEX, "openmw.LuaState");
+
         if (sProfilerEnabled)
             lua_sethook(mLuaState.get(), &countHook, LUA_MASKCOUNT, countHookStep);
 

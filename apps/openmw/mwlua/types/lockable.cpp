@@ -6,11 +6,12 @@
 #include <components/resource/resourcesystem.hpp>
 
 #include "apps/openmw/mwworld/esmstore.hpp"
+#include "../mutationaudit.hpp"
 
 namespace MWLua
 {
 
-    void addLockableBindings(sol::table lockable)
+    void addLockableBindings(sol::table lockable, const Context& context)
     {
         lockable["getLockLevel"]
             = [](const Object& object) { return std::abs(object.ptr().getCellRef().getLockLevel()); };
@@ -21,7 +22,8 @@ namespace MWLua
                 return sol::nullopt;
             return MWBase::Environment::get().getESMStore()->get<ESM::Miscellaneous>().find(key);
         };
-        lockable["lock"] = [](const GObject& object, sol::optional<int> lockLevel) {
+        lockable["lock"] = [context](const GObject& object, sol::optional<int> lockLevel) {
+            auditNativeMutation(context, "lockable.lock", object.ptr());
             object.ptr().getCellRef().setLocked(true);
 
             int level = 1;
@@ -35,14 +37,16 @@ namespace MWLua
 
             object.ptr().getCellRef().setLockLevel(level);
         };
-        lockable["unlock"] = [](const GObject& object) {
+        lockable["unlock"] = [context](const GObject& object) {
             if (!object.ptr().getCellRef().isLocked())
                 return;
+            auditNativeMutation(context, "lockable.unlock", object.ptr());
             object.ptr().getCellRef().setLocked(false);
 
             object.ptr().getCellRef().setLockLevel(-object.ptr().getCellRef().getLockLevel());
         };
-        lockable["setTrapSpell"] = [](const GObject& object, const sol::object& spellOrId) {
+        lockable["setTrapSpell"] = [context](const GObject& object, const sol::object& spellOrId) {
+            auditNativeMutation(context, "lockable.setTrapSpell", object.ptr());
             if (spellOrId == sol::nil)
             {
                 object.ptr().getCellRef().setTrap(ESM::RefId()); // remove the trap value
@@ -58,7 +62,8 @@ namespace MWLua
                 object.ptr().getCellRef().setTrap(spell->mId);
             }
         };
-        lockable["setKeyRecord"] = [](const GObject& object, const sol::object& itemOrRecordId) {
+        lockable["setKeyRecord"] = [context](const GObject& object, const sol::object& itemOrRecordId) {
+            auditNativeMutation(context, "lockable.setKeyRecord", object.ptr());
             if (itemOrRecordId == sol::nil)
             {
                 object.ptr().getCellRef().setKey(ESM::RefId()); // remove the trap value

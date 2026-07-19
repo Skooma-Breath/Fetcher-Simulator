@@ -848,19 +848,6 @@ namespace MWGui
 
     void WindowManager::messageBox(std::string_view message, enum MWGui::ShowInDialogueMode showInDialogueMode)
     {
-#ifdef BUILD_MULTIPLAYER
-        // sInventoryMessage1 is the one-shot inventory tutorial in Morrowind,
-        // but equipment restoration and some content paths can request it
-        // repeatedly after login or inventory use.  Compare resolved text as
-        // well as tags so both engine and script callers are covered.
-        const MyGUI::UString resolvedMessage
-            = MyGUI::LanguageManager::getInstance().replaceTags(MyGUI::UString(message));
-        const MyGUI::UString inventoryTutorial = MyGUI::LanguageManager::getInstance().replaceTags(
-            MyGUI::UString("#{sInventoryMessage1}"));
-        if (resolvedMessage == inventoryTutorial)
-            return;
-#endif
-
         if (getMode() == GM_Dialogue && showInDialogueMode != MWGui::ShowInDialogueMode_Never)
         {
             MyGUI::UString text = MyGUI::LanguageManager::getInstance().replaceTags(MyGUI::UString(message));

@@ -102,6 +102,8 @@ if (BUILD_MULTIPLAYER OR BUILD_DEDICATED_SERVER)
     list(APPEND UNITTEST_SRC_FILES
         openmw-mp/playerjournal.cpp
         openmw-mp/playerjournaldatabase.cpp
+        openmw-mp/playerinventory.cpp
+        openmw-mp/playerinventorydatabase.cpp
         ../openmw-server/PlayerDatabase.cpp
     )
 endif()

@@ -751,6 +751,19 @@ namespace MWMechanics
 
     std::string_view CharacterController::getWeaponAnimation(int weaponType) const
     {
+#ifdef BUILD_MULTIPLAYER
+        // Starwind models pistols as bows and historically replaced the shared
+        // Bow animation source. Prefer its private handgun group when available
+        // so vanilla bows retain their own animation and cues.
+        // This is evaluated by every character controller, including remote-player
+        // NPC proxies, so their firing animation and text-key sounds match too.
+        if (weaponType == ESM::Weapon::MarksmanBow && !mWeapon.isEmpty()
+            && mWeapon.getCellRef().getRefId().startsWith("sw_") && mAnimation->hasAnimation("swblaster"))
+        {
+            return "swblaster";
+        }
+#endif
+
         std::string_view weaponGroup = getWeaponType(weaponType)->mLongGroup;
         if (isRealWeapon(weaponType) && !mAnimation->hasAnimation(weaponGroup))
         {
@@ -1329,7 +1342,58 @@ namespace MWMechanics
         if (evt.substr(0, 7) == "sound: ")
         {
             MWBase::SoundManager* sndMgr = MWBase::Environment::get().getSoundManager();
-            sndMgr->playSound3D(mPtr, ESM::RefId::stringRefId(evt.substr(7)), 1.0f, 1.0f);
+            ESM::RefId soundId = ESM::RefId::stringRefId(evt.substr(7));
+#ifdef BUILD_MULTIPLAYER
+            // Starwind replaces the shared bow/crossbow WAVs to supply pistol and
+            // rifle audio. Keep the official files global, then redirect only
+            // private Starwind weapons here. CharacterController also owns remote
+            // player proxies, so their shots remain spatial and weapon-correct.
+            if (!mWeapon.isEmpty() && mWeapon.getCellRef().getRefId().startsWith("sw_"))
+            {
+                static const ESM::RefId bowPull = ESM::RefId::stringRefId("bowPull");
+                static const ESM::RefId bowShoot = ESM::RefId::stringRefId("bowShoot");
+                static const ESM::RefId crossbowPull = ESM::RefId::stringRefId("crossbowPull");
+                static const ESM::RefId crossbowShoot = ESM::RefId::stringRefId("crossbowShoot");
+                static const ESM::RefId pistolPull = ESM::RefId::stringRefId("SW_Compat_BlasterPull");
+                static const ESM::RefId pistolShoot = ESM::RefId::stringRefId("SW_Compat_BlasterShoot");
+                static const ESM::RefId riflePull = ESM::RefId::stringRefId("SW_Compat_RiflePull");
+                static const ESM::RefId rifleShoot = ESM::RefId::stringRefId("SW_Compat_RifleShoot");
+                static const ESM::RefId sniperScript = ESM::RefId::stringRefId("SW_SRifleScript");
+                static const ESM::RefId launcherScript = ESM::RefId::stringRefId("SW_GLauncherRestrict2");
+                static const ESM::RefId sniperShoot = ESM::RefId::stringRefId("SRifle");
+                static const ESM::RefId launcherShoot = ESM::RefId::stringRefId("GThump");
+
+                const MWWorld::ESMStore& store = MWBase::Environment::get().getWorld()->getStore();
+                auto redirectIfPresent = [&](const ESM::RefId& redirected) {
+                    if (store.get<ESM::Sound>().search(redirected))
+                        soundId = redirected;
+                };
+
+                if (mWeaponType == ESM::Weapon::MarksmanBow)
+                {
+                    if (soundId == bowPull)
+                        redirectIfPresent(pistolPull);
+                    else if (soundId == bowShoot)
+                        redirectIfPresent(pistolShoot);
+                }
+                else if (mWeaponType == ESM::Weapon::MarksmanCrossbow)
+                {
+                    if (soundId == crossbowPull)
+                        redirectIfPresent(riflePull);
+                    else if (soundId == crossbowShoot)
+                    {
+                        const ESM::RefId& weaponScript = mWeapon.getClass().getScript(mWeapon);
+                        if (weaponScript == sniperScript)
+                            redirectIfPresent(sniperShoot);
+                        else if (weaponScript == launcherScript)
+                            redirectIfPresent(launcherShoot);
+                        else
+                            redirectIfPresent(rifleShoot);
+                    }
+                }
+            }
+#endif
+            sndMgr->playSound3D(mPtr, soundId, 1.0f, 1.0f);
             return;
         }
 
@@ -1474,7 +1538,20 @@ namespace MWMechanics
             }
         }
         else if (action == "shoot follow attach")
-            mAnimation->attachArrow();
+        {
+#ifdef BUILD_MULTIPLAYER
+            // A remote crossbow can use a conspicuous modded bolt model (for
+            // example Starwind's blaster bolt). Showing that replacement while
+            // ArrowBone traverses the vanilla reload path makes it look like the
+            // fired projectile reverses and returns to the weapon. Keep the
+            // remote replacement hidden until the follow pose has retired;
+            // local crossbows and all bows retain their native attachment key.
+            const bool deferRemoteCrossbowBolt = mWeaponType == ESM::Weapon::MarksmanCrossbow
+                && mPtr.getClass().getCreatureStats(mPtr).getMovementFlag(CreatureStats::Flag_NetworkPlayerNpc);
+            if (!deferRemoteCrossbowBolt)
+#endif
+                mAnimation->attachArrow();
+        }
         // Make sure this key is actually for the RangeType we are casting. The flame atronach has
         // the same animation for all range types, so there are 3 "release" keys on the same time, one for each range
         // type.
@@ -1674,6 +1751,31 @@ namespace MWMechanics
         // We should not play equipping animation and sound during weapon->weapon transition
         const bool isStillWeapon = isRealWeapon(mWeaponType) && isRealWeapon(weaptype);
 
+#ifdef BUILD_MULTIPLAYER
+        // Starwind pistols and vanilla bows share MarksmanBow as their record
+        // type, but use different animation groups. A weapon-to-weapon swap of
+        // the same type normally leaves mCurrentWeapon untouched, which made
+        // the newly equipped weapon inherit the previous weapon's animation
+        // and text-key sounds. Refresh the group whenever the concrete weapon
+        // changes across this private/native boundary.
+        if (weaponChanged && isStillWeapon && weaptype == mWeaponType
+            && mUpperBodyState <= UpperBodyState::WeaponEquipped)
+        {
+            const std::string desiredWeaponGroup(getWeaponAnimation(weaptype));
+            if (desiredWeaponGroup != mCurrentWeapon)
+            {
+                if (!mCurrentWeapon.empty())
+                    mAnimation->disable(mCurrentWeapon);
+                mAnimation->setWeaponGroup(desiredWeaponGroup, true);
+                mCurrentWeapon = desiredWeaponGroup;
+                mUpperBodyState = UpperBodyState::WeaponEquipped;
+                setAttackingOrSpell(false);
+                mAnimation->showWeapons(true);
+                forcestateupdate = true;
+            }
+        }
+#endif
+
         // If the current weapon type was changed in the middle of attack (e.g. by Equip console command or when bound
         // spell expires), we should force actor to the "weapon equipped" state, interrupt attack and update animations.
         // Morrowind does this at the end of the attack (see #4646 and PR 1972).
@@ -1819,6 +1921,21 @@ namespace MWMechanics
         float complete = 0.f;
         bool animPlaying = false;
         ESM::WeaponType::Class weapclass = getWeaponType(mWeaponType)->mWeaponClass;
+        int attackBlendMask = MWRender::BlendMask_All;
+#ifdef BUILD_MULTIPLAYER
+        // Ranged clips may contain leg/root tracks that look like stepping or
+        // running in place while firing and can even feed root motion back into
+        // actor movement. Keep every bow/crossbow attack on the upper body so
+        // locomotion owns the feet for local and remote actors alike. Thrown
+        // weapons retain their native full-body motion locally, but network
+        // proxies still need the same visual isolation from interpolation.
+        const bool isNetworkPlayerProxy = stats.getMovementFlag(CreatureStats::Flag_NetworkPlayerNpc);
+        if (weapclass == ESM::WeaponType::Ranged
+            || (weapclass == ESM::WeaponType::Thrown && isNetworkPlayerProxy))
+        {
+            attackBlendMask = MWRender::BlendMask_UpperBody;
+        }
+#endif
         if (getAttackingOrSpell())
         {
             mResetIdleOnAttackEnd = true;
@@ -2077,7 +2194,7 @@ namespace MWMechanics
                     mAttackVictim = MWWorld::Ptr();
                     mAttackHitPos = osg::Vec3f();
 
-                    playBlendedAnimation(mCurrentWeapon, priorityWeapon, MWRender::BlendMask_All, false, weapSpeed,
+                    playBlendedAnimation(mCurrentWeapon, priorityWeapon, attackBlendMask, false, weapSpeed,
                         startKey, stopKey, 0.0f, 0);
                 }
             }
@@ -2145,7 +2262,7 @@ namespace MWMechanics
                 }
 
                 mAnimation->disable(mCurrentWeapon);
-                playBlendedAnimation(mCurrentWeapon, priorityWeapon, MWRender::BlendMask_All, false, weapSpeed,
+                playBlendedAnimation(mCurrentWeapon, priorityWeapon, attackBlendMask, false, weapSpeed,
                     mAttackType + " max attack", mAttackType + ' ' + hit, startPoint, 0);
             }
 
@@ -2168,10 +2285,25 @@ namespace MWMechanics
 
                 mReadyToHit = false;
 
+                std::string followGroup = mCurrentWeapon;
+#ifdef BUILD_MULTIPLAYER
+                // Starwind supplies a crossbow follow fragment specifically for
+                // blaster rifles. It ends the shot without the vanilla bolt
+                // reload, while the native Crossbow group still supplies the
+                // equip, stance, wind-up, and release sections.
+                if (mWeaponType == ESM::Weapon::MarksmanCrossbow && !mWeapon.isEmpty()
+                    && mWeapon.getCellRef().getRefId().startsWith("sw_")
+                    && mAnimation->hasAnimation("swrifle"))
+                {
+                    followGroup = "swrifle";
+                }
+#endif
+
                 if (animPlaying)
                     mAnimation->disable(mCurrentWeapon);
-                playBlendedAnimation(mCurrentWeapon, priorityWeapon, MWRender::BlendMask_All, false, weapSpeed,
+                playBlendedAnimation(followGroup, priorityWeapon, attackBlendMask, false, weapSpeed,
                     mAttackType + ' ' + start, mAttackType + ' ' + stop, 0.0f, 0);
+                mCurrentWeapon = std::move(followGroup);
                 mUpperBodyState = UpperBodyState::AttackEnd;
 
                 animPlaying = mAnimation->getInfo(mCurrentWeapon, &complete);
@@ -2186,7 +2318,13 @@ namespace MWMechanics
             if (mUpperBodyState == UpperBodyState::Equipping || mUpperBodyState == UpperBodyState::AttackEnd
                 || mUpperBodyState == UpperBodyState::Casting)
             {
-                if (ammunition && mWeaponType == ESM::Weapon::MarksmanCrossbow)
+                bool attachRemoteCrossbowAfterPoseReset = false;
+#ifdef BUILD_MULTIPLAYER
+                attachRemoteCrossbowAfterPoseReset = ammunition
+                    && mWeaponType == ESM::Weapon::MarksmanCrossbow && isNetworkPlayerProxy;
+#endif
+                if (ammunition && mWeaponType == ESM::Weapon::MarksmanCrossbow
+                    && !attachRemoteCrossbowAfterPoseReset)
                     mAnimation->attachArrow();
 
                 // Cancel stagger animation at the end of an attack to avoid abrupt transitions
@@ -2196,6 +2334,11 @@ namespace MWMechanics
 
                 if (animPlaying)
                     mAnimation->disable(mCurrentWeapon);
+
+#ifdef BUILD_MULTIPLAYER
+                if (mUpperBodyState == UpperBodyState::AttackEnd && mCurrentWeapon == "swrifle")
+                    mCurrentWeapon = std::string(getWeaponAnimation(mWeaponType));
+#endif
 
                 // Skip Thrown->H2H idle transition (e.g., if we've run out of ammo)
                 // In Morrowind this isn't actually specific to this transition
@@ -2217,6 +2360,15 @@ namespace MWMechanics
                 }
 
                 mUpperBodyState = UpperBodyState::WeaponEquipped;
+
+#ifdef BUILD_MULTIPLAYER
+                // The attack group is gone and the regular idle group will be
+                // refreshed before this frame's animation traversal. Creating
+                // the remote bolt here therefore reveals it directly in the
+                // stable loaded pose instead of along the reload travel.
+                if (attachRemoteCrossbowAfterPoseReset)
+                    mAnimation->attachArrow();
+#endif
             }
             else if (mUpperBodyState == UpperBodyState::Unequipping)
             {

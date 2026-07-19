@@ -40,6 +40,10 @@ namespace mwmp
     // -----------------------------------------------------------------------
     struct Item
     {
+        // Server-issued identity for this stack. The same value is used as a
+        // placed object's mpNum while the item is in the world. Zero means an
+        // older/unassigned stack and is replaced by the server on receipt.
+        uint32_t    instanceId = 0;
         std::string refId;
         int         count     = 0;
         int         charge    = -1;    // -1 = not applicable

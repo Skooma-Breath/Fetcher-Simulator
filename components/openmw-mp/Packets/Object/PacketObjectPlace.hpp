@@ -10,8 +10,10 @@ namespace mwmp
     // PacketObjectPlace — place a new world object.
     //
     // Client → Server:
-    //   mpNum == 0  (client does not know it yet)
-    //   Server assigns mpNum, stores in WorldState, rebroadcasts with mpNum set.
+    //   mpNum == 0 for a newly created object. When dropping a whole inventory
+    //   stack, mpNum carries its server-issued Item::instanceId; the server
+    //   validates ownership before allowing that identity to move into world
+    //   state. Split drops receive a fresh mpNum.
     //
     // Server → Clients (relay):
     //   mpNum is filled in.

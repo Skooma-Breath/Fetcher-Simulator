@@ -33,6 +33,7 @@
 #include "../Main.hpp"
 #include "ActorSync.hpp"
 #include "PlayerSync.hpp"
+#include "InventoryIdentity.hpp"
 
 namespace mwmp
 {
@@ -193,7 +194,9 @@ void WorldObjectSync::onLocalObjectPlaced(const MWWorld::Ptr& ptr, const std::st
                                           const std::string& cellId)
 {
     PacketObjectPlace pkt;
-    pkt.object.mpNum   = 0;         // server assigns
+    // A whole-stack drop may retain its inventory identity. The server checks
+    // that this ID belongs to the sender and allocates a new one for splits.
+    pkt.object.mpNum   = inventoryInstanceId(ptr.getCellRef().getRefNum());
     pkt.object.refId   = refId;
     pkt.object.count   = count;
     pkt.object.position= pos;
@@ -203,6 +206,20 @@ void WorldObjectSync::onLocalObjectPlaced(const MWWorld::Ptr& ptr, const std::st
     Log(Debug::Info) << "[MP] WorldObjectSync: sent ObjectPlace refId=" << refId
                      << " cell=" << cellId
                      << " count=" << count;
+}
+
+void WorldObjectSync::onLocalObjectTaken(
+    const MWWorld::Ptr& worldObject, const MWWorld::Ptr& inventoryObject)
+{
+    const uint32_t mpNum = getMpNumForObject(worldObject);
+    if (mpNum == 0 || inventoryObject.isEmpty())
+        return;
+
+    mPendingTakenMpNums.insert(mpNum);
+    const MWBase::Environment& environment = MWBase::Environment::get();
+    environment.getWorldModel()->deregisterLiveCellRef(*inventoryObject.getBase());
+    inventoryObject.getCellRef().setRefNum(inventoryInstanceRefNum(mpNum));
+    environment.getWorldModel()->registerPtr(inventoryObject);
 }
 
 void WorldObjectSync::onLocalObjectDeleted(const MWWorld::Ptr& ptr)
@@ -234,6 +251,7 @@ void WorldObjectSync::onLocalObjectDeleted(const MWWorld::Ptr& ptr)
     PacketObjectDelete pkt;
     pkt.mpNum = mpNum;
     pkt.cellId = cellId;
+    pkt.takenIntoInventory = mPendingTakenMpNums.erase(mpNum) != 0;
     mClient.sendReliable(pkt.encode());
     Log(Debug::Verbose) << "[MP] WorldObjectSync: sent ObjectDelete mpNum=" << mpNum;
 }

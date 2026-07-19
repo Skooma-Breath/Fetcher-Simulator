@@ -4,6 +4,7 @@
 #include <cstdint>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 #include <components/openmw-mp/Base/BaseObject.hpp>
@@ -41,6 +42,10 @@ namespace mwmp
 
         // Called when the local player picks up or otherwise deletes an MP-placed object.
         void onLocalObjectDeleted(const MWWorld::Ptr& ptr);
+
+        // Marks an MP world instance as being transferred into the returned
+        // inventory Ptr. Its mpNum becomes the stack's stable instanceId.
+        void onLocalObjectTaken(const MWWorld::Ptr& worldObject, const MWWorld::Ptr& inventoryObject);
 
         // Called when the local player clicks the vanilla Dispose of Corpse button
         // for a dead server-spawned actor corpse.
@@ -105,6 +110,7 @@ namespace mwmp
         std::vector<PendingMove>      mPendingMove;
         std::vector<PendingContainer> mPendingContainer;
         bool mSuppressLocalDelete = false;
+        std::unordered_set<uint32_t> mPendingTakenMpNums;
 
         static constexpr float RETRY_RATE = 0.25f;
     };

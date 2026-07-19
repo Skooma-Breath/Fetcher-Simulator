@@ -14,6 +14,7 @@
 #include "../mwworld/inventorystore.hpp"
 
 #include "../mwmechanics/combat.hpp"
+#include "../mwmechanics/creaturestats.hpp"
 #include "../mwmechanics/weapontype.hpp"
 
 #include "animation.hpp"
@@ -108,6 +109,12 @@ namespace MWRender
         if (weapon->getType() != ESM::Weapon::sRecordId)
             return;
 
+        bool isNetworkPlayerProxy = false;
+#ifdef BUILD_MULTIPLAYER
+        isNetworkPlayerProxy = actor.getClass().getCreatureStats(actor).getMovementFlag(
+            MWMechanics::CreatureStats::Flag_NetworkPlayerNpc);
+#endif
+
         // The orientation of the launched projectile. Always the same as the actor orientation, even if the ArrowBone's
         // orientation dictates otherwise.
         osg::Quat orient = osg::Quat(actor.getRefData().getPosition().rot[0], osg::Vec3f(-1, 0, 0))
@@ -116,7 +123,11 @@ namespace MWRender
         const MWWorld::Store<ESM::GameSetting>& gmst
             = MWBase::Environment::get().getESMStore()->get<ESM::GameSetting>();
 
-        MWMechanics::applyFatigueLoss(actor, *weapon, attackStrength);
+        // Network-player actors are presentation proxies. Their authoritative
+        // client/server path owns fatigue, inventory, durability, hits, and
+        // enchantment state; observers only need the projectile visual.
+        if (!isNetworkPlayerProxy)
+            MWMechanics::applyFatigueLoss(actor, *weapon, attackStrength);
 
         if (MWMechanics::getWeaponType(weapon->get<ESM::Weapon>()->mBase->mData.mType)->mWeaponClass
             == ESM::WeaponType::Thrown)
@@ -136,11 +147,12 @@ namespace MWRender
 
             MWWorld::Ptr weaponPtr = *weapon;
             MWBase::Environment::get().getWorld()->launchProjectile(
-                actor, weaponPtr, launchPos, orient, weaponPtr, speed, attackStrength);
+                actor, weaponPtr, launchPos, orient, weaponPtr, speed, attackStrength, isNetworkPlayerProxy);
 
             showWeapon(false);
 
-            inv.remove(*weapon, 1);
+            if (!isNetworkPlayerProxy)
+                inv.remove(*weapon, 1);
         }
         else
         {
@@ -148,6 +160,17 @@ namespace MWRender
             MWWorld::ContainerStoreIterator ammo = inv.getSlot(MWWorld::InventoryStore::Slot_Ammunition);
             if (ammo == inv.end())
                 return;
+
+#ifdef BUILD_MULTIPLAYER
+            // A remote bow-class attack can reach its release packet before the
+            // observer's animation has processed the shoot-attach text key. A
+            // crossbow normally keeps a bolt attached between shots, which is
+            // why the race is most visible with Starwind pistols. Recreate the
+            // presentation attachment on demand so every replicated release has
+            // a projectile node and can launch its visual bolt.
+            if (!mAmmunition && isNetworkPlayerProxy)
+                attachArrow(actor);
+#endif
 
             if (!mAmmunition)
                 return;
@@ -165,9 +188,10 @@ namespace MWRender
             MWWorld::Ptr weaponPtr = *weapon;
             MWWorld::Ptr ammoPtr = *ammo;
             MWBase::Environment::get().getWorld()->launchProjectile(
-                actor, ammoPtr, launchPos, orient, weaponPtr, speed, attackStrength);
+                actor, ammoPtr, launchPos, orient, weaponPtr, speed, attackStrength, isNetworkPlayerProxy);
 
-            inv.remove(ammoPtr, 1);
+            if (!isNetworkPlayerProxy)
+                inv.remove(ammoPtr, 1);
             mAmmunition.reset();
         }
     }

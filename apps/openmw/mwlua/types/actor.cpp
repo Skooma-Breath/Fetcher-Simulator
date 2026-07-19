@@ -21,6 +21,7 @@
 #include "../localscripts.hpp"
 #include "../luamanagerimp.hpp"
 #include "../magicbindings.hpp"
+#include "../mutationaudit.hpp"
 #include "../stats.hpp"
 
 namespace MWLua
@@ -210,7 +211,7 @@ namespace MWLua
                 throw std::runtime_error("Actor expected");
         };
         actor["stance"] = actor["getStance"]; // for compatibility; should be removed later
-        actor["setStance"] = [](const SelfObject& self, int stance) {
+        actor["setStance"] = [context](const SelfObject& self, int stance) {
             const MWWorld::Class& cls = self.ptr().getClass();
             if (!cls.isActor())
                 throw std::runtime_error("Actor expected");
@@ -224,6 +225,7 @@ namespace MWLua
             MWMechanics::DrawState newDrawState = static_cast<MWMechanics::DrawState>(stance);
             if (stats.getDrawState() == newDrawState)
                 return;
+            auditNativeMutation(context, "actor.setStance", self.ptr(), std::to_string(stance));
             if (newDrawState == MWMechanics::DrawState::Spell)
             {
                 bool hasSelectedSpell;
@@ -270,6 +272,7 @@ namespace MWLua
             const MWWorld::Ptr& ptr = obj.ptr();
             if (!ptr.getClass().isActor())
                 return;
+            auditNativeMutation(context, "actor.setSelectedEnchantedItem", ptr);
 
             EquipmentItem ei;
             if (item.is<Object>())
@@ -365,6 +368,7 @@ namespace MWLua
                     throw std::runtime_error(obj.toString() + " has no equipment slots");
                 return;
             }
+            auditNativeMutation(context, "actor.setEquipment", ptr);
             Equipment eqp;
             for (auto& [key, value] : equipment)
             {
@@ -434,6 +438,7 @@ namespace MWLua
                 throw std::runtime_error("Barter gold must be positive");
             if (!object.isGObject() && !object.isSelfObject())
                 throw std::runtime_error("Can only be used in global scripts or in local scripts on self.");
+            auditNativeMutation(context, "actor.setBarterGold", object.ptr(), std::to_string(gold));
             context.mLuaManager->addAction(
                 [obj = Object(object), gold] {
                     const MWWorld::Ptr ptr = obj.ptr();
@@ -443,6 +448,7 @@ namespace MWLua
         };
 
         actor["_onHit"] = [context](const SelfObject& self, const sol::table& options) {
+            auditNativeMutation(context, "actor.onHit", self.ptr());
             sol::optional<sol::table> damageLua = options.get<sol::optional<sol::table>>("damage");
             std::map<std::string, float> damageCpp;
             if (damageLua)
@@ -488,6 +494,7 @@ namespace MWLua
         actor["setKnockedDown"] = [context](const Object& object, bool value) {
             if (!object.isGObject() && !object.isSelfObject())
                 throw std::runtime_error("Can only be used in global scripts or in local scripts on self.");
+            auditNativeMutation(context, "actor.setKnockedDown", object.ptr(), value ? "true" : "false");
             context.mLuaManager->addAction(
                 [obj = Object(object), value] {
                     const MWWorld::Ptr ptr = obj.ptr();
@@ -504,6 +511,7 @@ namespace MWLua
         actor["setHitRecovery"] = [context](const Object& object, bool value) {
             if (!object.isGObject() && !object.isSelfObject())
                 throw std::runtime_error("Can only be used in global scripts or in local scripts on self.");
+            auditNativeMutation(context, "actor.setHitRecovery", object.ptr(), value ? "true" : "false");
             context.mLuaManager->addAction(
                 [obj = Object(object), value] {
                     const MWWorld::Ptr ptr = obj.ptr();

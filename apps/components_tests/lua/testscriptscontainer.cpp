@@ -28,6 +28,10 @@ namespace
 
     VFSTestFile emptyScript("");
 
+    constexpr VFS::Path::NormalizedView auditPath("audit.lua");
+
+    VFSTestFile auditScript("return function(probe) probe() end");
+
     constexpr VFS::Path::NormalizedView test1Path("test1.lua");
     constexpr VFS::Path::NormalizedView test2Path("test2.lua");
 
@@ -192,6 +196,7 @@ return {
             { invalidPath, &invalidScript },
             { incorrectPath, &incorrectScript },
             { emptyPath, &emptyScript },
+            { auditPath, &auditScript },
             { test1Path, &testScript },
             { test2Path, &testScript },
             { stopEventPath, &stopEventScript },
@@ -214,6 +219,7 @@ return {
 CUSTOM: invalid.lua
 CUSTOM: incorrect.lua
 CUSTOM: empty.lua
+CUSTOM: audit.lua
 CUSTOM: test1.lua
 CUSTOM: stopEvent.lua
 CUSTOM: test2.lua
@@ -236,6 +242,17 @@ CUSTOM: customdata.lua
             return *id;
         }
     };
+
+    TEST_F(LuaScriptsContainerTest, TracksActiveScriptForNativeAuditAttribution)
+    {
+        std::string activePath;
+        LuaUtil::ScriptsContainer scripts(&mLua, "Test");
+        sol::protected_function audit = mLua.runInNewSandbox(VFS::Path::Normalized(auditPath));
+        LuaUtil::call(LuaUtil::ScriptId{ &scripts, getId(auditPath) }, audit,
+            [&] { activePath = mLua.getActiveScriptPath(); });
+        EXPECT_EQ(activePath, auditPath.value());
+        EXPECT_TRUE(mLua.getActiveScriptPath().empty());
+    }
 
     TEST_F(LuaScriptsContainerTest, addCustomScriptShouldNotStartInvalidScript)
     {
@@ -470,7 +487,6 @@ CUSTOM: customdata.lua
             scripts3.load(data);
             scripts3.receiveEvent("Print", "");
             EXPECT_EQ(internal::GetCapturedStdout(),
-                "Ignoring Test[loadsave1.lua]; this script is not allowed here\n"
                 "Test[test1.lua]:\tload\n"
                 "Test[overrideinterface.lua]:\toverride\n"
                 "Test[overrideinterface.lua]:\tinit\n"
