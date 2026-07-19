@@ -267,7 +267,7 @@ void Main::frame(float dt)
     if (mNetworkBridge && mClient->isConnected())
         mNetworkBridge->drainOutgoing(*mClient);
 
-    // Handle unexpected server disconnect Ã¢â‚¬â€ return player to main menu.
+    // Handle unexpected server disconnect - return player to main menu.
     if (mUnexpectedDisconnect)
     {
         mUnexpectedDisconnect = false;
@@ -292,7 +292,7 @@ void Main::frame(float dt)
     mChatWindow->update(dt);
     pollChargenAppearance(dt);
 
-    // Ã¢â€â‚¬Ã¢â€â‚¬ Chargen completion watcher Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
+    // -- Chargen completion watcher ------------------------------------------
     // Fires once when the player is in a cell after chargen dialogs are shown.
     if (mCharGenWatching && mIsNewCharacter)
     {
@@ -509,7 +509,7 @@ void Main::onDisconnected()
 {
     Log(Debug::Warning) << "[MP] Disconnected from server";
     // If we were already in-world, request a main-menu return on the next frame.
-    // Do NOT touch engine state here Ã¢â‚¬â€ this fires inside mClient->update() and
+    // Do NOT touch engine state here - this fires inside mClient->update() and
     // must remain engine-API-free to stay thread-safe.
     if (mWorldReady)
         mUnexpectedDisconnect = true;
@@ -842,7 +842,7 @@ void Main::registerProtocolHandlers()
             // mWorldReady is set when PacketCharacterList arrives.
         });
 
-    // --- Ed25519 challenge Ã¢â‚¬â€ server sends 32-byte nonce, we sign and respond ---
+    // --- Ed25519 challenge - server sends 32-byte nonce, we sign and respond ---
     proto.registerHandler(PacketType::Challenge,
         [this](const uint8_t* data, size_t size)
         {
@@ -869,7 +869,7 @@ void Main::registerProtocolHandlers()
     Log(Debug::Info) << "[MP] Challenge handler registered, type="
                      << static_cast<int>(PacketType::Challenge);
 
-// --- Character list Ã¢â‚¬â€ arrives immediately after accepted handshake ---
+// --- Character list - arrives immediately after accepted handshake ---
     proto.registerHandler(PacketType::CharacterList,
         [this](const uint8_t* data, size_t size)
         {
@@ -894,7 +894,7 @@ void Main::registerProtocolHandlers()
             tryAutoSelectCharacter();
         });
 
-    // --- Character select error Ã¢â‚¬â€ server rejected the CharacterSelect request ---
+    // --- Character select error - server rejected the CharacterSelect request ---
     proto.registerHandler(PacketType::CharacterSelectError,
         [this](const uint8_t* data, size_t size)
         {
@@ -922,7 +922,7 @@ void Main::registerProtocolHandlers()
                              << " char='" << rsp.charName << "'"
                              << (rsp.success ? "" : " error=" + rsp.error);
         });
-// --- Character data Ã¢â‚¬â€ arrives after client sends PacketCharacterSelect ---
+// --- Character data - arrives after client sends PacketCharacterSelect ---
     proto.registerHandler(PacketType::CharacterData,
         [this](const uint8_t* data, size_t size)
         {
@@ -1004,7 +1004,7 @@ void Main::registerProtocolHandlers()
             }
             // NOTE: do NOT call forceFullSync() here for returning players.
             // At this point world->getPlayerPtr() still has the blank template
-            // NPC record Ã¢â‚¬â€ setPlayerRace() has not been called yet.
+            // NPC record - setPlayerRace() has not been called yet.
             // CharacterSelectDialog::startReturningPlayer() calls forceFullSync()
             // *after* setPlayerRace() so the BaseInfo packet carries the real
             // race/head/hair. New characters use the chargen-complete watcher.
@@ -1077,7 +1077,7 @@ void Main::registerProtocolHandlers()
                 mPlayerList->addPlayer(tmp.guid, tmp.name);
                 Log(Debug::Info) << "[MP] Player joined: " << tmp.name
                                  << " (guid=" << tmp.guid << ")";
-                // Populate appearance on the new RemotePlayer immediately Ã¢â‚¬â€
+                // Populate appearance on the new RemotePlayer immediately -
                 // addPlayer() only sets the name; race/head/hair live in onBaseInfoUpdate.
                 rp = mPlayerList->getPlayer(tmp.guid);
             }

@@ -3212,6 +3212,7 @@ namespace MWMechanics
                 }
             }
 
+            // test without this block, this turned out to not be the issue if im remembering right.
 #ifdef BUILD_MULTIPLAYER
             // Remote player NPCs are kinematic network puppets. Their movement
             // settings above still select and advance the vanilla locomotion

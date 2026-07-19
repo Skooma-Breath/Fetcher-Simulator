@@ -1,8 +1,8 @@
 #include "Server.hpp"
 #include "MasterServerClient.hpp"
-#include "bcrypt.h"  // extern/bcrypt/bcrypt.h â€” password hashing wrapper
+#include "bcrypt.h"  // extern/bcrypt/bcrypt.h - password hashing wrapper
 
-// GNS C++ crypto API â€” CECSigningPublicKey::VerifySignature for challenge-response auth.
+// GNS C++ crypto API - CECSigningPublicKey::VerifySignature for challenge-response auth.
 // Include paths: extern/GameNetworkingSockets/src/common + src/public
 #include <crypto_25519.h>
 
@@ -1517,7 +1517,7 @@ void MPServer::run()
     catch (const std::exception& e)
     {
         Log(Debug::Error) << "[Server] PlayerDatabase failed to open: " << e.what();
-        // Non-fatal â€” server runs without persistence if DB unavailable.
+        // Non-fatal - server runs without persistence if DB unavailable.
     }
 
     mLua.syncGeneratedRecordState(
@@ -1638,7 +1638,7 @@ void MPServer::run()
     mLua.onServerInit();
     startAdminHttpServer();
 
-    // Register with the master server (async â€” does not block the tick loop).
+    // Register with the master server (async - does not block the tick loop).
     if (!mMasterUrl.empty())
     {
         MasterServerClient::Config cfg;
@@ -1745,7 +1745,7 @@ void MPServer::shutdown()
 // ---------------------------------------------------------------------------
 void MPServer::tick(float dt)
 {
-    // Advance world time â€” carry over into day/month/year when hour wraps.
+    // Advance world time - carry over into day/month/year when hour wraps.
     // 30-day months, 12-month year (Morrowind calendar approximation).
     mWorld.gameHour += (dt * mWorld.timeScale) / 3600.f;
     while (mWorld.gameHour >= 24.f)
@@ -1883,7 +1883,7 @@ void MPServer::onClientConnected(HSteamNetConnection conn)
 }
 
 // Note: OnPlayerConnect fires after handshake completes (in handleHandshake),
-// not here â€” the client has no name yet at this point.
+// not here - the client has no name yet at this point.
 
 // ---------------------------------------------------------------------------
 void MPServer::onClientDisconnected(HSteamNetConnection conn, const std::string& reason)
@@ -2101,7 +2101,7 @@ void MPServer::refreshActorAuthorityForCell(const std::string& cellId, uint32_t 
         }
     }
 
-    // Current authority is gone â€” try the preferred GUID after active/closest choices.
+    // Current authority is gone - try the preferred GUID after active/closest choices.
     if (newAuthorityGuid == 0 && preferredGuid != 0)
     {
         for (const auto& [conn, client] : mClients)
@@ -2114,7 +2114,7 @@ void MPServer::refreshActorAuthorityForCell(const std::string& cellId, uint32_t 
         }
     }
 
-    // No stronger preference â€” lowest GUID wins.
+    // No stronger preference - lowest GUID wins.
     if (newAuthorityGuid == 0)
     {
         for (const auto& [conn, client] : mClients)
@@ -4507,7 +4507,7 @@ void MPServer::handleHandshake(ConnectedClient& c, const uint8_t* data, size_t s
         }
     }
 
-    // â”€â”€ Ed25519 keypair path â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    // -- Ed25519 keypair path --------------------------------------------------
     // If the client presents a public key and it maps to a known account,
     // issue a challenge instead of asking for a password.
     if (mPlayerDb && !hs.publicKey.empty())
@@ -4517,7 +4517,7 @@ void MPServer::handleHandshake(ConnectedClient& c, const uint8_t* data, size_t s
             const int64_t accountId = mPlayerDb->lookupAccountByKeypair(hs.publicKey);
             if (accountId >= 0)
             {
-                // Recognised key â€” generate a random 32-byte challenge nonce.
+                // Recognised key - generate a random 32-byte challenge nonce.
                 // Store the challenge in ConnectedClient so handleChallengeResponse
                 // can verify the signature.
                 std::memset(c.pendingChallenge, 0, 32);
@@ -4545,7 +4545,7 @@ void MPServer::handleHandshake(ConnectedClient& c, const uint8_t* data, size_t s
                 Log(Debug::Info) << "[Auth] Keypair challenge sent to " << c.loginName;
                 return; // wait for PacketChallengeResponse
             }
-            // Unknown key â€” reject immediately with a clear message.
+            // Unknown key - reject immediately with a clear message.
             // The client sent a keypair auth request (empty passwordHash) so
             // falling through to password auth would always fail with
             // "Incorrect password" which is misleading.
@@ -4563,7 +4563,7 @@ void MPServer::handleHandshake(ConnectedClient& c, const uint8_t* data, size_t s
         }
     }
 
-    // â”€â”€ Authentication â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    // -- Authentication --------------------------------------------------------
     if (mPlayerDb)
     {
         try
@@ -4624,14 +4624,14 @@ void MPServer::handleHandshake(ConnectedClient& c, const uint8_t* data, size_t s
         }
     }
 
-    // â”€â”€ Accept â€” look up or create the player's character record â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    // -- Accept - look up or create the player's character record -------------
     c.loginName         = hs.playerName;
     c.name              = hs.playerName;  // overwritten to charName after charselect
     c.player.guid       = c.guid;
     c.player.name       = hs.playerName;
     c.handshakeComplete = true;
 
-    // Resolve account id â€” needed for CharacterList and later for CharacterSelect.
+    // Resolve account id - needed for CharacterList and later for CharacterSelect.
     if (mPlayerDb)
     {
         try { c.dbAccountId = mPlayerDb->lookupOrCreateAccount(hs.playerName); }
@@ -4645,7 +4645,7 @@ void MPServer::handleHandshake(ConnectedClient& c, const uint8_t* data, size_t s
     if (mWorld.hostGuid == 0)
         mWorld.hostGuid = c.guid;
 
-    // Send the minimal handshake acceptance (no chargen data â€” that comes
+    // Send the minimal handshake acceptance (no chargen data - that comes
     // via PacketCharacterData after the player picks a character).
     PacketHandshakeResponse rsp;
     rsp.accepted      = true;
@@ -4695,7 +4695,7 @@ void MPServer::handleCharacterSelect(ConnectedClient& c, const uint8_t* data, si
     PacketCharacterSelect sel;
     if (!sel.decode(data, size)) return;
 
-    // Reject empty names â€” the old "" = new shorthand is gone.
+    // Reject empty names - the old "" = new shorthand is gone.
     if (sel.charName.empty())
     {
         PacketCharacterSelectError err;
@@ -4704,7 +4704,7 @@ void MPServer::handleCharacterSelect(ConnectedClient& c, const uint8_t* data, si
         return;
     }
 
-    // Basic name validation: 2â€“24 printable ASCII characters.
+    // Basic name validation: 2-24 printable ASCII characters.
     if (sel.charName.size() < 2 || sel.charName.size() > 24
         || sel.charName.find_first_not_of(
                "abcdefghijklmnopqrstuvwxyz"
@@ -4775,7 +4775,7 @@ void MPServer::handleCharacterSelect(ConnectedClient& c, const uint8_t* data, si
                     }
                 }
 
-                // New character slot â€” name must not already exist on this account.
+                // New character slot - name must not already exist on this account.
                 if (mPlayerDb->characterNameTaken(c.dbAccountId, sel.charName))
                 {
                     PacketCharacterSelectError err;
@@ -4799,7 +4799,7 @@ void MPServer::handleCharacterSelect(ConnectedClient& c, const uint8_t* data, si
             }
             else
             {
-                // Existing character â€” check it isn't already in use by a live session.
+                // Existing character - check it isn't already in use by a live session.
                 for (const auto& [existingConn, existingClient] : mClients)
                 {
                     if (existingConn != c.conn
@@ -4976,7 +4976,7 @@ void MPServer::handleCharacterSelect(ConnectedClient& c, const uint8_t* data, si
     }
     else
     {
-        // No DB â€” run as new character (dev/offline mode).
+        // No DB - run as new character (dev/offline mode).
         cdPkt.isNewCharacter  = true;
         cdPkt.characterName   = sel.charName;
         applyDefaultSpawn(cdPkt);
@@ -5141,7 +5141,7 @@ void MPServer::handleCharacterSelect(ConnectedClient& c, const uint8_t* data, si
 // ---------------------------------------------------------------------------
 void MPServer::handlePlayerCharGen(ConnectedClient& c, const uint8_t* data, size_t size)
 {
-    // Decode the packet â€” it now carries the full chargen result.
+    // Decode the packet - it now carries the full chargen result.
     PacketPlayerCharGen pkt;
     pkt.setPlayer(&c.player);
     if (!pkt.decode(data, size)) return;
@@ -5271,7 +5271,7 @@ void MPServer::handlePlayerPosition(ConnectedClient& c, const uint8_t* data, siz
     c.player.velocity = proposed.velocity;
     c.player.positionSampleTimeUs = proposed.positionSampleTimeUs;
 
-    // Relay to all other clients (unreliable is fine â€” we use raw broadcast)
+    // Relay to all other clients (unreliable is fine - we use raw broadcast)
     if (forceReliableTeleportRelay)
     {
         PacketPlayerPosition relay;
@@ -8632,7 +8632,7 @@ std::vector<uint8_t> MPServer::buildWorldWeatherPacket() const
 void MPServer::handleWeather(ConnectedClient& c, const uint8_t* data, size_t size)
 {
     // Only the host is trusted to report weather.
-    // Ignore packets from any other client â€” they should not be sending these.
+    // Ignore packets from any other client - they should not be sending these.
     if (c.guid != mWorld.hostGuid)
     {
         Log(Debug::Verbose) << "[Server] Ignoring weather from non-host " << c.name;
@@ -8921,7 +8921,7 @@ void MPServer::handleDoorState(ConnectedClient& c, const uint8_t* data, size_t s
                         << " doors=" << pkt.doors.size();
 
     // Store each entry as authoritative state, keyed by cellId.
-    // Last write wins â€” the server is the authority.
+    // Last write wins - the server is the authority.
     for (const auto& entry : pkt.doors)
     {
         auto& cellDoors = mWorld.doorStates[entry.cellId];
@@ -8948,7 +8948,7 @@ void MPServer::handleDoorState(ConnectedClient& c, const uint8_t* data, size_t s
     // Relay to all other clients so they apply the state immediately.
     broadcastToCell(pkt.cellId, std::vector<uint8_t>(data, data + size), c.conn);
 
-    // Notify scripts â€” fire once per door entry.
+    // Notify scripts - fire once per door entry.
     for (const auto& entry : pkt.doors)
         mLua.onDoorState(pkt.cellId, entry.refId, entry.isOpen);
 }
@@ -10511,14 +10511,14 @@ void MPServer::onConnectionStatusChanged(SteamNetConnectionStatusChangedCallback
 void MPServer::handleChallengeResponse(ConnectedClient& c,
                                         const uint8_t* data, size_t size)
 {
-    // Must have an outstanding challenge â€” ignore if there isn't one.
+    // Must have an outstanding challenge - ignore if there isn't one.
     if (c.pendingPublicKey.empty()) return;
 
     PacketChallengeResponse pkt;
     if (!pkt.decode(data, size)) return;
 
     // Load the stored public key from its base64 representation directly into
-    // a GNS key object â€” no manual base64 decode needed.
+    // a GNS key object - no manual base64 decode needed.
     CECSigningPublicKey pubKey;
     if (!pubKey.SetFromBase64EncodedString(c.pendingPublicKey.c_str()) || !pubKey.IsValid())
     {
@@ -10543,7 +10543,7 @@ void MPServer::handleChallengeResponse(ConnectedClient& c,
     Log(Debug::Info) << "[Auth] Keypair auth verified for " << c.loginName;
     c.pendingPublicKey.clear();
 
-    // Auth succeeded via keypair â€” proceed exactly as a normal accepted handshake.
+    // Auth succeeded via keypair - proceed exactly as a normal accepted handshake.
     c.player.guid       = c.guid;
     c.player.name       = c.loginName;
     c.handshakeComplete = true;
@@ -10602,7 +10602,7 @@ void MPServer::handleLinkKeyRequest(ConnectedClient& c,
     {
         Log(Debug::Warning) << "[Auth] LinkKey: key already registered for "
                             << c.loginName;
-        return; // silently ignore â€” client considers itself linked already
+        return; // silently ignore - client considers itself linked already
     }
 
     try
@@ -10639,7 +10639,7 @@ void MPServer::handleUnlinkKeyRequest(ConnectedClient& c,
 
     try
     {
-        // Simple DELETE â€” use a prepared statement via exec since we don't have
+        // Simple DELETE - use a prepared statement via exec since we don't have
         // a dedicated removeKeypair method; add one to PlayerDatabase.
         // For now find and delete by public_key.
         mPlayerDb->removeKeypair(pkt.publicKey);

@@ -16,7 +16,7 @@
 namespace mwmp
 {
     // -----------------------------------------------------------------------
-    // RemotePlayer â€” represents one other connected player in our game world.
+    // RemotePlayer - represents one other connected player in our game world.
     //
     // Lifecycle:
     //   1. Constructed when server sends PlayerBaseInfo for a new guid.
@@ -118,7 +118,7 @@ namespace mwmp
         {
             float cx = 0.f, cy = 0.f, cz = 0.f;
             float tx = 0.f, ty = 0.f, tz = 0.f;
-            // Last position received from network â€” used to cap XY dead-reckoning
+            // Last position received from network - used to cap XY dead-reckoning
             // drift so a stale velocity can't walk the target off indefinitely.
             float lastRecvX = 0.f, lastRecvY = 0.f, lastRecvZ = 0.f;
             float crx = 0.f, cry = 0.f, crz = 0.f;
@@ -169,7 +169,7 @@ namespace mwmp
         AnimFlags mLastAppliedAnimFlags;
         uint32_t mAppliedHitFlags = 0;
 
-        // Edge-detect for MF_JUMP â€” trigger "jump"/"jump landing" anim once on
+        // Edge-detect for MF_JUMP - trigger "jump"/"jump landing" anim once on
         // rising/falling edge.  We never write mPosition[2] for remote players
         // because that feeds handleJump() in PhysicsSystem which imparts a real
         // upward velocity impulse every frame and fights the Z interpolator.
@@ -223,7 +223,7 @@ namespace mwmp
     };
 
     // -----------------------------------------------------------------------
-    // PlayerList â€” owns all RemotePlayers, drives their update loop.
+    // PlayerList - owns all RemotePlayers, drives their update loop.
     // -----------------------------------------------------------------------
     class PlayerList
     {
