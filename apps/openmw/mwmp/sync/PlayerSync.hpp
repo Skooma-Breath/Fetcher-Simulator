@@ -42,6 +42,7 @@ namespace mwmp
         void notifyLocalHit(const MWWorld::Ptr& victim, float damage, bool healthDamage, bool knocked,
             const osg::Vec3f& hitPos, int attackType = 0, float attackStrength = 0.f,
             const std::string& onStrikeEnchantment = {});
+        void notifyLocalAttackRelease(float attackStrength);
         void noteRemotePlayerHit(uint32_t attackerGuid);
         void notifyLocalCastRelease(
             const std::string& spellId, const std::string& castAnimation, const MWWorld::Ptr& target);
@@ -191,6 +192,9 @@ namespace mwmp
 
         // Last attack pressed state — detect edge (false→true) for send
         bool mLastAttackPressed = false;
+        // A physical-projectile release is deferred for one frame so the local
+        // CharacterController can publish the exact wind-up strength it used.
+        bool mAwaitingRangedRelease = false;
         bool mLastCastingOrSpell = false;
         bool mLastWasDead = false;
         bool mRespawnPending = false;

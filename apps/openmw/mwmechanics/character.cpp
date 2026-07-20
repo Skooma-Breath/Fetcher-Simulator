@@ -44,6 +44,11 @@
 #include "../mwbase/windowmanager.hpp"
 #include "../mwbase/world.hpp"
 
+#ifdef BUILD_MULTIPLAYER
+#include "../mwmp/Main.hpp"
+#include "../mwmp/sync/PlayerSync.hpp"
+#endif
+
 #include "../mwworld/class.hpp"
 #include "../mwworld/esmstore.hpp"
 #include "../mwworld/inventorystore.hpp"
@@ -1643,6 +1648,24 @@ namespace MWMechanics
 
         auto& prng = MWBase::Environment::get().getWorld()->getPrng();
         mAttackStrength = calculateWindUp();
+#ifdef BUILD_MULTIPLAYER
+        // Remote physical projectiles must use the charge selected by the sender,
+        // not a value reconstructed from the network-dependent press/release interval.
+        if (mPtr.getClass().getCreatureStats(mPtr).getMovementFlag(CreatureStats::Flag_NetworkPlayerNpc))
+        {
+            if (auto* baseNode = mPtr.getRefData().getBaseNode())
+            {
+                bool strengthPending = false;
+                float syncedStrength = 0.f;
+                if (baseNode->getUserValue("mp_attack_strength_pending", strengthPending) && strengthPending
+                    && baseNode->getUserValue("mp_attack_strength", syncedStrength))
+                {
+                    mAttackStrength = std::clamp(syncedStrength, 0.f, 1.f);
+                    baseNode->setUserValue("mp_attack_strength_pending", false);
+                }
+            }
+        }
+#endif
         if (mAttackStrength == -1.f)
             mAttackStrength = std::min(1.f, 0.1f + Misc::Rng::rollClosedProbability(prng));
         ESM::WeaponType::Class weapclass = getWeaponType(mWeaponType)->mWeaponClass;
@@ -2232,6 +2255,14 @@ namespace MWMechanics
             else
             {
                 prepareHit();
+#ifdef BUILD_MULTIPLAYER
+                if (!getAttackingOrSpell() && mPtr == getPlayer()
+                    && (weapclass == ESM::WeaponType::Ranged || weapclass == ESM::WeaponType::Thrown)
+                    && mwmp::Main::isInitialised())
+                {
+                    mwmp::Main::get().getPlayerSync().notifyLocalAttackRelease(mAttackStrength);
+                }
+#endif
             }
 
             if (mWeaponType == ESM::Weapon::PickProbe || isRandomAttackAnimation(mCurrentWeapon))

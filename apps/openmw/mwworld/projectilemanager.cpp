@@ -138,6 +138,49 @@ namespace
         }
     }
 
+    void playPhysicalProjectileImpactEffects(const MWWorld::Ptr& projectile, const osg::Vec3f& hitPosition)
+    {
+        if (projectile.isEmpty())
+            return;
+
+        const ESM::RefId enchantmentId = projectile.getClass().getEnchantment(projectile);
+        if (enchantmentId.empty())
+            return;
+
+        const auto world = MWBase::Environment::get().getWorld();
+        const MWWorld::ESMStore& store = world->getStore();
+        const ESM::Enchantment* enchantment = store.get<ESM::Enchantment>().search(enchantmentId);
+        if (!enchantment || enchantment->mData.mType != ESM::Enchantment::WhenStrikes)
+            return;
+
+        // The authoritative client runs CastSpell::explodeSpell(), which both
+        // applies gameplay and spawns the area orb/sound. A replicated physical
+        // projectile is presentation-only, so reproduce only that audiovisual
+        // portion when it reaches its locally simulated impact point.
+        for (const ESM::IndexedENAMstruct& effectInfo : enchantment->mEffects.mList)
+        {
+            if (effectInfo.mData.mArea <= 0)
+                continue;
+
+            const ESM::MagicEffect* effect = store.get<ESM::MagicEffect>().find(effectInfo.mData.mEffectID);
+            const ESM::Static* areaStatic = !effect->mArea.empty()
+                ? store.get<ESM::Static>().find(effect->mArea)
+                : store.get<ESM::Static>().find(ESM::RefId::stringRefId("VFX_DefaultArea"));
+
+            world->spawnEffect(Misc::ResourceHelpers::correctMeshPath(areaStatic->mModel.getNormalized()),
+                effect->mParticle.getOriginal(), hitPosition, static_cast<float>(effectInfo.mData.mArea * 2));
+
+            MWBase::SoundManager* sound = MWBase::Environment::get().getSoundManager();
+            if (!effect->mAreaSound.empty())
+                sound->playSound3D(hitPosition, effect->mAreaSound, 1.f, 1.f);
+            else
+            {
+                sound->playSound3D(
+                    hitPosition, store.get<ESM::Skill>().find(effect->mData.mSchool)->mSchool->mAreaSound, 1.f, 1.f);
+            }
+        }
+    }
+
     ESM::EffectList getMagicBoltData(std::vector<ESM::RefId>& projectileIDs, std::set<ESM::RefId>& sounds, float& speed,
         VFS::Path::NormalizedView& texture, std::string& sourceName, const ESM::RefId& id)
     {
@@ -650,6 +693,8 @@ namespace MWWorld
                 MWMechanics::projectileHit(
                     caster, target, bow, projectileRef.getPtr(), hitPosition, projectileState.mAttackStrength);
             }
+            else
+                playPhysicalProjectileImpactEffects(projectileRef.getPtr(), hitPosition);
             projectileState.mToDelete = true;
         }
         const MWWorld::ESMStore& esmStore = *MWBase::Environment::get().getESMStore();

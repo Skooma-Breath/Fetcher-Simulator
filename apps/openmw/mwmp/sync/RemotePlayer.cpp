@@ -2110,9 +2110,17 @@ namespace mwmp
         // in character.cpp (Flag_NetworkPlayerNpc branch) reads it when it enters
         // the attack wind-up.  This is the exact pattern TES3MP uses:
         //   dedicatedAttack->attackAnimation -> mAttackType in character.cpp.
-        if (!atk.attackAnimation.empty())
-            if (auto* bn = mNpcPtr.getRefData().getBaseNode())
+        if (auto* bn = mNpcPtr.getRefData().getBaseNode())
+        {
+            if (!atk.attackAnimation.empty())
                 bn->setUserValue("mp_attack_type", atk.attackAnimation);
+
+            if (!atk.pressed && !atk.hit && (atk.type == 2 || atk.type == 3))
+            {
+                bn->setUserValue("mp_attack_strength", std::clamp(atk.strength, 0.f, 1.f));
+                bn->setUserValue("mp_attack_strength_pending", true);
+            }
+        }
 
         // Tell the CharacterController the actor is attacking so it transitions
         // into the correct attack animation group on its own.  We set the flag

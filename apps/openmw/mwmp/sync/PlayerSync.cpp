@@ -1569,21 +1569,37 @@ void PlayerSync::sendAnimFlags(float dt)
 void PlayerSync::sendAttack()
 {
     MWBase::World* world = MWBase::Environment::get().getWorld();
-    if (!world) return;
+    if (!world)
+        return;
     MWWorld::Ptr player = world->getPlayerPtr();
-    if (player.isEmpty()) return;
+    if (player.isEmpty())
+        return;
 
-    const MWMechanics::CreatureStats& stats
-        = player.getClass().getCreatureStats(player);
-    const bool canAttack = !stats.isDead()
-        && !stats.isParalyzed()
-        && !stats.getKnockedDown()
-        && !stats.getHitRecovery();
+    const MWMechanics::CreatureStats& stats = player.getClass().getCreatureStats(player);
+    const bool canAttack
+        = !stats.isDead() && !stats.isParalyzed() && !stats.getKnockedDown() && !stats.getHitRecovery();
     const bool pressed = canAttack && stats.getAttackingOrSpell();
 
     // Only send on edge transitions (press and release both matter: press triggers
-    // the wind-up animation; release tells the receiver to end it)
-    if (pressed == mLastAttackPressed) return;
+    // the wind-up animation; release tells the receiver to end it).
+    if (pressed == mLastAttackPressed)
+        return;
+
+    // The MP tick runs before mechanics. On the first frame where a ranged input
+    // is released, CharacterController has not calculated the launch strength yet.
+    // Defer this edge once; the controller normally calls notifyLocalAttackRelease()
+    // later in the same frame with the exact value. If that hook never runs (for
+    // example because the attack was cancelled before an animation started), the
+    // next frame falls through and sends the legacy zero-strength release.
+    const bool physicalProjectileRelease = !pressed && mLastAttackPressed && canAttack
+        && (mLocal.attack.type == 2 || mLocal.attack.type == 3);
+    if (physicalProjectileRelease && !mAwaitingRangedRelease)
+    {
+        mAwaitingRangedRelease = true;
+        return;
+    }
+
+    mAwaitingRangedRelease = false;
     mLastAttackPressed = pressed;
 
     mLocal.attack.hit = false;
@@ -1591,6 +1607,7 @@ void PlayerSync::sendAttack()
     mLocal.attack.miss = false;
     mLocal.attack.knocked = false;
     mLocal.attack.healthDamage = false;
+    mLocal.attack.strength = 0.f;
     mLocal.attack.damage = 0.f;
     mLocal.attack.onStrikeEnchantment.clear();
     mLocal.attack.target.clear();
@@ -1623,6 +1640,40 @@ void PlayerSync::sendAttack()
     mLocal.attack.hit = false;
     mLocal.attack.block = false;
     mLocal.attack.miss = false;
+}
+
+void PlayerSync::notifyLocalAttackRelease(float attackStrength)
+{
+    if (mLocal.guid == 0 || !mLastAttackPressed
+        || (mLocal.attack.type != 2 && mLocal.attack.type != 3))
+    {
+        return;
+    }
+
+    mAwaitingRangedRelease = false;
+    mLastAttackPressed = false;
+
+    mLocal.attack.hit = false;
+    mLocal.attack.block = false;
+    mLocal.attack.miss = false;
+    mLocal.attack.knocked = false;
+    mLocal.attack.healthDamage = false;
+    mLocal.attack.strength = std::clamp(attackStrength, 0.f, 1.f);
+    mLocal.attack.damage = 0.f;
+    mLocal.attack.onStrikeEnchantment.clear();
+    mLocal.attack.target.clear();
+    mLocal.attack.targetMpNum = 0;
+    mLocal.attack.targetKind = mwmp::Attack::TargetNone;
+    mLocal.attack.hitPos[0] = 0.f;
+    mLocal.attack.hitPos[1] = 0.f;
+    mLocal.attack.hitPos[2] = 0.f;
+    mLocal.attack.pressed = false;
+
+    PacketPlayerAttack pkt;
+    pkt.setPlayer(&mLocal);
+    mClient.sendReliable(pkt.encode(mSeqCounter++));
+
+    Log(Debug::Verbose) << "[MP] PlayerSync: ranged release strength=" << mLocal.attack.strength;
 }
 
 void PlayerSync::notifyLocalHit(const MWWorld::Ptr& victim, float damage, bool healthDamage, bool knocked,
