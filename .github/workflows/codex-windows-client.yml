@@ -71,6 +71,11 @@ on:
         required: true
         default: false
         type: boolean
+      tester-tools-sha256:
+        description: Pinned SHA-256 of Fetcher-Updater fetcher-tester-tools.zip (required when included)
+        required: false
+        default: ""
+        type: string
       run-label:
         description: Optional label to make this run easy to find in gh run list
         required: false
@@ -101,4 +106,5 @@ jobs:
       mod-bundle-release-tag: ${{ inputs.mod-bundle-release-tag }}
       mod-bundle-asset: ${{ inputs.mod-bundle-asset }}
       include-tester-tools: ${{ inputs.include-tester-tools }}
+      tester-tools-sha256: ${{ inputs.tester-tools-sha256 || vars.FETCHER_TESTER_TOOLS_SHA256 }}
     secrets: inherit

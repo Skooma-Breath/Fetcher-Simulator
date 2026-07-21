@@ -18,15 +18,8 @@ permissions:
   contents: write
 
 jobs:
-  Tester-Tools:
-    if: ${{ github.ref == 'refs/heads/main' }}
-    uses: ./.github/workflows/fetcher-tester-tools.yml
-    secrets: inherit
-
   Windows-Test:
     if: ${{ github.ref == 'refs/heads/main' }}
-    needs:
-      - Tester-Tools
     uses: ./.github/workflows/windows.yml
     with:
       image: "2022"
@@ -40,6 +33,7 @@ jobs:
       mod-bundle-release-tag: openmw-client-mods-mp-clients
       mod-bundle-asset: openmw-client-mods.zip
       include-tester-tools: true
+      tester-tools-sha256: ${{ vars.FETCHER_TESTER_TOOLS_SHA256 }}
     secrets: inherit
 
   Ubuntu-Test:

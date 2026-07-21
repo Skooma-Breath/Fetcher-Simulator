@@ -44,6 +44,21 @@ on:
       include-tester-tools:
         default: false
         type: boolean
+      tester-tools-repository:
+        default: "Skooma-Breath/Fetcher-Updater"
+        type: string
+      tester-tools-release-tag:
+        default: "fetcher-tester-tools"
+        type: string
+      tester-tools-asset-name:
+        default: "fetcher-tester-tools.zip"
+        type: string
+      tester-tools-sha256:
+        default: ""
+        type: string
+      tester-tools-archive-path:
+        default: ""
+        type: string
 
 jobs:
   Windows:
@@ -315,7 +330,12 @@ jobs:
           -ModBundleReleaseTag "${{ inputs.mod-bundle-release-tag }}" `
           -ModBundleAsset "${{ inputs.mod-bundle-asset }}" `
           -Repository "${{ github.repository }}" `
-          -IncludeTesterTools ([bool]::Parse("${{ inputs.include-tester-tools }}"))
+          -IncludeTesterTools ([bool]::Parse("${{ inputs.include-tester-tools }}")) `
+          -TesterToolsRepository "${{ inputs.tester-tools-repository }}" `
+          -TesterToolsReleaseTag "${{ inputs.tester-tools-release-tag }}" `
+          -TesterToolsAssetName "${{ inputs.tester-tools-asset-name }}" `
+          -TesterToolsSha256 "${{ inputs.tester-tools-sha256 }}" `
+          -TesterToolsArchivePath "${{ inputs.tester-tools-archive-path }}"
 
     - name: Generate CI-ID.txt
       shell: bash
