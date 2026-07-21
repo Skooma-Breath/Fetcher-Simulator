@@ -503,6 +503,114 @@ function Find-OpenMwPluginDataRoot {
     return $null
 }
 
+function Get-OptionalStringProperty {
+    param(
+        [Parameter(Mandatory = $true)] $Object,
+        [Parameter(Mandatory = $true)][string] $Name
+    )
+
+    if ($null -eq $Object) {
+        return ""
+    }
+    if ($Object -is [Collections.IDictionary]) {
+        if ($Object.Contains($Name) -and $null -ne $Object[$Name]) {
+            return [string]$Object[$Name]
+        }
+        return ""
+    }
+    $property = $Object.PSObject.Properties[$Name]
+    if ($null -eq $property -or $null -eq $property.Value) {
+        return ""
+    }
+    return [string]$property.Value
+}
+
+function Resolve-ClientModPatchMarkerPath {
+    param(
+        [Parameter(Mandatory = $true)][string] $Root,
+        [Parameter(Mandatory = $true)][string] $TargetRoot,
+        [Parameter(Mandatory = $true)] $Patch
+    )
+
+    $configuredPath = Get-OptionalStringProperty -Object $Patch -Name "markerPath"
+    if (-not [string]::IsNullOrWhiteSpace($configuredPath)) {
+        $relativePath = ConvertTo-NormalizedRelativePath -RelativePath $configuredPath
+        return [IO.Path]::GetFullPath((Join-Path $Root $relativePath.Replace("/", "\")))
+    }
+
+    $markerFile = Get-OptionalStringProperty -Object $Patch -Name "markerFile"
+    if ([string]::IsNullOrWhiteSpace($markerFile)) {
+        return $null
+    }
+    $relativeFile = ConvertTo-NormalizedRelativePath -RelativePath $markerFile
+    return [IO.Path]::GetFullPath((Join-Path $TargetRoot $relativeFile.Replace("/", "\")))
+}
+
+function Test-ClientModPatchCurrent {
+    param(
+        [Parameter(Mandatory = $true)][string] $Root,
+        [Parameter(Mandatory = $true)] $Patch,
+        [Parameter(Mandatory = $true)][string] $TargetRoot,
+        [Parameter(Mandatory = $true)] $Asset,
+        [Parameter(Mandatory = $true)][hashtable] $PatchStates
+    )
+
+    $patchId = [string]$Patch.id
+    if (-not $PatchStates.ContainsKey($patchId)) {
+        return $false
+    }
+    $state = $PatchStates[$patchId]
+    $knownDigest = Get-OptionalStringProperty -Object $state -Name "assetDigest"
+    if ([string]::IsNullOrWhiteSpace($knownDigest) -or
+        -not $knownDigest.Equals([string]$Asset.Digest, [StringComparison]::OrdinalIgnoreCase)) {
+        return $false
+    }
+
+    $knownTarget = Get-OptionalStringProperty -Object $state -Name "target"
+    if ([string]::IsNullOrWhiteSpace($knownTarget)) {
+        return $false
+    }
+    $resolvedTarget = [IO.Path]::GetFullPath($TargetRoot).TrimEnd("\", "/")
+    $resolvedKnownTarget = [IO.Path]::GetFullPath($knownTarget).TrimEnd("\", "/")
+    if (-not $resolvedTarget.Equals($resolvedKnownTarget, [StringComparison]::OrdinalIgnoreCase)) {
+        return $false
+    }
+
+    $markerPath = Resolve-ClientModPatchMarkerPath -Root $Root -TargetRoot $TargetRoot -Patch $Patch
+    if ([string]::IsNullOrWhiteSpace($markerPath) -or
+        -not (Test-Path -LiteralPath $markerPath -PathType Leaf)) {
+        return $false
+    }
+    $knownManifestHash = Get-OptionalStringProperty -Object $state -Name "manifestSha256"
+    if ([string]::IsNullOrWhiteSpace($knownManifestHash)) {
+        return $false
+    }
+
+    try {
+        $marker = Get-Content -LiteralPath $markerPath -Raw | ConvertFrom-Json
+    }
+    catch {
+        return $false
+    }
+    $recordedManifestHash = Get-OptionalStringProperty -Object $marker -Name "manifestSha256"
+    if (-not [string]::IsNullOrWhiteSpace($recordedManifestHash)) {
+        if (-not $recordedManifestHash.Equals($knownManifestHash, [StringComparison]::OrdinalIgnoreCase)) {
+            return $false
+        }
+    }
+    elseif (-not (Get-Sha256 -Path $markerPath).Equals($knownManifestHash, [StringComparison]::OrdinalIgnoreCase)) {
+        return $false
+    }
+    $knownVersion = Get-OptionalStringProperty -Object $state -Name "patchVersion"
+    $installedVersion = Get-OptionalStringProperty -Object $marker -Name "patchVersion"
+    if ([string]::IsNullOrWhiteSpace($knownVersion) -or
+        [string]::IsNullOrWhiteSpace($installedVersion) -or
+        -not $knownVersion.Equals($installedVersion, [StringComparison]::OrdinalIgnoreCase)) {
+        return $false
+    }
+    return $true
+}
+
 function Install-ClientModPatch {
     param(
         [Parameter(Mandatory = $true)][string] $Root,
@@ -528,6 +636,14 @@ function Install-ClientModPatch {
     $release = Get-GitHubRelease -Tag ([string]$Patch.releaseTag) -ReleaseRepository $patchRepository
     $asset = Get-ReleaseAsset -Release $release -AssetName ([string]$Patch.assetName) `
         -ReleaseTag ([string]$Patch.releaseTag) -ReleaseRepository $patchRepository
+    if (Test-ClientModPatchCurrent -Root $Root -Patch $Patch -TargetRoot $targetRoot `
+        -Asset $asset -PatchStates $PatchStates) {
+        $currentState = $PatchStates[[string]$Patch.id]
+        Write-Host "$($Patch.name) is current at patch $(Get-OptionalStringProperty -Object $currentState -Name 'patchVersion')."
+        Write-Host "  $targetRoot"
+        return
+    }
+
     $cacheRoot = Join-Path $UpdateRoot ("patches\{0}" -f [string]$Patch.id)
     New-Item -ItemType Directory -Force -Path $cacheRoot | Out-Null
     $archivePath = Join-Path $cacheRoot ("{0}-{1}.zip" -f [string]$Patch.id, $asset.Sha256)

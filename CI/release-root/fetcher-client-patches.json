@@ -26,6 +26,7 @@
       "installRootParameter": "InstallRoot",
       "manifestName": "fetcher-starwind-compat-patch.json",
       "markerFile": "fetcher-starwind-compat-patch.json",
+      "markerPath": "Data Files/fetcher-starwind-compat/fetcher-starwind-compat-patch.json",
       "dataPaths": [
         "Data Files/fetcher-starwind-compat/Starwind Vanilla Compat",
         "Data Files/fetcher-starwind-compat/Data Files"
