@@ -41,24 +41,6 @@ on:
       mod-bundle-asset:
         default: "openmw-client-mods.zip"
         type: string
-      include-tester-tools:
-        default: false
-        type: boolean
-      tester-tools-repository:
-        default: "Skooma-Breath/Fetcher-Updater"
-        type: string
-      tester-tools-release-tag:
-        default: "fetcher-tester-tools"
-        type: string
-      tester-tools-asset-name:
-        default: "fetcher-tester-tools.zip"
-        type: string
-      tester-tools-sha256:
-        default: ""
-        type: string
-      tester-tools-archive-path:
-        default: ""
-        type: string
 
 jobs:
   Windows:
@@ -329,13 +311,7 @@ jobs:
           -ModBundleUrl "${{ inputs.mod-bundle-url }}" `
           -ModBundleReleaseTag "${{ inputs.mod-bundle-release-tag }}" `
           -ModBundleAsset "${{ inputs.mod-bundle-asset }}" `
-          -Repository "${{ github.repository }}" `
-          -IncludeTesterTools ([bool]::Parse("${{ inputs.include-tester-tools }}")) `
-          -TesterToolsRepository "${{ inputs.tester-tools-repository }}" `
-          -TesterToolsReleaseTag "${{ inputs.tester-tools-release-tag }}" `
-          -TesterToolsAssetName "${{ inputs.tester-tools-asset-name }}" `
-          -TesterToolsSha256 "${{ inputs.tester-tools-sha256 }}" `
-          -TesterToolsArchivePath "${{ inputs.tester-tools-archive-path }}"
+          -Repository "${{ github.repository }}"
 
     - name: Generate CI-ID.txt
       shell: bash
@@ -349,7 +325,7 @@ jobs:
         if [ -d SymStore ]; then cp install/CI-ID.txt SymStore/CI-ID.txt; fi
 
     - name: Generate Fetcher client update inventory
-      if: ${{ inputs.package && inputs.release && (inputs.release-tag == 'Fetcher-Simulator' || inputs.release-tag == 'Fetcher-Simulator-Test') }}
+      if: ${{ inputs.package && inputs.release && inputs.release-tag == 'Fetcher-Simulator' }}
       shell: pwsh
       run: |
         ${{ github.workspace }}\CI\Build-FetcherClientInventory.ps1 `

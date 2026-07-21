@@ -2,19 +2,20 @@
 
 OpenMW no longer owns the Fetcher updater/tester-tools sources or stable prerelease. Those live in `Skooma-Breath/Fetcher-Updater`.
 
-## Migration order
+## Unified client architecture
 
-1. Publish and validate the new repository's `fetcher-tester-tools` prerelease from its routed commit.
-2. Publish the OpenMW bridge commit `d6c83ffe2c` to the old `fetcher-tester-tools` prerelease. Its installed updater points all subsequent tester-tools checks to the already-available `Skooma-Breath/Fetcher-Updater` release while client checks remain on `Skooma-Breath/Fetcher-Simulator`.
-3. Set the OpenMW repository variable `FETCHER_TESTER_TOOLS_SHA256` to the lowercase 64-character SHA-256 digest of the new `fetcher-tester-tools.zip` asset.
-4. Run the OpenMW release workflow. Test-client packaging queries the new release, requires its GitHub digest to equal the pin, verifies the downloaded archive hash, validates safe paths, and verifies every manifest file hash and size.
+OpenMW publishes one clean Windows base client:
 
-The cleanup commit must not be deployed before steps 1 through 3 are complete. Existing testers continue to run `Update-Fetcher-Simulator.bat` without reinstalling.
+- release tag: `Fetcher-Simulator`
+- asset: `fetcher-simulator.zip`
+- channel marker: `clean`
 
-## Local CI input
+The base archive contains OpenMW and portable configuration only. Fetcher-Updater owns the tester tools, UMO mod installation, public-test configuration, and compatibility patches. New testers run `Join-Fetcher-Test-Channel.bat`; existing testers continue running `Update-Fetcher-Simulator.bat`.
 
-`CI/Package-WindowsClientMods.ps1` also accepts `-TesterToolsArchivePath` for a clearly supplied local CI artifact. The archive is still path-checked and manifest-verified. Pass `-TesterToolsSha256` as well when the local artifact has an external digest pin.
+## Migration
+
+The standalone updater must be published first with its client defaults set to `Fetcher-Simulator` and `fetcher-simulator.zip`. It accepts both legacy `test` and unified `clean` channel markers, so existing installations migrate without reinstalling. The old `Fetcher-Simulator-Test` prerelease remains available as a static fallback during the migration window but is no longer rebuilt.
 
 ## Rollback
 
-Replace the standalone stable prerelease with a known-good build and update `FETCHER_TESTER_TOOLS_SHA256` before packaging another test client. If the repository split must be rolled back, restore the OpenMW bridge commit and republish its four old-repository assets; installed filenames and the launch BAT remain unchanged.
+Republish a known-good standalone updater if overlay routing must be rolled back. The `fetcher-updater-migration-bridge` branch and old-repository `fetcher-tester-tools` tag remain available for older installations. The retired `Fetcher-Simulator-Test` prerelease can be restored as an actively built channel by reverting the unified-client commit.

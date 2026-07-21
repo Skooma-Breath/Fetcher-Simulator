@@ -7,36 +7,12 @@ on:
     tags:
       - openmw-**
   workflow_dispatch:
-    inputs:
-      publish-clean:
-        description: Replace the legacy Fetcher-Simulator prerelease with the clean client after testers migrate
-        required: true
-        default: false
-        type: boolean
 
 permissions:
   contents: write
 
 jobs:
-  Windows-Test:
-    if: ${{ github.ref == 'refs/heads/main' }}
-    uses: ./.github/workflows/windows.yml
-    with:
-      image: "2022"
-      build-type: RelWithDebInfo
-      package: true
-      release: true
-      release-tag: Fetcher-Simulator-Test
-      release-name: Fetcher Simulator Test Channel
-      release-zip-name: fetcher-simulator-test.zip
-      release-include-installer: false
-      mod-bundle-release-tag: openmw-client-mods-mp-clients
-      mod-bundle-asset: openmw-client-mods.zip
-      include-tester-tools: true
-      tester-tools-sha256: ${{ vars.FETCHER_TESTER_TOOLS_SHA256 }}
-    secrets: inherit
-
-  Ubuntu-Test:
+  Ubuntu:
     if: ${{ github.ref == 'refs/heads/main' }}
     uses: ./.github/workflows/ubuntu.yml
     with:
@@ -49,10 +25,7 @@ jobs:
       release-asset-name: fetcher-simulator-ubuntu-24.04-amd64.deb
     secrets: inherit
 
-  Windows-Clean:
-    if: ${{ always() && (github.ref != 'refs/heads/main' || (github.event_name == 'workflow_dispatch' && inputs.publish-clean && needs.Windows-Test.result == 'success')) }}
-    needs:
-      - Windows-Test
+  Windows:
     uses: ./.github/workflows/windows.yml
     with:
       image: "2022"
@@ -63,7 +36,6 @@ jobs:
       release-name: ${{ github.ref == 'refs/heads/main' && 'Fetcher-Simulator' || '' }}
       release-zip-name: ${{ github.ref == 'refs/heads/main' && 'fetcher-simulator.zip' || '' }}
       release-include-installer: ${{ github.ref != 'refs/heads/main' }}
-      include-tester-tools: false
     secrets: inherit
 
   MacOS:
