@@ -10,7 +10,7 @@ OpenMW publishes one clean Windows base client:
 - asset: `fetcher-simulator.zip`
 - channel marker: `clean`
 
-The base archive contains OpenMW and portable configuration only. Fetcher-Updater owns the tester tools, UMO mod installation, public-test configuration, and compatibility patches. New testers run `Join-Fetcher-Test-Channel.bat`; existing testers continue running `Update-Fetcher-Simulator.bat`.
+The base archive contains OpenMW and portable configuration only. Fetcher-Updater owns the tester tools, UMO mod installation, public-test configuration, and compatibility patches. New testers run `Setup-Fetcher-Updater.bat`; existing testers continue running `Update-Fetcher-Simulator.bat`.
 
 ## Migration
 

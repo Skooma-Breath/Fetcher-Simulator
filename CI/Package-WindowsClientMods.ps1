@@ -222,7 +222,7 @@ Set-Content -LiteralPath $readmePath -Encoding ASCII -Value @(
     "Writable config, logs, saves, screenshots, and generated user files are stored under .\userdata.",
     "Load order and content entries are stored directly in .\openmw.cfg so the package works without per-user OpenMW config.",
     "Portable graphics defaults are seeded in settings.cfg and .\userdata\settings.cfg. Launcher changes are saved to .\userdata\settings.cfg.",
-    "This clean package intentionally excludes Fetcher tester tools and gameplay mods. To opt in, download Join-Fetcher-Test-Channel.bat from https://github.com/Skooma-Breath/Fetcher-Updater/releases/tag/fetcher-tester-tools.",
+    "This clean package intentionally excludes Fetcher tester tools and gameplay mods. To opt in, download Setup-Fetcher-Updater.bat from https://github.com/Skooma-Breath/Fetcher-Updater/releases/tag/fetcher-tester-tools.",
     "",
     "Bundled mod files live under .\Data Files unless the package manifest declares additional data directories."
 )

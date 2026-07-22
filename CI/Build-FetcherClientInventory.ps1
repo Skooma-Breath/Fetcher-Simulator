@@ -44,6 +44,7 @@ function Test-FetcherMutablePath {
         "install-fetcher-bardcraft-with-umo.ps1",
         "install-fetcher-tester-tools.ps1",
         "join-fetcher-test-channel.bat",
+        "setup-fetcher-updater.bat",
         "launch-fetcher-character.bat",
         "launch-fetcher-character.ps1",
         "update-fetcher-simulator.bat",
