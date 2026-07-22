@@ -50,8 +50,8 @@ jobs:
 
       - name: Install Ubuntu build and packaging dependencies
         run: |
-          sudo CI/install_debian_deps.sh gcc openmw-deps openmw-deps-dynamic openmw-multiplayer
-          sudo apt-get install -y --no-install-recommends dpkg-dev file
+          sudo CI/install_debian_deps.sh --no-openmw-ppa gcc openmw-deps openmw-deps-dynamic-no-mygui openmw-multiplayer
+          sudo apt-get install -y --no-install-recommends dpkg-dev file libfreetype6-dev
 
       - name: Prime ccache
         uses: hendrikmuhs/ccache-action@v1
@@ -59,8 +59,15 @@ jobs:
           key: ubuntu-24.04-${{ inputs.build-type }}
           max-size: 1500M
 
+      - name: Build pinned static Recast dependency
+        run: CI/Build-UbuntuRecast.sh "$RUNNER_TEMP/fetcher-recast"
+
+      - name: Build pinned static MyGUI dependency
+        run: CI/Build-UbuntuMyGUI.sh "$RUNNER_TEMP/fetcher-mygui"
+
       - name: Configure Fetcher Simulator
         run: |
+          export MYGUI_HOME="$RUNNER_TEMP/fetcher-mygui"
           cmake -S . -B build \
             -D CMAKE_BUILD_TYPE="$BUILD_TYPE" \
             -D CMAKE_C_COMPILER=gcc \
@@ -68,6 +75,9 @@ jobs:
             -D CMAKE_C_COMPILER_LAUNCHER=ccache \
             -D CMAKE_CXX_COMPILER_LAUNCHER=ccache \
             -D CMAKE_INSTALL_PREFIX=/usr \
+            -D CMAKE_PREFIX_PATH="$RUNNER_TEMP/fetcher-recast" \
+            -D OPENMW_USE_SYSTEM_MYGUI=ON \
+            -D MYGUI_STATIC=ON \
             -D OPENMW_USE_SYSTEM_RECASTNAVIGATION=ON \
             -D USE_SYSTEM_TINYXML=ON \
             -D BUILD_MULTIPLAYER=ON \
@@ -77,11 +87,16 @@ jobs:
             -D BUILD_OPENCS_TESTS=OFF \
             -D BUILD_OPENCS=OFF \
             -D BUILD_WIZARD=OFF \
+            -D BUILD_BSATOOL=OFF \
+            -D BUILD_ESMTOOL=OFF \
+            -D BUILD_MWINIIMPORTER=OFF \
+            -D BUILD_ESSIMPORTER=OFF \
+            -D BUILD_NAVMESHTOOL=OFF \
             -D BUILD_NIFTEST=OFF \
             -D BUILD_BULLETOBJECTTOOL=OFF
 
       - name: Build Fetcher Simulator
-        run: cmake --build build --parallel "$(nproc)"
+        run: cmake --build build --parallel "$(nproc)" --verbose
 
       - name: Smoke-test build tree
         run: |
@@ -97,14 +112,21 @@ jobs:
             "$GITHUB_WORKSPACE/release-assets" \
             "$GITHUB_SHA" \
             "$version" \
-            "$RELEASE_ASSET"
+            "$RELEASE_ASSET" \
+            "$RUNNER_TEMP/fetcher-mygui"
+
+      - name: Clean Ubuntu 24.04 APT install and smoke test
+        if: ${{ inputs.package }}
+        run: CI/Test-UbuntuPackage.sh "$GITHUB_WORKSPACE/release-assets/$RELEASE_ASSET"
 
       - name: Upload Ubuntu package artifact
         if: ${{ inputs.package }}
         uses: actions/upload-artifact@v6
         with:
           name: fetcher-simulator-ubuntu-${{ github.sha }}
-          path: release-assets/${{ inputs.release-asset-name }}
+          path: |
+            release-assets/${{ inputs.release-asset-name }}
+            release-assets/*-report.txt
           if-no-files-found: error
 
       - name: Publish stable Ubuntu prerelease
@@ -113,10 +135,22 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          $assetName = Split-Path -Leaf '${{ inputs.release-asset-name }}'
+          $notes = @"
+          Ubuntu 24.04 amd64 installer containing the Fetcher Simulator client, launcher, and dedicated server.
+
+          Download **$assetName** and install it with:
+
+              sudo apt install ./fetcher-simulator-ubuntu-24.04-amd64.deb
+
+          Installed executables: **openmw**, **openmw-launcher**, and **openmw-server**. Morrowind game data is required and is not included. Uninstall with **sudo apt remove fetcher-simulator**.
+
+          GitHub's Source code ZIP and TAR.GZ entries are developer source archives, not Ubuntu installers.
+          "@
           .\CI\Publish-StableGitHubRelease.ps1 `
             -Repository "${{ github.repository }}" `
             -Tag "${{ inputs.release-tag }}" `
             -TargetCommit "${{ github.sha }}" `
             -Title "${{ inputs.release-name }}" `
-            -Notes "Ubuntu 24.04 amd64 package containing the Fetcher multiplayer OpenMW client and dedicated server. Install with: sudo apt install ./$(Split-Path -Leaf '${{ inputs.release-asset-name }}')" `
+            -Notes $notes `
             -Assets "${{ github.workspace }}/release-assets/${{ inputs.release-asset-name }}"

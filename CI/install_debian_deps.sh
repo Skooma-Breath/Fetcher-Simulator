@@ -3,8 +3,9 @@
 set -euo pipefail
 
 print_help() {
-  echo "usage: $0 [group]..."
+  echo "usage: $0 [--no-openmw-ppa] [group]..."
   echo
+  echo "  --no-openmw-ppa: use only the distribution's configured repositories"
   echo "  available groups: "${!GROUPED_DEPS[@]}""
 }
 
@@ -42,6 +43,7 @@ declare -rA GROUPED_DEPS=(
 
   # These dependencies can alternatively be built and linked statically.
   [openmw-deps-dynamic]="libmygui-dev libopenscenegraph-dev libsqlite3-dev libcollada-dom-dev"
+  [openmw-deps-dynamic-no-mygui]="libopenscenegraph-dev libsqlite3-dev libcollada-dom-dev"
   [openmw-multiplayer]="libprotobuf-dev protobuf-compiler libssl-dev"
   [clang-tidy]="clang-tidy-19"
 
@@ -110,13 +112,30 @@ declare -rA GROUPED_DEPS=(
   "
 )
 
-if [[ $# -eq 0 ]]; then
+use_openmw_ppa=1
+groups=()
+for argument in "$@"; do
+  case "$argument" in
+    --no-openmw-ppa)
+      use_openmw_ppa=0
+      ;;
+    --help|-h)
+      print_help
+      exit 0
+      ;;
+    *)
+      groups+=("$argument")
+      ;;
+  esac
+done
+
+if [[ ${#groups[@]} -eq 0 ]]; then
   >&2 print_help
   exit 1
 fi
 
 deps=()
-for group in "$@"; do
+for group in "${groups[@]}"; do
   if [[ ! -v GROUPED_DEPS[$group] ]]; then
     >&2 echo "error: unknown group ${group}"
     exit 1
@@ -133,19 +152,21 @@ while true; do
   apt-get update -yqq && break
 done
 
-apt-get -qq -o dir::cache::archives="$APT_CACHE_DIR" install -y --no-install-recommends software-properties-common gnupg >/dev/null
+if [[ $use_openmw_ppa -eq 1 ]]; then
+  apt-get -qq -o dir::cache::archives="$APT_CACHE_DIR" install -y --no-install-recommends software-properties-common gnupg >/dev/null
 
-while true; do
-  add-apt-repository -y ppa:openmw/openmw && break
-done
+  while true; do
+    add-apt-repository -y ppa:openmw/openmw && break
+  done
 
-while true; do
-  add-apt-repository -y ppa:openmw/openmw-daily && break
-done
+  while true; do
+    add-apt-repository -y ppa:openmw/openmw-daily && break
+  done
 
-while true; do
-  add-apt-repository -y ppa:openmw/staging && break
-done
+  while true; do
+    add-apt-repository -y ppa:openmw/staging && break
+  done
+fi
 
 apt-get -qq -o dir::cache::archives="$APT_CACHE_DIR" install -y --no-install-recommends "${deps[@]}" >/dev/null
 apt list --installed

@@ -49,3 +49,6 @@ jobs:
     with:
       image: ${{ matrix.args.image }}
       build-type: Release
+      release: true
+      release-tag: Fetcher-Simulator-macOS
+      release-name: Fetcher Simulator macOS

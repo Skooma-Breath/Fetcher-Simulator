@@ -34,11 +34,6 @@ $assetPaths = @($Assets | ForEach-Object {
     $resolved.Path
 })
 
-$publicHeaders = @{
-    Accept = "application/vnd.github+json"
-    "User-Agent" = "Fetcher-Simulator-Actions"
-    "X-GitHub-Api-Version" = "2022-11-28"
-}
 $writeHeaders = @{
     Accept = "application/vnd.github+json"
     Authorization = "Bearer $env:GH_TOKEN"
@@ -51,9 +46,9 @@ $releaseUri = "https://api.github.com/repos/$Repository/releases/tags/$escapedTa
 $release = $null
 
 try {
-    # This repository is public, so discovery does not depend on workflow-token
-    # permissions or gh CLI release/tag resolution.
-    $release = Invoke-RestMethod -Method Get -Uri $releaseUri -Headers $publicHeaders
+    # Authenticate discovery as well as writes so shared runner IP rate limits
+    # cannot prevent an otherwise authorized release update.
+    $release = Invoke-RestMethod -Method Get -Uri $releaseUri -Headers $writeHeaders
 }
 catch {
     $statusCode = if ($null -ne $_.Exception.Response) {
@@ -83,6 +78,22 @@ if ($null -eq $release) {
         -Headers $writeHeaders `
         -ContentType "application/json" `
         -Body $createBody
+}
+else {
+    $updateBody = @{
+        target_commitish = $TargetCommit
+        name = $Title
+        body = $Notes
+        draft = $false
+        prerelease = $true
+    } | ConvertTo-Json
+
+    $release = Invoke-RestMethod `
+        -Method Patch `
+        -Uri "https://api.github.com/repos/$Repository/releases/$($release.id)" `
+        -Headers $writeHeaders `
+        -ContentType "application/json" `
+        -Body $updateBody
 }
 
 foreach ($assetPath in $assetPaths) {

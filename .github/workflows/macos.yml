@@ -10,6 +10,18 @@ on:
         description: MacOS Runner image
         required: true
         type: string
+      release:
+        required: false
+        default: false
+        type: boolean
+      release-tag:
+        required: false
+        default: Fetcher-Simulator-macOS
+        type: string
+      release-name:
+        required: false
+        default: Fetcher Simulator macOS
+        type: string
 
 jobs:
   MacOS:
@@ -50,10 +62,16 @@ jobs:
         path: |
           ${{ github.workspace }}/build/OpenMW-*.dmg
 
-    - name: Create prerelease
-      if: ${{ inputs.build-type == 'Release' }}
-      uses: softprops/action-gh-release@v2
-      with:
-        files: ${{ github.workspace }}/build/OpenMW-*.dmg
-        prerelease: true
-        draft: true
+    - name: Publish stable macOS prerelease
+      if: ${{ inputs.release }}
+      shell: pwsh
+      env:
+        GH_TOKEN: ${{ github.token }}
+      run: |
+        ./CI/Publish-StableGitHubRelease.ps1 `
+          -Repository "${{ github.repository }}" `
+          -Tag "${{ inputs.release-tag }}" `
+          -TargetCommit "${{ github.sha }}" `
+          -Title "${{ inputs.release-name }}" `
+          -Notes "Fetcher Simulator macOS prerelease. Download the arm64 DMG for Apple Silicon or the x86_64 DMG for Intel. Morrowind game data is required and is not included." `
+          -Assets (Get-ChildItem "${{ github.workspace }}/build/OpenMW-*.dmg").FullName

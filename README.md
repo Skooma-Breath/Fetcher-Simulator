@@ -21,6 +21,19 @@ AI-assisted coding tools were used during development of this fork. Meatbags are
 
 You can join the project Discord to follow development or help test the public live test server: https://discord.gg/wXqQeSWRZF
 
+Ubuntu 24.04 Package
+--------------------
+
+The Ubuntu release supports stock Ubuntu 24.04 on amd64 and includes the `openmw` client, `openmw-launcher`, and `openmw-server` dedicated server. Morrowind game data is required and is not included.
+
+Download `fetcher-simulator-ubuntu-24.04-amd64.deb` from the `Fetcher-Simulator-Ubuntu` release and install it with:
+
+```sh
+sudo apt install ./fetcher-simulator-ubuntu-24.04-amd64.deb
+```
+
+Uninstall it with `sudo apt remove fetcher-simulator`. GitHub's automatically generated Source code ZIP and TAR.GZ files are developer source archives, not Ubuntu installers.
+
 Project Status
 --------------
 
