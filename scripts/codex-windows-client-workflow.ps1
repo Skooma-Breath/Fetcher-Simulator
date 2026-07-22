@@ -1,5 +1,5 @@
 param(
-    [string]$Repo = "Skooma-Breath/Fetcher-Simulator",
+    [string]$Repo = "Fetcher-Simulator/Fetcher-Simulator",
     [string]$Workflow = "codex-windows-client.yml",
     [string]$Ref = "main",
     [ValidateSet("2022")]

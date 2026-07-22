@@ -169,7 +169,7 @@ Architecture: amd64
 Maintainer: Skooma Breath
 Depends: $dependencies
 Installed-Size: $installed_size
-Homepage: https://github.com/Skooma-Breath/Fetcher-Simulator
+Homepage: https://github.com/Fetcher-Simulator/Fetcher-Simulator
 Description: Fetcher Simulator multiplayer OpenMW client and server
  Fetcher's OpenMW fork with multiplayer client support and the dedicated
  openmw-server runtime. Game data and tester mods are not included.
