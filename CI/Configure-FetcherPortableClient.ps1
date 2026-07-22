@@ -1,119 +1,20 @@
 param(
     [Parameter(Mandatory = $true)]
-    [string] $InstallDir,
-    [string] $ModBundleUrl = "",
-    [string] $ModBundleReleaseTag = "",
-    [string] $ModBundleAsset = "openmw-client-mods.zip",
-    [string] $Repository = $env:GITHUB_REPOSITORY
+    [string] $InstallDir
 )
 
 $ErrorActionPreference = "Stop"
 
-function Invoke-Checked {
-    param(
-        [Parameter(Mandatory = $true)]
-        [scriptblock] $Command,
-        [Parameter(Mandatory = $true)]
-        [string] $Description
-    )
-
-    & $Command
-    if ($LASTEXITCODE -ne 0) {
-        throw "$Description failed with exit code $LASTEXITCODE."
-    }
-}
-
-function Copy-DirectoryContents {
-    param(
-        [Parameter(Mandatory = $true)]
-        [string] $Source,
-        [Parameter(Mandatory = $true)]
-        [string] $Destination
-    )
-
-    if (-not (Test-Path -LiteralPath $Source)) {
-        return
-    }
-
-    New-Item -ItemType Directory -Force $Destination | Out-Null
-    Get-ChildItem -LiteralPath $Source -Force | ForEach-Object {
-        Copy-Item -LiteralPath $_.FullName -Destination $Destination -Recurse -Force
-    }
-}
-
 $installPath = (Resolve-Path -LiteralPath $InstallDir).Path
 $repoRoot = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot "..")).Path
-$workDir = Join-Path $installPath "_client_mod_package"
-$extractDir = Join-Path $workDir "extract"
-$bundlePath = Join-Path $workDir $ModBundleAsset
-New-Item -ItemType Directory -Force $workDir | Out-Null
 New-Item -ItemType Directory -Force (Join-Path $installPath "Data Files") | Out-Null
 New-Item -ItemType Directory -Force (Join-Path $installPath "userdata") | Out-Null
-
-if ($ModBundleUrl) {
-    Write-Output "Downloading mod bundle from $ModBundleUrl..."
-    Invoke-WebRequest -Uri $ModBundleUrl -OutFile $bundlePath
-}
-elseif ($ModBundleReleaseTag) {
-    if (-not $Repository) {
-        throw "Repository is required when ModBundleReleaseTag is set."
-    }
-    $directUrl = "https://github.com/$Repository/releases/download/$ModBundleReleaseTag/$ModBundleAsset"
-    Write-Output "Downloading mod bundle $ModBundleAsset from release $ModBundleReleaseTag..."
-    try {
-        Invoke-WebRequest -Uri $directUrl -OutFile $bundlePath
-    }
-    catch {
-        Write-Warning "Direct release asset download failed: $($_.Exception.Message)"
-        if (-not (Get-Command gh -ErrorAction SilentlyContinue)) {
-            throw "GitHub CLI 'gh' is required to download mod bundle release assets when direct download fails."
-        }
-        Invoke-Checked -Description "gh release download" -Command {
-            gh release download $ModBundleReleaseTag --repo $Repository --pattern $ModBundleAsset --dir $workDir --clobber
-        }
-    }
-}
 
 $manifest = [ordered]@{
     fallbackArchives = @("Morrowind.bsa", "Tribunal.bsa", "Bloodmoon.bsa")
     dataDirs = @("./Data Files")
     content = @("Morrowind.esm", "Tribunal.esm", "Bloodmoon.esm")
     userData = "./userdata"
-}
-
-if (Test-Path -LiteralPath $bundlePath) {
-    if (Test-Path -LiteralPath $extractDir) {
-        Remove-Item -LiteralPath $extractDir -Recurse -Force
-    }
-    New-Item -ItemType Directory -Force $extractDir | Out-Null
-    Expand-Archive -LiteralPath $bundlePath -DestinationPath $extractDir -Force
-
-    $manifestCandidates = @(
-        (Join-Path $extractDir "openmw-client-package.json"),
-        (Join-Path $extractDir "openmw-package.json")
-    )
-    $manifestPath = $manifestCandidates | Where-Object { Test-Path -LiteralPath $_ } | Select-Object -First 1
-    if ($manifestPath) {
-        $manifestJson = Get-Content -Raw -LiteralPath $manifestPath | ConvertFrom-Json
-        foreach ($property in @("fallbackArchives", "dataDirs", "content", "userData")) {
-            if ($manifestJson.PSObject.Properties.Name -contains $property) {
-                $manifest[$property] = $manifestJson.$property
-            }
-        }
-    }
-
-    if (Test-Path -LiteralPath (Join-Path $extractDir "Data Files")) {
-        Copy-DirectoryContents -Source (Join-Path $extractDir "Data Files") -Destination (Join-Path $installPath "Data Files")
-    }
-    else {
-        Copy-DirectoryContents -Source $extractDir -Destination (Join-Path $installPath "Data Files")
-    }
-    foreach ($candidate in $manifestCandidates) {
-        $copiedManifest = Join-Path $installPath (Split-Path -Leaf $candidate)
-        if (Test-Path -LiteralPath $copiedManifest) {
-            Remove-Item -LiteralPath $copiedManifest -Force
-        }
-    }
 }
 
 $menuTextureSources = @(
@@ -207,13 +108,6 @@ Set-Content -LiteralPath $settingsCfg -Encoding ASCII -Value $settingsLines
 $userSettingsCfg = Join-Path $userConfigPath "settings.cfg"
 Set-Content -LiteralPath $userSettingsCfg -Encoding ASCII -Value $settingsLines
 
-$channelManifest = [ordered]@{
-    schemaVersion = 1
-    channel = "clean"
-}
-$channelManifest | ConvertTo-Json -Depth 3 |
-    Set-Content -LiteralPath (Join-Path $installPath "fetcher-client-channel.json") -Encoding UTF8
-
 $readmePath = Join-Path $installPath "PACKAGE_README.txt"
 Set-Content -LiteralPath $readmePath -Encoding ASCII -Value @(
     "Fetcher Simulator clean base package",
@@ -222,12 +116,9 @@ Set-Content -LiteralPath $readmePath -Encoding ASCII -Value @(
     "Writable config, logs, saves, screenshots, and generated user files are stored under .\userdata.",
     "Load order and content entries are stored directly in .\openmw.cfg so the package works without per-user OpenMW config.",
     "Portable graphics defaults are seeded in settings.cfg and .\userdata\settings.cfg. Launcher changes are saved to .\userdata\settings.cfg.",
-    "This clean package intentionally excludes Fetcher tester tools and gameplay mods. To opt in, download Setup-Fetcher-Updater.bat from https://github.com/Skooma-Breath/Fetcher-Updater/releases/tag/fetcher-tester-tools.",
-    "",
-    "Bundled mod files live under .\Data Files unless the package manifest declares additional data directories."
+    "This clean package intentionally excludes Fetcher updater tools and gameplay mods. To opt in, download Setup-Fetcher-Updater.bat from https://github.com/Skooma-Breath/Fetcher-Updater/releases/tag/fetcher-tester-tools."
 )
 
-Remove-Item -LiteralPath $workDir -Recurse -Force
 Write-Output "Portable OpenMW config written to $openmwCfg."
 Write-Output "Portable OpenMW settings written to $settingsCfg."
 Write-Output "Portable OpenMW writable settings written to $userSettingsCfg."

@@ -32,15 +32,6 @@ on:
       release-include-installer:
         default: true
         type: boolean
-      mod-bundle-url:
-        default: ""
-        type: string
-      mod-bundle-release-tag:
-        default: ""
-        type: string
-      mod-bundle-asset:
-        default: "openmw-client-mods.zip"
-        type: string
 
 jobs:
   Windows:
@@ -299,19 +290,13 @@ jobs:
     - name: Configure portable Fetcher client
       if: ${{ inputs.package }}
       shell: pwsh
-      env:
-        GH_TOKEN: ${{ github.token }}
       run: |
         $clientInstallDir = "${{ github.workspace }}\install"
         if ("${{ inputs.package }}" -eq "true") {
           $clientInstallDir = "${{ github.workspace }}\portable-install"
         }
-        ${{ github.workspace }}\CI\Package-WindowsClientMods.ps1 `
-          -InstallDir $clientInstallDir `
-          -ModBundleUrl "${{ inputs.mod-bundle-url }}" `
-          -ModBundleReleaseTag "${{ inputs.mod-bundle-release-tag }}" `
-          -ModBundleAsset "${{ inputs.mod-bundle-asset }}" `
-          -Repository "${{ github.repository }}"
+        ${{ github.workspace }}\CI\Configure-FetcherPortableClient.ps1 `
+          -InstallDir $clientInstallDir
 
     - name: Generate CI-ID.txt
       shell: bash
@@ -326,11 +311,10 @@ jobs:
 
     - name: Generate Fetcher client update inventory
       if: ${{ inputs.package && inputs.release && inputs.release-tag == 'Fetcher-Simulator' }}
-      shell: pwsh
-      run: |
-        ${{ github.workspace }}\CI\Build-FetcherClientInventory.ps1 `
-          -InstallDir "${{ github.workspace }}\portable-install" `
-          -ClientCommit "${{ github.sha }}"
+      uses: Skooma-Breath/Fetcher-Updater/.github/actions/build-client-inventory@b3cef2e373fd7b1423bbbd04b0e0bc64fa286ca9
+      with:
+        install-dir: ${{ github.workspace }}\portable-install
+        client-commit: ${{ github.sha }}
 
     - name: Store OpenMW archived pdb files
       if: ${{ inputs.package }}

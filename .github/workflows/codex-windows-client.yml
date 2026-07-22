@@ -51,21 +51,6 @@ on:
         required: true
         default: true
         type: boolean
-      mod-bundle-url:
-        description: Optional direct URL to a zip containing Data Files and openmw-client-package.json
-        required: false
-        default: ""
-        type: string
-      mod-bundle-release-tag:
-        description: Optional release tag containing the mod bundle asset
-        required: false
-        default: ""
-        type: string
-      mod-bundle-asset:
-        description: Mod bundle asset name when using mod-bundle-release-tag
-        required: false
-        default: openmw-client-mods.zip
-        type: string
       run-label:
         description: Optional label to make this run easy to find in gh run list
         required: false
@@ -92,7 +77,4 @@ jobs:
       release-name: ${{ inputs.release-name }}
       release-zip-name: ${{ inputs.release-zip-name }}
       release-include-installer: ${{ inputs.release-include-installer }}
-      mod-bundle-url: ${{ inputs.mod-bundle-url }}
-      mod-bundle-release-tag: ${{ inputs.mod-bundle-release-tag }}
-      mod-bundle-asset: ${{ inputs.mod-bundle-asset }}
     secrets: inherit
