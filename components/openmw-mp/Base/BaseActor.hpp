@@ -64,6 +64,7 @@ namespace mwmp
         std::vector<EquipmentItem> equipment;
 
         bool isFollowerCellChange = false;
+        uint32_t migrationGeneration = 0;
     };
 
     // A batch of actors belonging to a single cell

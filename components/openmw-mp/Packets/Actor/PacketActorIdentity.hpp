@@ -41,6 +41,7 @@ namespace mwmp
                 ws.write(record.removed);
                 ws.write(record.baselineReset);
                 ws.write(record.teleport);
+                ws.write(record.migrationGeneration);
 
                 const BaseActor& actor = record.actor;
                 packActorIdentity(ws, actor);
@@ -83,6 +84,7 @@ namespace mwmp
                 rs.read(record.removed);
                 rs.read(record.baselineReset);
                 rs.read(record.teleport);
+                rs.read(record.migrationGeneration);
 
                 BaseActor& actor = record.actor;
                 unpackActorIdentity(rs, actor);

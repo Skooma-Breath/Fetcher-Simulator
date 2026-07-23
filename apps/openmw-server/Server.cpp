@@ -22,6 +22,7 @@
 #include <fstream>
 #include <iostream>
 #include <limits>
+#include <optional>
 #include <sstream>
 #include <stdexcept>
 #include <string_view>
@@ -2387,6 +2388,7 @@ void MPServer::broadcastActorIdentityRemovalForCell(
         identity.persistent = record.persistent;
         identity.serverSpawned = record.actor.mpNum != 0;
         identity.removed = true;
+        identity.migrationGeneration = record.migrationGeneration;
         identity.actor = record.actor;
         identity.actor.cellId = cellId;
         identityList.actors.push_back(std::move(identity));
@@ -2502,7 +2504,9 @@ void MPServer::sendActorStateToInterestedClients(const std::string& cellId)
             continue;
 
         sendActorAuthorityToClient(conn, cellId);
-        sendActorStateToClient(conn, cellId);
+        // Full actor baselines are sent during initial cell bootstrap via
+        // sendCellStateToClient. Routine authority refreshes must not trigger
+        // redundant complete actor-list reconstruction for all observers.
     }
 }
 
@@ -3249,6 +3253,7 @@ ActorIdentityList MPServer::buildActorIdentityList(
         identity.actorNetId = actorNetId;
         identity.persistent = record.persistent;
         identity.serverSpawned = record.actor.mpNum != 0;
+        identity.migrationGeneration = record.migrationGeneration;
         identity.actor = record.actor;
         identity.actor.cellId = cellId;
         identityList.actors.push_back(std::move(identity));
@@ -3456,6 +3461,7 @@ void MPServer::broadcastActorPositionV2ToCell(
             }
 
             positionList.snapshots.push_back(makeCompactActorSnapshot(actor, actorNetId));
+            positionList.snapshots.back().migrationGeneration = record.migrationGeneration;
             client.actorV2LastSentMs[actorNetId] = now;
             budgetUsed += kSnapshotCostBytes;
         }
@@ -6335,12 +6341,17 @@ void MPServer::handleActorList(ConnectedClient& c, const uint8_t* data, size_t s
             it->second.previousCellId = previousRecord->previousCellId;
             it->second.previousCellAuthorityGuid = previousRecord->previousCellAuthorityGuid;
             it->second.lastCellChangeTime = previousRecord->lastCellChangeTime;
+            it->second.migrationGeneration = previousRecord->migrationGeneration;
             it->second.actorAuthorityGuid = previousRecord->actorAuthorityGuid;
             it->second.actorAuthorityGeneration = previousRecord->actorAuthorityGeneration;
             it->second.actorAuthorityReason = previousRecord->actorAuthorityReason;
             it->second.actorAuthorityTargetGuid = previousRecord->actorAuthorityTargetGuid;
             it->second.actorAuthorityLeaseUntilMs = previousRecord->actorAuthorityLeaseUntilMs;
         }
+        // ActorList is a state refresh, not a migration transaction. Preserve the
+        // server-owned migration timeline instead of allowing aggregate record
+        // reconstruction to reset it to zero or accept a client-claimed value.
+        it->second.actor.migrationGeneration = it->second.migrationGeneration;
         ensureActorNetId(it->second, incoming.cellId);
         // Preserve the original serverSpawnTime so the grace-period logic
         // remains accurate even after later client updates.
@@ -6969,6 +6980,8 @@ void MPServer::handleActorPositionV2(ConnectedClient& c, const uint8_t* data, si
     std::size_t migratedByPositionCell = 0;
     std::size_t positionCellMismatchIgnored = 0;
     std::size_t staleReverseHandoffSuppressed = 0;
+    std::size_t staleGenerationSuppressed = 0;
+    std::size_t futureGenerationSuppressed = 0;
     ActorInstanceId firstInvalidActorNetId = 0;
     ActorInstanceId firstMissingActorNetId = 0;
     ActorInstanceId firstDeadVanillaActorNetId = 0;
@@ -7044,6 +7057,20 @@ void MPServer::handleActorPositionV2(ConnectedClient& c, const uint8_t* data, si
             ++missingIdentity;
             if (firstMissingActorNetId == 0)
                 firstMissingActorNetId = snapshot.actorNetId;
+            continue;
+        }
+
+        // Reject snapshots whose migration generation does not match the
+        // authoritative record. A stale source-generation snapshot must not
+        // be accepted and relabeled with the current generation.
+        if (generationIsNewer(record->migrationGeneration, snapshot.migrationGeneration))
+        {
+            ++staleGenerationSuppressed;
+            continue;
+        }
+        if (generationIsNewer(snapshot.migrationGeneration, record->migrationGeneration))
+        {
+            ++futureGenerationSuppressed;
             continue;
         }
 
@@ -7279,11 +7306,13 @@ void MPServer::handleActorPositionV2(ConnectedClient& c, const uint8_t* data, si
         }
     }
 
-    if (migratedByPositionCell != 0)
+    if (migratedByPositionCell != 0 || staleGenerationSuppressed != 0 || futureGenerationSuppressed != 0)
     {
-        Log(Debug::Info) << "[Server] ActorPositionV2 coordinate migration summary"
+        Log(Debug::Info) << "[Server] ActorPositionV2 summary"
                          << " from=" << c.name
                          << " migrated=" << migratedByPositionCell
+                         << " staleGenerationSuppressed=" << staleGenerationSuppressed
+                         << " futureGenerationSuppressed=" << futureGenerationSuppressed
                          << " snapshots=" << incoming.snapshots.size();
     }
 }
@@ -8046,6 +8075,7 @@ void MPServer::handleActorCellChange(ConnectedClient& c, const uint8_t* data, si
     accepted.actors.reserve(incoming.actors.size());
     std::unordered_set<std::string> destinationCellIds;
     std::unordered_set<std::string> changedCellIds;
+    std::vector<ActorRegistryRecord> storedAcceptedRecords;
 
     for (auto& actor : incoming.actors)
     {
@@ -8109,6 +8139,9 @@ void MPServer::handleActorCellChange(ConnectedClient& c, const uint8_t* data, si
 
         ActorRegistryRecord movedRecord = sourceActorIt->second;
         const bool wasDead = movedRecord.actor.isDead;
+        ++movedRecord.migrationGeneration;
+        if (movedRecord.migrationGeneration == 0)
+            ++movedRecord.migrationGeneration; // Skip zero after overflow
         sourceCellState.actors.erase(sourceActorIt);
         forgetActorLocation(movedRecord.actor, incoming.cellId);
         if (mPlayerDb && movedRecord.actor.mpNum != 0)
@@ -8118,6 +8151,7 @@ void MPServer::handleActorCellChange(ConnectedClient& c, const uint8_t* data, si
 
         movedRecord.actor = actor;
         movedRecord.actor.cellId = destinationCellId;
+        movedRecord.actor.migrationGeneration = movedRecord.migrationGeneration;
         movedRecord.lastSnapshotTime = incoming.serverTimestamp;
         movedRecord.previousCellId = incoming.cellId;
         movedRecord.previousCellAuthorityGuid = sourceCellState.authorityGuid;
@@ -8173,6 +8207,7 @@ void MPServer::handleActorCellChange(ConnectedClient& c, const uint8_t* data, si
 
         accepted.actors.push_back(storedMovedRecord.actor);
         destinationCellIds.insert(destinationCellId);
+        storedAcceptedRecords.push_back(storedMovedRecord);
 
         Log(Debug::Info) << "[Server] ActorCellChange migrated actor"
                          << " refId=" << storedMovedRecord.actor.refId
@@ -8187,6 +8222,57 @@ void MPServer::handleActorCellChange(ConnectedClient& c, const uint8_t* data, si
     PacketActorCellChange out;
     out.setActorList(&accepted);
     const std::vector<uint8_t> encoded = out.encode();
+
+    // For each interested client that has not yet received this actor's
+    // identity, send a targeted one-actor PacketActorIdentity before the
+    // ActorCellChange. Without this, the client constructs a provisional
+    // runtime but never receives position updates because broadcastActor-
+    // PositionV2ToCell suppresses snapshots until identity is acknowledged.
+    auto sendTargetedIdentityIfNeeded = [&](HSteamNetConnection conn, ConnectedClient& client,
+        const ActorRegistryRecord& storedRecord)
+    {
+        const ActorInstanceId actorNetId = storedRecord.actorNetId;
+        if (actorNetId == 0)
+            return;
+        if (client.actorV2IdentitySent.count(actorNetId) != 0
+            || client.actorV2IdentityAcked.count(actorNetId) != 0)
+            return;
+
+        const std::string& actorCellId = storedRecord.actor.cellId;
+        auto destCellIt = mWorld.actorCells.find(actorCellId);
+
+        ActorIdentityList identityList;
+        identityList.protocolVersion = ActorSyncProtocolVersionV2;
+        identityList.cellId = actorCellId;
+        identityList.authorityGuid = destCellIt != mWorld.actorCells.end()
+            ? destCellIt->second.authorityGuid : 0;
+        identityList.authorityGeneration = destCellIt != mWorld.actorCells.end()
+            ? destCellIt->second.authorityGeneration : 0;
+        identityList.sequence = destCellIt != mWorld.actorCells.end()
+            ? destCellIt->second.nextSnapshotSequence++ : 1;
+        identityList.serverTimestamp = currentServerTimeMs();
+        identityList.completeCellSnapshot = false;
+
+        ActorIdentityRecord identity;
+        identity.actorNetId = actorNetId;
+        identity.persistent = storedRecord.persistent;
+        identity.serverSpawned = storedRecord.actor.mpNum != 0;
+        identity.migrationGeneration = storedRecord.migrationGeneration;
+        identity.actor = storedRecord.actor;
+        identityList.actors.push_back(std::move(identity));
+
+        PacketActorIdentity identityPkt;
+        identityPkt.setIdentityList(&identityList);
+        sendTo(conn, identityPkt.encode());
+        client.actorV2IdentitySent.insert(actorNetId);
+        ++client.actorV2IdentitySentWindow;
+
+        Log(Debug::Verbose) << "[Server] Sent targeted identity before ActorCellChange"
+                            << " actorNetId=" << actorNetId
+                            << " cell=" << actorCellId
+                            << " to=" << client.name;
+    };
+
     for (auto& [conn, client] : mClients)
     {
         // Include the sender. The authoritative echo acknowledges that the
@@ -8205,8 +8291,15 @@ void MPServer::handleActorCellChange(ConnectedClient& c, const uint8_t* data, si
             }
         }
 
-        if (interested)
-            sendTo(conn, encoded);
+        if (!interested)
+            continue;
+
+        // Send targeted identity for each accepted actor that this client
+        // has not yet acknowledged.
+        for (const ActorRegistryRecord& storedRecord : storedAcceptedRecords)
+            sendTargetedIdentityIfNeeded(conn, client, storedRecord);
+
+        sendTo(conn, encoded);
     }
 
     for (const std::string& destinationCellId : destinationCellIds)
@@ -8216,12 +8309,11 @@ void MPServer::handleActorCellChange(ConnectedClient& c, const uint8_t* data, si
             refreshActorAuthorityForCell(destinationCellId, c.guid);
     }
 
-    for (const std::string& changedCellId : changedCellIds)
-    {
-        auto changedCellIt = mWorld.actorCells.find(changedCellId);
-        if (changedCellIt != mWorld.actorCells.end())
-            broadcastActorListForCell(changedCellId, changedCellIt->second);
-    }
+    // Do NOT broadcast full ActorList for changed cells after a routine
+    // migration. The reliable ActorCellChange commit, targetted identity
+    // sends, and compact position snapshots are sufficient for protocol-v8
+    // clients. Full baselines are reserved for initial bootstrap, identity
+    // sync, recovery, and explicit cell reset.
 }
 
 // ---------------------------------------------------------------------------

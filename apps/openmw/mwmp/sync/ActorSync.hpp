@@ -74,6 +74,7 @@ namespace mwmp
         void sendNpcPlayerDamage(uint32_t victimGuid, float damage, bool healthDamage, bool isDead, int attackType,
             const MWWorld::Ptr& npcAttacker);
         void notifyNpcCast(const MWWorld::Ptr& npc, const std::string& spellId, const std::string& castAnim, const MWWorld::Ptr& target, bool release);
+        ActorInstanceId actorNetIdForPtr(const std::string& cellId, const MWWorld::Ptr& ptr) const;
 
     private:
         struct BufferedSnapshot
@@ -82,6 +83,7 @@ namespace mwmp
             Velocity velocity;
             uint32_t sequence = 0;
             uint64_t serverTimestamp = 0;
+            uint32_t migrationGeneration = 0;
             bool isMoving = false;
             bool isAttackingOrCasting = false;
             bool hasWeaponDrawn = false;
@@ -240,6 +242,11 @@ namespace mwmp
             uint32_t bindingFailureCount = 0;
             uint32_t suppressedBindingFailureLogs = 0;
             ActorInstanceId actorNetId = 0;
+            uint32_t migrationGeneration = 0;
+            // Buffered position snapshots for future migration generations that
+            // arrived before their corresponding reliable cell-change commit.
+            // Keyed by migrationGeneration; bounded to at most 2 entries per actor.
+            std::unordered_map<uint32_t, std::deque<BufferedSnapshot>> pendingSnapshotsByMigrationGeneration;
             bool hasAuthoritativeTransform = false;
             bool hasAuthoritativeEquipment = false;
             bool waitingForFreshCellBootstrap = false;
@@ -283,7 +290,6 @@ namespace mwmp
         bool shouldReplayDeadBaselineAsRealtime(const ActorRuntime& actor, const BaseActor& state) const;
         void markDeadBaselineState(ActorRuntime& actor, const BaseActor& state, bool replayRealtime);
         ActorInstanceId actorNetIdForActorState(const BaseActor& actor) const;
-        ActorInstanceId actorNetIdForPtr(const std::string& cellId, const MWWorld::Ptr& ptr) const;
         void rememberActorNetId(ActorInstanceId actorNetId, const BaseActor& actor);
         void indexActorNetId(ActorInstanceId actorNetId, const std::string& oldCellId, const std::string& newCellId);
         ActorRuntime* findPrimaryActorRuntime(const BaseActor& actor);
