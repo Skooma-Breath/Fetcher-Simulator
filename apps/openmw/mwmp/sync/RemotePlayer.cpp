@@ -1799,9 +1799,40 @@ namespace mwmp
         const bool gridChanged = (oldCellState.gridX != state.cell.gridX || oldCellState.gridY != state.cell.gridY);
 
         const bool actuallyChanged = cellNameChanged || exteriorChanged || gridChanged;
+        const int exteriorDx = oldCellState.isExterior && state.cell.isExterior
+            ? std::abs(state.cell.gridX - oldCellState.gridX)
+            : 0;
+        const int exteriorDy = oldCellState.isExterior && state.cell.isExterior
+            ? std::abs(state.cell.gridY - oldCellState.gridY)
+            : 0;
+        const bool seamlessExteriorTransition = actuallyChanged && !state.position.isTeleporting
+            && !exteriorChanged && oldCellState.isExterior && state.cell.isExterior
+            && exteriorDx <= Constants::CellGridRadius && exteriorDy <= Constants::CellGridRadius;
+        const bool preserveLocomotion = seamlessExteriorTransition
+            || (!actuallyChanged && !state.position.isTeleporting);
 
         const std::string oldCell = mState.cell.cellName;
         mState.cell = state.cell;
+        if (actuallyChanged)
+            Log(Debug::Info) << "[MP] RemotePlayer " << mName << " cell: " << oldCell << " -> "
+                             << state.cell.cellName;
+
+        if (preserveLocomotion)
+        {
+            Log(Debug::Info) << "[MPDIAG] RemotePlayer cell continuity"
+                             << " name=" << mName
+                             << " oldGrid=" << oldCellState.gridX << "," << oldCellState.gridY
+                             << " newGrid=" << state.cell.gridX << "," << state.cell.gridY
+                             << " velocity=" << mState.velocity.linear[0] << ","
+                             << mState.velocity.linear[1] << "," << mState.velocity.linear[2]
+                             << " movementFlags=" << mState.animFlags.movementFlags
+                             << " bufferedSpeed=" << mBufferedLocomotionSpeed
+                             << " snapshots=" << mPositionSnapshots.size()
+                             << " exteriorCrossing=" << seamlessExteriorTransition
+                             << " sequence=" << sequence;
+            return;
+        }
+
         mState.position = state.position;
         mState.velocity = {};
         clearTransientLocomotion(mState.animFlags);
@@ -1835,24 +1866,7 @@ namespace mwmp
 
         if (actuallyChanged)
         {
-            Log(Debug::Info) << "[MP] RemotePlayer " << mName << " cell: " << oldCell << " -> " << state.cell.cellName;
-
-            // For adjacent exterior grid crossings, skip the despawn/respawn cycle.
-            // Both cells are already loaded by OpenMW, so we can just leave the NPC
-            // in the world and let the interpolator walk it across the border naturally.
-            // Only despawn for: interior<->exterior transitions, or grid jumps > 1
-            // (which indicate a teleport rather than a normal border crossing).
-            bool skipDespawn = false;
-            if (!exteriorChanged && oldCellState.isExterior && state.cell.isExterior)
-            {
-                const int dx = std::abs(state.cell.gridX - oldCellState.gridX);
-                const int dy = std::abs(state.cell.gridY - oldCellState.gridY);
-                if (dx <= Constants::CellGridRadius && dy <= Constants::CellGridRadius)
-                    skipDespawn = true;
-            }
-
-            if (!skipDespawn)
-                despawnFromWorld(); // will respawn in new cell via trySpawn()
+            despawnFromWorld(); // will respawn in new cell via trySpawn()
         }
     }
 

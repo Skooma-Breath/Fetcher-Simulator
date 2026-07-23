@@ -1,6 +1,7 @@
 #include "ObjectSync.hpp"
 
 #include <algorithm>
+#include <cmath>
 #include <utility>
 
 #include <components/debug/debuglog.hpp>
@@ -12,6 +13,7 @@
 #include "../../mwbase/world.hpp"
 #include "../../mwworld/cellreflist.hpp"
 #include "../../mwworld/cellstore.hpp"
+#include "../../mwworld/class.hpp"
 #include "../../mwworld/doorstate.hpp"
 #include "../../mwworld/livecellref.hpp"
 #include "../../mwworld/ptr.hpp"
@@ -93,6 +95,24 @@ bool ObjectSync::tryApplyDoorState(const std::string& refId,
                 const_cast<MWWorld::LiveCellRefBase*>(
                     static_cast<const MWWorld::LiveCellRefBase*>(&liveRef)),
                 store);
+
+            const MWWorld::DoorState currentState = doorPtr.getClass().getDoorState(doorPtr);
+            const float currentRotation = doorPtr.getRefData().getPosition().rot[2];
+            const float closedRotation = doorPtr.getCellRef().getPosition().rot[2];
+            const bool visuallyOpen = std::abs(currentRotation - closedRotation) > 0.0001f;
+            const bool alreadyAtTarget = isOpen
+                ? currentState == MWWorld::DoorState::Opening
+                    || (currentState == MWWorld::DoorState::Idle && visuallyOpen)
+                : currentState == MWWorld::DoorState::Closing
+                    || (currentState == MWWorld::DoorState::Idle && !visuallyOpen);
+            if (alreadyAtTarget)
+            {
+                Log(Debug::Verbose) << "[MPDIAG] ObjectSync door state already applied"
+                                    << " refId=" << refId
+                                    << " refNum=" << refNum
+                                    << " isOpen=" << isOpen;
+                return true;
+            }
 
             if (MWBase::SoundManager* sound = MWBase::Environment::get().getSoundManager())
             {

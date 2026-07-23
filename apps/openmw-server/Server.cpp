@@ -5292,16 +5292,43 @@ void MPServer::handlePlayerPosition(ConnectedClient& c, const uint8_t* data, siz
 // ---------------------------------------------------------------------------
 void MPServer::handlePlayerCellChange(ConnectedClient& c, const uint8_t* data, size_t size)
 {
+    const CellId oldCellState = c.player.cell;
     std::string oldCell = makeCellKey(c.player.cell);
     PacketPlayerCellChange pkt;
     pkt.setPlayer(&c.player);
     if (!pkt.decode(data, size)) return;
     const uint32_t cellChangeSequence = pkt.getSequence();
-    c.player.velocity = {};
-    c.player.position.isTeleporting = true;
 
     const std::string newCell = makeCellKey(c.player.cell);
+    const int exteriorDx = oldCellState.isExterior && c.player.cell.isExterior
+        ? std::abs(c.player.cell.gridX - oldCellState.gridX)
+        : 0;
+    const int exteriorDy = oldCellState.isExterior && c.player.cell.isExterior
+        ? std::abs(c.player.cell.gridY - oldCellState.gridY)
+        : 0;
+    const bool senderMarkedTeleport = c.player.position.isTeleporting;
+    const bool continuousExteriorCrossing = !senderMarkedTeleport
+        && oldCellState.isExterior && c.player.cell.isExterior
+        && exteriorDx <= 1 && exteriorDy <= 1;
+    const bool preserveLocomotion = continuousExteriorCrossing || (!senderMarkedTeleport && oldCell == newCell);
+    if (!preserveLocomotion)
+    {
+        c.player.velocity = {};
+        c.player.position.isTeleporting = true;
+    }
+
     Log(Debug::Info) << "[Server] " << c.name << " â†’ cell: " << newCell;
+    Log(Debug::Info) << "[MPDIAG] PlayerCellChange continuity"
+                     << " player=" << c.slotName
+                     << " oldCell=" << oldCell
+                     << " newCell=" << newCell
+                     << " exteriorDx=" << exteriorDx
+                     << " exteriorDy=" << exteriorDy
+                     << " senderTeleport=" << senderMarkedTeleport
+                     << " preserveLocomotion=" << preserveLocomotion
+                     << " velocity=" << c.player.velocity.linear[0] << ","
+                     << c.player.velocity.linear[1] << "," << c.player.velocity.linear[2]
+                     << " sequence=" << cellChangeSequence;
 
     if (oldCell == newCell)
     {
@@ -5331,7 +5358,7 @@ void MPServer::handlePlayerCellChange(ConnectedClient& c, const uint8_t* data, s
         broadcastToAll(positionPacket.encode(cellChangeSequence), c.conn);
     }
     const std::string cellKey = makeCellKey(c.player.cell);
-    if (!cellKey.empty())
+    if (!cellKey.empty() && c.loadedActorCells.find(cellKey) == c.loadedActorCells.end())
         sendCellStateToClient(c.conn, cellKey);
     sendPlayerStateBootstrapToClient(c);
 }
@@ -5425,7 +5452,10 @@ void MPServer::handlePlayerLoadedCells(ConnectedClient& c, const uint8_t* data, 
     c.loadedActorCellsSequence = pkt.sequence;
 
     for (const std::string& cellId : addedCells)
+    {
         refreshActorAuthorityForCell(cellId, c.guid);
+        sendCellStateToClient(c.conn, cellId);
+    }
     for (const std::string& cellId : removedCells)
         refreshActorAuthorityForCell(cellId);
 
@@ -10640,7 +10670,7 @@ void MPServer::broadcastToCell(const std::string& cellId,
     for (auto& [conn, client] : mClients)
     {
         if (conn == except || !client.charSelectComplete) continue;
-        if (!cellMatches(client.player.cell, cellId)) continue;
+        if (!clientHasActorCellLoaded(client, cellId)) continue;
         sendPacketOnConfiguredLane(conn, data, flags);
     }
 }
