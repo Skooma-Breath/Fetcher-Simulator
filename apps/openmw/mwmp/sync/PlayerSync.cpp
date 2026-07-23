@@ -4,6 +4,7 @@
 #include <chrono>
 #include <cmath>
 #include <cstring>
+#include <optional>
 
 #include <components/debug/debuglog.hpp>
 #include <components/esm/refid.hpp>
@@ -98,6 +99,13 @@ namespace
     bool sameItem(const Item& left, const Item& right)
     {
         return left.count == right.count && sameItemIdentity(left, right);
+    }
+
+    bool sameStableItemIdentity(const Item& left, const Item& right)
+    {
+        if (left.instanceId != 0 && right.instanceId != 0)
+            return left.instanceId == right.instanceId && left.refId == right.refId;
+        return sameItemIdentity(left, right);
     }
 
     bool sameEquipment(const EquipmentItem& left, const EquipmentItem& right)
@@ -1127,6 +1135,32 @@ void PlayerSync::sendEquipment()
 void PlayerSync::sendInventory()
 {
     mLocal.inventoryChanges.action = BasePlayer::InventoryChanges::Action::Set;
+    std::size_t missingInstanceIds = 0;
+    const Item* firstMissingInstance = nullptr;
+    for (const Item& item : mLocal.inventoryChanges.items)
+    {
+        if (item.refId.empty() || item.count <= 0 || item.instanceId != 0)
+            continue;
+        ++missingInstanceIds;
+        if (firstMissingInstance == nullptr)
+            firstMissingInstance = &item;
+    }
+    if (firstMissingInstance != nullptr)
+    {
+        static uint64_t sLastMissingIdentityLogUs = 0;
+        const uint64_t nowUs = steadyTimeUs();
+        if (nowUs - sLastMissingIdentityLogUs >= 1000000)
+        {
+            sLastMissingIdentityLogUs = nowUs;
+            Log(Debug::Warning) << "[MPDIAG] PlayerInventory outgoing identity gap"
+                                << " stacks=" << inventoryStackCount(mLocal.inventoryChanges.items)
+                                << " missingInstanceIds=" << missingInstanceIds
+                                << " firstRef=" << firstMissingInstance->refId
+                                << " firstCount=" << firstMissingInstance->count
+                                << " firstCharge=" << firstMissingInstance->charge
+                                << " firstEnchant=" << firstMissingInstance->enchantmentCharge;
+        }
+    }
 
     PacketPlayerInventory pkt;
     pkt.setPlayer(&mLocal);
@@ -2375,6 +2409,27 @@ void PlayerSync::applyPendingAuthoritativeState(const MWWorld::Ptr& player)
     {
         std::size_t skippedMissingInventory = 0;
         std::string firstMissingInventoryRefId;
+        std::optional<Item> selectedEnchantItemBeforeRestore;
+        MWWorld::ContainerStoreIterator selectedEnchantIt = containerStore.getSelectedEnchantItem();
+        if (selectedEnchantIt != containerStore.end() && selectedEnchantIt->getCellRef().getCount() > 0)
+        {
+            const MWWorld::CellRef& selectedRef = selectedEnchantIt->getCellRef();
+            Item selected;
+            selected.refId = selectedRef.getRefId().serializeText();
+            selected.instanceId = inventoryInstanceId(selectedRef.getRefNum());
+            selected.count = selectedRef.getCount();
+            selected.charge = selectedRef.getCharge();
+            selected.enchantmentCharge = selectedRef.getEnchantmentCharge();
+            selected.soul = selectedRef.getSoul().serializeText();
+            selectedEnchantItemBeforeRestore = std::move(selected);
+        }
+
+        // ContainerStore::clear() only zeroes stack counts. It does not reset
+        // mSelectedEnchantItem, so retaining that iterator across the rebuild
+        // leaves scripts and the UI pointing at an obsolete zero-count stack.
+        // A later selection/equip action can revive it as an untagged duplicate,
+        // feeding another server identity correction and full rebuild.
+        containerStore.setSelectedEnchantItem(containerStore.end());
         mLastPendingInventoryMissingRefId.clear();
         invStore.clear();
         for (const Item& item : mAuthoritativeInventory.items)
@@ -2407,15 +2462,67 @@ void PlayerSync::applyPendingAuthoritativeState(const MWWorld::Ptr& player)
             // so every authoritative stack enters the WorldModel under its
             // stable instance identity and cannot merge with an adjacent row.
         }
+
+        bool restoredSelectedEnchantItem = false;
+        uint32_t restoredSelectedEnchantInstanceId = 0;
+        if (selectedEnchantItemBeforeRestore)
+        {
+            for (auto it = invStore.begin(); it != invStore.end(); ++it)
+            {
+                const MWWorld::CellRef& cellRef = it->getCellRef();
+                if (cellRef.getCount() <= 0)
+                    continue;
+
+                Item candidate;
+                candidate.refId = cellRef.getRefId().serializeText();
+                candidate.instanceId = inventoryInstanceId(cellRef.getRefNum());
+                candidate.count = cellRef.getCount();
+                candidate.charge = cellRef.getCharge();
+                candidate.enchantmentCharge = cellRef.getEnchantmentCharge();
+                candidate.soul = cellRef.getSoul().serializeText();
+                if (!sameStableItemIdentity(candidate, *selectedEnchantItemBeforeRestore))
+                    continue;
+
+                containerStore.setSelectedEnchantItem(it);
+                environment.getWindowManager()->setSelectedEnchantItem(*it);
+                restoredSelectedEnchantItem = true;
+                restoredSelectedEnchantInstanceId = candidate.instanceId;
+                break;
+            }
+
+            if (!restoredSelectedEnchantItem)
+                environment.getWindowManager()->unsetSelectedSpell();
+
+            static uint64_t sLastSelectedRestoreLogUs = 0;
+            const uint64_t nowUs = steadyTimeUs();
+            if (nowUs - sLastSelectedRestoreLogUs >= 1000000)
+            {
+                sLastSelectedRestoreLogUs = nowUs;
+                Log(restoredSelectedEnchantItem ? Debug::Info : Debug::Warning)
+                    << "[MPDIAG] Selected enchanted item across inventory rebuild"
+                    << " ref=" << selectedEnchantItemBeforeRestore->refId
+                    << " beforeInstance=" << selectedEnchantItemBeforeRestore->instanceId
+                    << " restored=" << restoredSelectedEnchantItem
+                    << " restoredInstance=" << restoredSelectedEnchantInstanceId
+                    << " requestedStacks=" << inventoryStackCount(mAuthoritativeInventory.items);
+            }
+        }
+
         mPendingInventoryRestore = false;
         applied = true;
         inventoryRestoreApplied = true;
 
-        Log(skippedMissingInventory == 0 ? Debug::Verbose : Debug::Info)
+        const bool selectedRestoreFailed = selectedEnchantItemBeforeRestore && !restoredSelectedEnchantItem;
+        Log(skippedMissingInventory == 0 && !selectedRestoreFailed ? Debug::Verbose : Debug::Info)
             << "[MP] PlayerSync: applied authoritative inventory"
             << " requestedStacks=" << inventoryStackCount(mAuthoritativeInventory.items)
             << " skippedMissing=" << skippedMissingInventory
-            << " firstMissing=" << firstMissingInventoryRefId;
+            << " firstMissing=" << firstMissingInventoryRefId
+            << " selectedBefore=" << (selectedEnchantItemBeforeRestore
+                    ? selectedEnchantItemBeforeRestore->refId : std::string())
+            << " selectedBeforeInstance=" << (selectedEnchantItemBeforeRestore
+                    ? selectedEnchantItemBeforeRestore->instanceId : 0)
+            << " selectedRestored=" << restoredSelectedEnchantItem;
     }
 
     if (inventoryRestoreApplied
@@ -2452,7 +2559,7 @@ void PlayerSync::applyPendingAuthoritativeState(const MWWorld::Ptr& player)
                 liveItem.enchantmentCharge = cellRef.getEnchantmentCharge();
                 liveItem.soul = cellRef.getSoul().serializeText();
 
-                if (sameItemIdentity(liveItem, target.item))
+                if (sameStableItemIdentity(liveItem, target.item))
                 {
                     found = true;
                     break;
@@ -2522,7 +2629,7 @@ void PlayerSync::applyPendingAuthoritativeState(const MWWorld::Ptr& player)
                 liveItem.enchantmentCharge = cellRef.getEnchantmentCharge();
                 liveItem.soul = cellRef.getSoul().serializeText();
 
-                if (!sameItemIdentity(liveItem, target.item))
+                if (!sameStableItemIdentity(liveItem, target.item))
                     continue;
 
                 invStore.equip(slot, it);
@@ -2547,6 +2654,36 @@ void PlayerSync::applyPendingAuthoritativeState(const MWWorld::Ptr& player)
         captureEquipment(player);
         snapshotInventory();
         snapshotEquipment();
+
+        std::size_t missingInstanceIds = 0;
+        const Item* firstMissingInstance = nullptr;
+        for (const Item& item : mLocal.inventoryChanges.items)
+        {
+            if (item.refId.empty() || item.count <= 0 || item.instanceId != 0)
+                continue;
+            ++missingInstanceIds;
+            if (firstMissingInstance == nullptr)
+                firstMissingInstance = &item;
+        }
+        const std::size_t requestedStacks = inventoryStackCount(mAuthoritativeInventory.items);
+        const std::size_t liveStacks = inventoryStackCount(mLocal.inventoryChanges.items);
+        if (inventoryRestoreApplied && (liveStacks != requestedStacks || missingInstanceIds != 0))
+        {
+            Log(Debug::Warning) << "[MPDIAG] Authoritative inventory rebuild mismatch"
+                                << " requestedStacks=" << requestedStacks
+                                << " liveStacks=" << liveStacks
+                                << " stackDelta=" << static_cast<int64_t>(liveStacks)
+                                    - static_cast<int64_t>(requestedStacks)
+                                << " missingInstanceIds=" << missingInstanceIds
+                                << " firstMissingRef="
+                                << (firstMissingInstance ? firstMissingInstance->refId : std::string())
+                                << " firstMissingCount="
+                                << (firstMissingInstance ? firstMissingInstance->count : 0)
+                                << " firstMissingCharge="
+                                << (firstMissingInstance ? firstMissingInstance->charge : -1)
+                                << " firstMissingEnchant="
+                                << (firstMissingInstance ? firstMissingInstance->enchantmentCharge : -1.f);
+        }
 
         // Echo the applied snapshot as an acknowledgement.  The server keeps all
         // equipment slots authoritative during its startup guard until it sees

@@ -66,6 +66,7 @@ struct ConnectedClient
     uint64_t            playerInventoryRestoreGuardUntilMs = 0;
     uint64_t            playerEquipmentRestoreGuardUntilMs = 0;
     uint64_t            lastPlayerInventoryRestoreCorrectionLogMs = 0;
+    uint64_t            lastPlayerInventoryInstanceCorrectionLogMs = 0;
     uint64_t            lastPlayerEquipmentRestoreCorrectionLogMs = 0;
     uint64_t            lastPlayerEquipmentInstanceCorrectionLogMs = 0;
     struct PendingInventoryTransfer

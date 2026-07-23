@@ -4752,6 +4752,7 @@ void MPServer::handleCharacterSelect(ConnectedClient& c, const uint8_t* data, si
     c.playerInventoryRestoreGuardUntilMs = 0;
     c.playerEquipmentRestoreGuardUntilMs = 0;
     c.lastPlayerInventoryRestoreCorrectionLogMs = 0;
+    c.lastPlayerInventoryInstanceCorrectionLogMs = 0;
     c.lastPlayerEquipmentRestoreCorrectionLogMs = 0;
     c.lastPlayerEquipmentInstanceCorrectionLogMs = 0;
     c.pendingInventoryTransfers.clear();
@@ -5568,12 +5569,21 @@ bool MPServer::reconcileInventoryInstanceIds(ConnectedClient& c, std::vector<Ite
     const std::vector<Item>& previous = c.player.inventoryChanges.items;
     std::unordered_set<uint32_t> used;
     bool changed = false;
+    std::size_t invalidSuppliedIds = 0;
+    std::size_t recoveredPreviousIds = 0;
+    std::size_t recoveredTransferIds = 0;
+    std::size_t allocatedIds = 0;
+    std::string firstCorrectedRefId;
+    uint32_t firstRequestedId = 0;
+    uint32_t firstAssignedId = 0;
 
     for (Item& item : items)
     {
         if (item.refId.empty() || item.count <= 0)
             continue;
 
+        const uint32_t requestedId = item.instanceId;
+        bool itemIdentityChanged = false;
         auto previousById = std::find_if(previous.begin(), previous.end(), [&](const Item& old) {
             return item.instanceId != 0 && old.instanceId == item.instanceId && old.refId == item.refId;
         });
@@ -5588,6 +5598,8 @@ bool MPServer::reconcileInventoryInstanceIds(ConnectedClient& c, std::vector<Ite
         {
             item.instanceId = 0;
             changed = true;
+            itemIdentityChanged = true;
+            ++invalidSuppliedIds;
         }
 
         if (item.instanceId == 0)
@@ -5596,7 +5608,12 @@ bool MPServer::reconcileInventoryInstanceIds(ConnectedClient& c, std::vector<Ite
                 return old.instanceId != 0 && used.count(old.instanceId) == 0 && sameItemIdentity(old, item);
             });
             if (previousMatch != previous.end())
+            {
                 item.instanceId = previousMatch->instanceId;
+                changed = true;
+                itemIdentityChanged = true;
+                ++recoveredPreviousIds;
+            }
         }
 
         if (item.instanceId == 0)
@@ -5610,6 +5627,9 @@ bool MPServer::reconcileInventoryInstanceIds(ConnectedClient& c, std::vector<Ite
             {
                 item.instanceId = transfer->instanceId;
                 transferById = transfer;
+                changed = true;
+                itemIdentityChanged = true;
+                ++recoveredTransferIds;
             }
         }
 
@@ -5623,11 +5643,38 @@ bool MPServer::reconcileInventoryInstanceIds(ConnectedClient& c, std::vector<Ite
             }
             item.instanceId = *allocated;
             changed = true;
+            itemIdentityChanged = true;
+            ++allocatedIds;
+        }
+
+        if (itemIdentityChanged && firstCorrectedRefId.empty())
+        {
+            firstCorrectedRefId = item.refId;
+            firstRequestedId = requestedId;
+            firstAssignedId = item.instanceId;
         }
 
         used.insert(item.instanceId);
         if (transferById != c.pendingInventoryTransfers.end())
             c.pendingInventoryTransfers.erase(transferById);
+    }
+
+    if (changed
+        && (c.lastPlayerInventoryInstanceCorrectionLogMs == 0
+            || nowMs - c.lastPlayerInventoryInstanceCorrectionLogMs >= 1000))
+    {
+        c.lastPlayerInventoryInstanceCorrectionLogMs = nowMs;
+        Log(Debug::Info) << "[MPDIAG] PlayerInventory instance reconciliation"
+                         << " player=" << c.slotName
+                         << " incomingStacks=" << items.size()
+                         << " previousStacks=" << previous.size()
+                         << " invalidSupplied=" << invalidSuppliedIds
+                         << " recoveredPrevious=" << recoveredPreviousIds
+                         << " recoveredTransfer=" << recoveredTransferIds
+                         << " allocated=" << allocatedIds
+                         << " firstRef=" << firstCorrectedRefId
+                         << " firstRequested=" << firstRequestedId
+                         << " firstAssigned=" << firstAssignedId;
     }
 
     return changed;
