@@ -5610,7 +5610,6 @@ bool MPServer::reconcileInventoryInstanceIds(ConnectedClient& c, std::vector<Ite
             if (previousMatch != previous.end())
             {
                 item.instanceId = previousMatch->instanceId;
-                changed = true;
                 itemIdentityChanged = true;
                 ++recoveredPreviousIds;
             }
@@ -5659,7 +5658,9 @@ bool MPServer::reconcileInventoryInstanceIds(ConnectedClient& c, std::vector<Ite
             c.pendingInventoryTransfers.erase(transferById);
     }
 
-    if (changed
+    const bool reconciledAnyIdentity
+        = invalidSuppliedIds != 0 || recoveredPreviousIds != 0 || recoveredTransferIds != 0 || allocatedIds != 0;
+    if (reconciledAnyIdentity
         && (c.lastPlayerInventoryInstanceCorrectionLogMs == 0
             || nowMs - c.lastPlayerInventoryInstanceCorrectionLogMs >= 1000))
     {
@@ -5672,6 +5673,7 @@ bool MPServer::reconcileInventoryInstanceIds(ConnectedClient& c, std::vector<Ite
                          << " recoveredPrevious=" << recoveredPreviousIds
                          << " recoveredTransfer=" << recoveredTransferIds
                          << " allocated=" << allocatedIds
+                         << " echoRequired=" << changed
                          << " firstRef=" << firstCorrectedRefId
                          << " firstRequested=" << firstRequestedId
                          << " firstAssigned=" << firstAssignedId;

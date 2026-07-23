@@ -5,6 +5,7 @@
 #include <cmath>
 #include <cstring>
 #include <optional>
+#include <string_view>
 
 #include <components/debug/debuglog.hpp>
 #include <components/esm/refid.hpp>
@@ -106,6 +107,14 @@ namespace
         if (left.instanceId != 0 && right.instanceId != 0)
             return left.instanceId == right.instanceId && left.refId == right.refId;
         return sameItemIdentity(left, right);
+    }
+
+    bool requiresInventoryInstanceId(const Item& item)
+    {
+        // ContainerStore canonicalizes every gold pile into one gold_001 stack
+        // backed by a fresh ManualRef, so a server-issued RefNum cannot survive
+        // an authoritative inventory rebuild for this intentionally fungible item.
+        return item.refId != "gold_001";
     }
 
     bool sameEquipment(const EquipmentItem& left, const EquipmentItem& right)
@@ -1139,7 +1148,8 @@ void PlayerSync::sendInventory()
     const Item* firstMissingInstance = nullptr;
     for (const Item& item : mLocal.inventoryChanges.items)
     {
-        if (item.refId.empty() || item.count <= 0 || item.instanceId != 0)
+        if (item.refId.empty() || item.count <= 0 || item.instanceId != 0
+            || !requiresInventoryInstanceId(item))
             continue;
         ++missingInstanceIds;
         if (firstMissingInstance == nullptr)
@@ -2106,13 +2116,47 @@ bool PlayerSync::equipmentChanged() const
 
 bool PlayerSync::inventoryChanged() const
 {
+    static uint64_t sLastDiagnosticUs = 0;
+    static std::size_t sChangesSinceDiagnostic = 0;
+    const auto logChange = [&](std::string_view reason, std::size_t index, const Item* live, const Item* previous) {
+        ++sChangesSinceDiagnostic;
+        const uint64_t nowUs = steadyTimeUs();
+        if (nowUs - sLastDiagnosticUs < 1000000)
+            return;
+
+        sLastDiagnosticUs = nowUs;
+        Log(Debug::Info) << "[MPDIAG] PlayerInventory delta"
+                         << " reason=" << reason
+                         << " changesSinceLastLog=" << sChangesSinceDiagnostic
+                         << " liveStacks=" << mLocal.inventoryChanges.items.size()
+                         << " previousStacks=" << mLastInventory.size()
+                         << " index=" << index
+                         << " liveRef=" << (live ? live->refId : std::string())
+                         << " liveInstance=" << (live ? live->instanceId : 0)
+                         << " liveCount=" << (live ? live->count : 0)
+                         << " liveCharge=" << (live ? live->charge : -1)
+                         << " liveEnchant=" << (live ? live->enchantmentCharge : -1.f)
+                         << " previousRef=" << (previous ? previous->refId : std::string())
+                         << " previousInstance=" << (previous ? previous->instanceId : 0)
+                         << " previousCount=" << (previous ? previous->count : 0)
+                         << " previousCharge=" << (previous ? previous->charge : -1)
+                         << " previousEnchant=" << (previous ? previous->enchantmentCharge : -1.f);
+        sChangesSinceDiagnostic = 0;
+    };
+
     if (mLocal.inventoryChanges.items.size() != mLastInventory.size())
+    {
+        logChange("stack-count", 0, nullptr, nullptr);
         return true;
+    }
 
     for (std::size_t i = 0; i < mLocal.inventoryChanges.items.size(); ++i)
     {
         if (!sameItem(mLocal.inventoryChanges.items[i], mLastInventory[i]))
+        {
+            logChange("stack-state", i, &mLocal.inventoryChanges.items[i], &mLastInventory[i]);
             return true;
+        }
     }
     return false;
 }
@@ -2659,7 +2703,8 @@ void PlayerSync::applyPendingAuthoritativeState(const MWWorld::Ptr& player)
         const Item* firstMissingInstance = nullptr;
         for (const Item& item : mLocal.inventoryChanges.items)
         {
-            if (item.refId.empty() || item.count <= 0 || item.instanceId != 0)
+            if (item.refId.empty() || item.count <= 0 || item.instanceId != 0
+                || !requiresInventoryInstanceId(item))
                 continue;
             ++missingInstanceIds;
             if (firstMissingInstance == nullptr)
