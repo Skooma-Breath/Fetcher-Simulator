@@ -315,6 +315,9 @@ void WorldObjectSync::onLocalContainerOpened(const std::string& cellId,
             target = Main::get().getActorSync().getActorByMpNum(mpNum);
     }
 
+    if (target.isEmpty() && refNum != 0 && Main::isInitialised())
+        target = Main::get().getActorSync().getActorByCanonicalRefNum(refNum);
+
     if (target.isEmpty())
     {
         // Walk active cells to find the container or actor corpse and snapshot its inventory.
@@ -611,6 +614,9 @@ bool WorldObjectSync::tryApplyContainer(const ContainerRecord& record, Container
         if (target.isEmpty() && Main::isInitialised())
             target = Main::get().getActorSync().getActorByMpNum(record.mpNum);
     }
+
+    if (target.isEmpty() && record.refNum != 0 && Main::isInitialised())
+        target = Main::get().getActorSync().getActorByCanonicalRefNum(record.refNum);
 
     if (target.isEmpty())
     {

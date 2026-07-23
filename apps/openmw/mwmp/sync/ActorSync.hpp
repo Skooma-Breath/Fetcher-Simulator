@@ -66,6 +66,8 @@ namespace mwmp
         bool hasAuthorityForObject(const MWWorld::Ptr& ptr) const;
         std::string getActorAuthorityCellId(const MWWorld::Ptr& ptr) const;
         uint32_t getActorMpNum(const MWWorld::Ptr& ptr) const;
+        uint32_t getActorCanonicalRefNum(const MWWorld::Ptr& ptr) const;
+        MWWorld::Ptr getActorByCanonicalRefNum(uint32_t refNum) const;
         MWWorld::Ptr getActorByMpNum(uint32_t mpNum) const;
         void sendCombatRequest(const MWWorld::Ptr& victim, float damage, bool healthDamage, bool knocked,
             const osg::Vec3f& hitPos, int attackType, float attackStrength);

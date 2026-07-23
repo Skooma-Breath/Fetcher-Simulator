@@ -7,6 +7,7 @@
 #include "../mwmechanics/creaturestats.hpp"
 
 #include "../mwmp/Main.hpp"
+#include "../mwmp/sync/ActorSync.hpp"
 #include "../mwmp/sync/WorldObjectSync.hpp"
 #include "../mwworld/cellstore.hpp"
 #include "../mwworld/class.hpp"
@@ -95,14 +96,26 @@ namespace MWGui
         MWWorld::ContainerStore& store = source.getClass().getContainerStore(source);
         mItemSources.emplace_back(source, store.resolveTemporarily());
 
-        if (source.getType() == ESM::Container::sRecordId
-            || (source.getClass().isActor() && source.getClass().getCreatureStats(source).isDead()))
+        const bool deadActor = source.getClass().isActor()
+            && source.getClass().getCreatureStats(source).isDead();
+        if (source.getType() == ESM::Container::sRecordId || deadActor)
         {
             mSyncInfo.enabled = true;
             mSyncInfo.cellId = makeCellId(source);
             mSyncInfo.refId = source.getCellRef().getRefId().serializeText();
-            mSyncInfo.refNum = source.getCellRef().getRefNum().mIndex;
-            mSyncInfo.mpNum = mwmp::Main::get().getWorldObjectSync().getMpNumForObject(source);
+            if (deadActor)
+            {
+                const mwmp::ActorSync& actorSync = mwmp::Main::get().getActorSync();
+                mSyncInfo.mpNum = actorSync.getActorMpNum(source);
+                mSyncInfo.refNum = mSyncInfo.mpNum == 0
+                    ? actorSync.getActorCanonicalRefNum(source)
+                    : 0;
+            }
+            else
+            {
+                mSyncInfo.refNum = source.getCellRef().getRefNum().mIndex;
+                mSyncInfo.mpNum = mwmp::Main::get().getWorldObjectSync().getMpNumForObject(source);
+            }
             if (mSyncInfo.cellId.empty())
                 mSyncInfo.enabled = false;
         }

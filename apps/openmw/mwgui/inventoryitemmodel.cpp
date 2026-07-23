@@ -8,6 +8,7 @@
 #include "../mwmechanics/creaturestats.hpp"
 
 #include "../mwmp/Main.hpp"
+#include "../mwmp/sync/ActorSync.hpp"
 #include "../mwmp/sync/WorldObjectSync.hpp"
 
 #include "../mwworld/cellstore.hpp"
@@ -71,8 +72,11 @@ namespace MWGui
 
         mSyncInfo.enabled = true;
         mSyncInfo.refId = actor.getCellRef().getRefId().serializeText();
-        mSyncInfo.refNum = actor.getCellRef().getRefNum().mIndex;
-        mSyncInfo.mpNum = mwmp::Main::get().getWorldObjectSync().getMpNumForObject(actor);
+        const mwmp::ActorSync& actorSync = mwmp::Main::get().getActorSync();
+        mSyncInfo.mpNum = actorSync.getActorMpNum(actor);
+        mSyncInfo.refNum = mSyncInfo.mpNum == 0
+            ? actorSync.getActorCanonicalRefNum(actor)
+            : 0;
     }
 
     ItemStack InventoryItemModel::getItem(ModelIndex index)

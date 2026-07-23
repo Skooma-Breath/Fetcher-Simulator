@@ -3799,6 +3799,26 @@ namespace mwmp
         return mappedMpNumForPtr(cellId, ptr);
     }
 
+    uint32_t ActorSync::getActorCanonicalRefNum(const MWWorld::Ptr& ptr) const
+    {
+        if (ptr.isEmpty() || !ptr.getClass().isActor())
+            return 0;
+
+        const ActorInstanceKey key = unpackActorInstanceId(actorNetIdForPtr(cellIdForPtr(ptr), ptr));
+        return key.kind == ActorKeyKind::VanillaRefNum ? key.id : 0;
+    }
+
+    MWWorld::Ptr ActorSync::getActorByCanonicalRefNum(uint32_t refNum) const
+    {
+        if (refNum == 0)
+            return MWWorld::Ptr();
+
+        const ActorInstanceId actorNetId
+            = packActorInstanceKey({ ActorKeyKind::VanillaRefNum, refNum });
+        const auto runtimeIt = mActorsByNetId.find(actorNetId);
+        return runtimeIt != mActorsByNetId.end() ? runtimeIt->second.boundActor : MWWorld::Ptr();
+    }
+
     MWWorld::Ptr ActorSync::getActorByMpNum(uint32_t mpNum) const
     {
         if (mpNum == 0)
