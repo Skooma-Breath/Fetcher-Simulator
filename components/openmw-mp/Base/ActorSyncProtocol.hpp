@@ -14,7 +14,8 @@ namespace mwmp
     static constexpr uint32_t ActorSyncProtocolVersionV1 = 1;
     // Still named v2 in code because this is the active ActorSync v2 lane, but
     // the wire number is bumped for the deterministic ActorInstanceId key break.
-    static constexpr uint32_t ActorSyncProtocolVersionV2 = 7;
+    // Bumped for migrationGeneration additions (2026-07).
+    static constexpr uint32_t ActorSyncProtocolVersionV2 = 8;
 
     using ActorInstanceId = uint64_t;
 
@@ -110,6 +111,15 @@ namespace mwmp
         return describeActorInstanceId(actorInstanceIdFromActor(actor));
     }
 
+    // Signed-difference helper for wrap-safe generation comparison.
+    // Assumes generations increment slowly enough that wrap-around does not
+    // produce a difference exceeding INT32_MAX. An actor generation that wraps
+    // is farther in the future than any generation within the signed range.
+    inline bool generationIsNewer(uint32_t lhs, uint32_t rhs)
+    {
+        return static_cast<int32_t>(lhs - rhs) > 0;
+    }
+
     enum ActorPresentationFlags : uint8_t
     {
         ActorPresentationMoving = 1u << 0,
@@ -158,6 +168,7 @@ namespace mwmp
         bool removed = false;
         bool baselineReset = false;
         bool teleport = false;
+        uint32_t migrationGeneration = 0;
         BaseActor actor;
     };
 
@@ -187,6 +198,7 @@ namespace mwmp
     struct CompactActorSnapshot
     {
         ActorInstanceId actorNetId = 0;
+        uint32_t migrationGeneration = 0;
         Position position;
         Velocity velocity;
         uint16_t movementFlags = 0;
@@ -291,6 +303,7 @@ namespace mwmp
 
         CompactActorSnapshot snapshot;
         snapshot.actorNetId = actorNetId;
+        snapshot.migrationGeneration = actor.migrationGeneration;
         snapshot.position = actor.position;
         snapshot.velocity = actor.velocity;
         snapshot.movementFlags = static_cast<uint16_t>(actor.animFlags.movementFlags);

@@ -104,7 +104,8 @@ namespace mwmp
         void packSnapshot(WriteStream& ws, const CompactActorSnapshot& snapshot)
         {
             ws.write(snapshot.actorNetId);
-            for (float axis : snapshot.position.pos)
+                ws.write(snapshot.migrationGeneration);
+                for (float axis : snapshot.position.pos)
                 ws.write(quantizePosition(axis));
             for (float axis : snapshot.position.rot)
                 ws.write(quantizeRotation(axis));
@@ -121,8 +122,9 @@ namespace mwmp
         void unpackSnapshot(ReadStream& rs, CompactActorSnapshot& snapshot)
         {
             rs.read(snapshot.actorNetId);
+                rs.read(snapshot.migrationGeneration);
 
-            int32_t positionAxis = 0;
+                int32_t positionAxis = 0;
             for (float& axis : snapshot.position.pos)
             {
                 rs.read(positionAxis);

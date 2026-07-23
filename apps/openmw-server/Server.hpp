@@ -311,7 +311,7 @@ private:
     void handleActorCombatRequest(ConnectedClient& c, const uint8_t* data, size_t size);
 
 
-    // ── Broadcast helpers ─────────────────────────────────────────────────
+// ── Broadcast helpers ─────────────────────────────────────────────────
     void broadcastToAll(const std::vector<uint8_t>& data,
                         HSteamNetConnection except = k_HSteamNetConnection_Invalid,
                         bool reliable = true);
@@ -439,6 +439,7 @@ private:
         // presentation, and stats snapshots must not refresh this value: the
         // reverse-handoff guard ages from a commit, not general actor traffic.
         uint64_t lastCellChangeTime = 0;
+        uint32_t migrationGeneration = 0;
         uint32_t actorAuthorityGuid = 0;
         uint32_t actorAuthorityGeneration = 0;
         std::string actorAuthorityReason;
