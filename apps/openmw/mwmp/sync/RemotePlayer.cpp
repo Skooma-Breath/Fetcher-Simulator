@@ -468,6 +468,8 @@ namespace mwmp
                              << " snapshotInterpFrames=" << mMovementDiagSnapshotInterpFrames
                              << " snapshotExtrapFrames=" << mMovementDiagSnapshotExtrapFrames
                              << " snapshotHoldFrames=" << mMovementDiagSnapshotHoldFrames
+                             << " idleJitterSuppressFrames=" << mMovementDiagIdleJitterSuppressFrames
+                             << " idleJitterSuppressMaxSpeed=" << mMovementDiagIdleJitterSuppressMaxSpeed
                              << " axes=" << mState.animFlags.animFwd << "," << mState.animFlags.animSide
                              << " movementFlags=" << mState.animFlags.movementFlags
                              << " actionFlags=" << mState.animFlags.actionFlags
@@ -514,6 +516,8 @@ namespace mwmp
             mMovementDiagSnapshotInterpFrames = 0;
             mMovementDiagSnapshotExtrapFrames = 0;
             mMovementDiagSnapshotHoldFrames = 0;
+            mMovementDiagIdleJitterSuppressFrames = 0;
+            mMovementDiagIdleJitterSuppressMaxSpeed = 0.f;
             mMovementDiagSnapshotDepthMax = 0;
         }
 
@@ -2040,6 +2044,23 @@ namespace mwmp
         mLastAppliedAnimFlags = f;
         mState.animFlags = f;
 
+        const bool explicitIdleLocomotion = std::abs(f.animFwd) < 0.1f
+            && std::abs(f.animSide) < 0.1f
+            && (f.movementFlags
+                & (AnimFlags::MF_JUMP | AnimFlags::MF_KNOCKED_DOWN
+                    | AnimFlags::MF_KNOCKED_OUT | AnimFlags::MF_RECOVERY)) == 0;
+        if (explicitIdleLocomotion)
+        {
+            // Position and animation use independent lanes. Once the sender
+            // explicitly reports idle input, an old direction cache must not
+            // be revived by attack root motion, landing correction, or other
+            // tiny position-only deltas.
+            mBufferedAnimFwd = 0.f;
+            mBufferedAnimSide = 0.f;
+            mBufferedLocomotionSpeed = 0.f;
+            mBufferedLocomotionFlags = 0;
+        }
+
         if (mIsSpawned && !mNpcPtr.isEmpty())
             applyAnimationStateToActor();
     }
@@ -2840,14 +2861,24 @@ namespace mwmp
             }
             else
             {
-                // Even if the interpolator is still settling the remaining error, an idle
-                // actor should not play movement animations. Zeroing the speed
-                // immediately kills the CharacterController's footstep cadence.
-                const bool suppressRangedAttackJitter
-                    = isInputIdle && mRangedAttackLocomotionSuppressTimer > 0.f;
-                mInterpPlanarSpeed = (suppressRangedAttackJitter || (isInputIdle && !usingSnapshotTimeline))
-                    ? 0.f
-                    : std::min(interpPlanarSpeed, 1000.f);
+                // An explicit idle input edge wins over position-only motion on
+                // both interpolation paths. Attack root motion, jump landing,
+                // collision correction, and physics noise can all move a player
+                // a few units without locomotion intent. Feeding that motion to
+                // CharacterController revives the previous cached walk cycle.
+                if (isInputIdle)
+                {
+                    if (interpPlanarSpeed > 0.5f)
+                    {
+                        ++mMovementDiagIdleJitterSuppressFrames;
+                        mMovementDiagIdleJitterSuppressMaxSpeed
+                            = std::max(mMovementDiagIdleJitterSuppressMaxSpeed,
+                                std::min(interpPlanarSpeed, 4000.f));
+                    }
+                    mInterpPlanarSpeed = 0.f;
+                }
+                else
+                    mInterpPlanarSpeed = std::min(interpPlanarSpeed, 1000.f);
                 Log(Debug::Verbose) << "[MP] " << mName << " Cadence settling=" << mInterpPlanarSpeed;
             }
         }

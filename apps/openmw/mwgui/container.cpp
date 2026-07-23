@@ -338,8 +338,6 @@ namespace MWGui
                 MWBase::Environment::get().getWindowManager()->messageBox("#{sDisposeCorpseFail}");
             else
             {
-                mwmp::Main::get().getWorldObjectSync().onLocalCorpseDisposed(ptr);
-
                 MWMechanics::CreatureStats& creatureStats = ptr.getClass().getCreatureStats(ptr);
 
                 // If we dispose corpse before end of death animation, we should update death counter counter manually.

@@ -633,6 +633,7 @@ private:
 
     void loadPersistentWorldState();
     void sendCellStateToClient(HSteamNetConnection conn, const std::string& cellId);
+    void sendCellObjectStateToClient(HSteamNetConnection conn, const std::string& cellId);
 };
 
 } // namespace mwmp

@@ -228,7 +228,11 @@ void WorldObjectSync::onLocalObjectDeleted(const MWWorld::Ptr& ptr)
         return;
 
     if (ptr.getClass().isActor())
+    {
+        if (ptr.getClass().getCreatureStats(ptr).isDead())
+            onLocalCorpseDisposed(ptr);
         return;
+    }
 
     const uint32_t mpNum = getMpNumForObject(ptr);
 
@@ -258,12 +262,20 @@ void WorldObjectSync::onLocalObjectDeleted(const MWWorld::Ptr& ptr)
 
 void WorldObjectSync::onLocalCorpseDisposed(const MWWorld::Ptr& ptr)
 {
-    if (mSuppressLocalDelete || ptr.isEmpty() || !ptr.isInCell() || !ptr.getClass().isActor())
+    if (mSuppressLocalDelete || ptr.isEmpty() || !ptr.isInCell() || !ptr.getClass().isActor()
+        || !ptr.getClass().getCreatureStats(ptr).isDead())
         return;
 
     const uint32_t mpNum = getMpNumForObject(ptr);
-    if (mpNum == 0)
+    uint32_t canonicalRefNum = 0;
+    if (mpNum == 0 && Main::isInitialised())
+        canonicalRefNum = Main::get().getActorSync().getActorCanonicalRefNum(ptr);
+    if (mpNum == 0 && canonicalRefNum == 0)
+    {
+        Log(Debug::Warning) << "[MP] WorldObjectSync: cannot dispose corpse without canonical identity"
+                            << " refId=" << ptr.getCellRef().getRefId().serializeText();
         return;
+    }
 
     std::string cellId;
     if (const MWWorld::Cell* cell = ptr.getCell()->getCell())
@@ -281,8 +293,12 @@ void WorldObjectSync::onLocalCorpseDisposed(const MWWorld::Ptr& ptr)
     PacketObjectDelete pkt;
     pkt.mpNum = mpNum;
     pkt.cellId = cellId;
+    pkt.refId = ptr.getCellRef().getRefId().serializeText();
+    pkt.refNum = canonicalRefNum;
     mClient.sendReliable(pkt.encode());
     Log(Debug::Info) << "[MP] WorldObjectSync: sent corpse dispose mpNum=" << mpNum
+                     << " refId=" << pkt.refId
+                     << " refNum=" << pkt.refNum
                      << " cell=" << cellId;
 }
 

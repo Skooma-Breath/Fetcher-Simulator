@@ -245,12 +245,25 @@ namespace mwmp
             bool waitingForFreshCellBootstrap = false;
             bool rebaseOnNextAuthoritativeSnapshot = false;
             bool smoothFreshBootstrapCorrection = false;
+            // A normal exterior ActorCellChange updates canonical CellStore
+            // ownership before the observer's interpolation cursor reaches the
+            // border. Keep the Ptr in that canonical CellStore while allowing
+            // its rendered transform to finish crossing without a snap.
+            bool cellChangeVisualContinuity = false;
+            // Observer-only: keep the actor in its already-loaded source
+            // CellStore until the smoothed transform is safely beyond the
+            // exterior seam. Moving CellStore ownership exactly on the border
+            // rebuilds scene/mechanics state and visibly stalls the puppet.
+            bool deferCellStoreRebind = false;
             uint64_t freshCellBootstrapMinServerTimestamp = 0;
             std::string pendingCellChangeDestination;
             float pendingCellChangeRetryTimer = 0.f;
             std::string previousCellChangeCellId;
             float cellChangeReverseGuardTimer = 0.f;
             bool cellChangeReverseGuardLogged = false;
+            uint64_t cellChangeCommitClientTimeMs = 0;
+            bool cellChangeFirstSnapshotLogged = false;
+            bool cellChangeHandoffPredictionLogged = false;
         };
 
         struct CellRuntime

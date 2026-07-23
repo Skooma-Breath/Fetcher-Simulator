@@ -218,6 +218,8 @@ namespace mwmp
         std::size_t mMovementDiagSnapshotInterpFrames = 0;
         std::size_t mMovementDiagSnapshotExtrapFrames = 0;
         std::size_t mMovementDiagSnapshotHoldFrames = 0;
+        std::size_t mMovementDiagIdleJitterSuppressFrames = 0;
+        float mMovementDiagIdleJitterSuppressMaxSpeed = 0.f;
         std::size_t mMovementDiagSnapshotDepthMax = 0;
         std::size_t mMovementDiagQuietWindows = 0;
     };

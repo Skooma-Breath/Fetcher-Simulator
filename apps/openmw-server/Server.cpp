@@ -3952,7 +3952,11 @@ void MPServer::sendCellStateToClient(HSteamNetConnection conn, const std::string
     sendGameSettingsToClient(conn, cellId);
     sendActorAuthorityToClient(conn, cellId);
     sendActorStateToClient(conn, cellId);
+    sendCellObjectStateToClient(conn, cellId);
+}
 
+void MPServer::sendCellObjectStateToClient(HSteamNetConnection conn, const std::string& cellId)
+{
     auto objectsIt = mWorld.placedObjects.find(cellId);
     if (objectsIt != mWorld.placedObjects.end())
     {
@@ -5454,7 +5458,12 @@ void MPServer::handlePlayerLoadedCells(ConnectedClient& c, const uint8_t* data, 
     for (const std::string& cellId : addedCells)
     {
         refreshActorAuthorityForCell(cellId, c.guid);
-        sendCellStateToClient(c.conn, cellId);
+        // Loaded-cell actor interest is handled by the authority refresh above.
+        // Re-sending the full actor baseline here duplicates every adjacent-cell
+        // actor snapshot and can stall the client's network frame during startup.
+        // Adjacent cells still need their persisted objects, containers and doors
+        // so exterior interactions remain consistent before the border is crossed.
+        sendCellObjectStateToClient(c.conn, cellId);
     }
     for (const std::string& cellId : removedCells)
         refreshActorAuthorityForCell(cellId);
@@ -8815,6 +8824,75 @@ void MPServer::handleObjectDelete(ConnectedClient& c, const uint8_t* data, size_
 {
     PacketObjectDelete pkt;
     if (!pkt.decode(data, size)) return;
+
+    if (pkt.mpNum == 0 && !pkt.refId.empty() && pkt.refNum != 0)
+    {
+        BaseActor requestedActor;
+        requestedActor.refId = pkt.refId;
+        requestedActor.refNum = pkt.refNum;
+        requestedActor.cellId = pkt.cellId;
+
+        std::string deadCellId;
+        const ActorRegistryRecord* deadRecord = findDeadVanillaActor(requestedActor, &deadCellId);
+        if (!deadRecord)
+        {
+            Log(Debug::Info) << "[Server] Ignoring vanilla corpse dispose from " << c.name
+                             << " refId=" << pkt.refId
+                             << " refNum=" << pkt.refNum
+                             << " packetCell=" << pkt.cellId
+                             << " reason=unknown-corpse";
+            return;
+        }
+        if (!cellMatches(c.player.cell, deadCellId))
+        {
+            Log(Debug::Info) << "[Server] Ignoring vanilla corpse dispose from " << c.name
+                             << " refId=" << pkt.refId
+                             << " refNum=" << pkt.refNum
+                             << " packetCell=" << pkt.cellId
+                             << " canonicalCell=" << deadCellId
+                             << " reason=player-cell-mismatch";
+            return;
+        }
+
+        const std::string containerKey
+            = makeContainerKey(deadCellId, deadRecord->actor.refId, deadRecord->actor.refNum, 0);
+        auto containerIt = mWorld.containers.find(containerKey);
+        if (containerIt != mWorld.containers.end() && !containerIt->second.items.empty())
+        {
+            Log(Debug::Info) << "[Server] Ignoring vanilla corpse dispose from " << c.name
+                             << " refId=" << pkt.refId
+                             << " refNum=" << pkt.refNum
+                             << " canonicalCell=" << deadCellId
+                             << " remainingItems=" << containerIt->second.items.size()
+                             << " reason=container-not-empty";
+            return;
+        }
+
+        ActorRegistryRecord removedRecord = *deadRecord;
+        ensureActorNetId(removedRecord, deadCellId);
+        auto& actorCell = mWorld.actorCells[deadCellId];
+        const std::string actorKey = makeActorKey(removedRecord.actor);
+        actorCell.actors.erase(actorKey);
+        forgetDeadVanillaActor(removedRecord.actor, deadCellId);
+
+        if (containerIt != mWorld.containers.end())
+        {
+            if (mPlayerDb)
+                mPlayerDb->deleteContainerRecord(
+                    containerIt->second.cellId, containerIt->second.refId, containerIt->second.refNum);
+            mWorld.containers.erase(containerIt);
+        }
+
+        broadcastActorIdentityRemovalForCell(deadCellId, actorCell, { removedRecord });
+        forgetActorNetId(removedRecord.actorNetId, removedRecord.actor);
+
+        Log(Debug::Info) << "[Server] Vanilla corpse dispose accepted: player=" << c.name
+                         << " refId=" << removedRecord.actor.refId
+                         << " refNum=" << removedRecord.actor.refNum
+                         << " actorNetId=" << removedRecord.actorNetId
+                         << " cell=" << deadCellId;
+        return;
+    }
 
     for (const auto& [actorCellId, cellState] : mWorld.actorCells)
     {

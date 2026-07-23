@@ -1340,7 +1340,8 @@ namespace mwmp
                 continue;
 
             advanceSmoothing(actor, dt);
-            if (resolveActorBinding(actor.state.cellId, actor))
+            if ((actor.deferCellStoreRebind && !actor.boundActor.isEmpty())
+                || resolveActorBinding(actor.state.cellId, actor))
             {
                 if (actor.waitingForFreshCellBootstrap)
                 {
@@ -2309,6 +2310,9 @@ namespace mwmp
                     primaryRuntime->previousCellChangeCellId = oldCellId;
                     primaryRuntime->cellChangeReverseGuardTimer = 5.f;
                     primaryRuntime->cellChangeReverseGuardLogged = false;
+                    primaryRuntime->cellChangeCommitClientTimeMs = currentClientTimeMs();
+                    primaryRuntime->cellChangeFirstSnapshotLogged = false;
+                    primaryRuntime->cellChangeHandoffPredictionLogged = false;
 
                     // The v2 primary runtime is canonical. Remove the legacy
                     // source-cell copy immediately after the server commit so it
@@ -2331,14 +2335,71 @@ namespace mwmp
                         }
                     }
                 }
+                const bool sourceAuthority
+                    = hasAuthorityForActor(primaryRuntime->actorNetId, oldCellId);
+                const bool destinationAuthority
+                    = hasAuthorityForActor(primaryRuntime->actorNetId, destCellId);
+                const bool retainedAuthority = sourceAuthority && destinationAuthority;
+                Position preCommitVisualPosition = primaryRuntime->smoothedPosition;
+                bool hasPreCommitVisualPosition = primaryRuntime->hasSmoothedPosition;
+                const std::string boundCellAtCommit = !primaryRuntime->boundActor.isEmpty()
+                    ? cellIdForPtr(primaryRuntime->boundActor) : std::string();
+                if (retainedAuthority && !primaryRuntime->boundActor.isEmpty())
+                {
+                    const auto& localPosition
+                        = primaryRuntime->boundActor.getRefData().getPosition();
+                    for (int i = 0; i < 3; ++i)
+                    {
+                        preCommitVisualPosition.pos[i] = localPosition.pos[i];
+                        preCommitVisualPosition.rot[i] = localPosition.rot[i];
+                    }
+                    hasPreCommitVisualPosition = true;
+                }
+                const float handoffDeltaX
+                    = actorState.position.pos[0] - preCommitVisualPosition.pos[0];
+                const float handoffDeltaY
+                    = actorState.position.pos[1] - preCommitVisualPosition.pos[1];
+                const float handoffDeltaZ
+                    = actorState.position.pos[2] - preCommitVisualPosition.pos[2];
+                const float handoffDistanceSq = handoffDeltaX * handoffDeltaX
+                    + handoffDeltaY * handoffDeltaY + handoffDeltaZ * handoffDeltaZ;
+                constexpr float kMaxSeamlessCellHandoffDistanceSq = 512.f * 512.f;
+                const std::string preCommitVisualCell = hasPreCommitVisualPosition
+                    ? exteriorCellIdForPosition(preCommitVisualPosition) : std::string();
+                const std::string commitPositionCell = exteriorCellIdForPosition(actorState.position);
+                const bool preserveBufferedTimeline = oldCellId != destCellId
+                    && !actorState.position.isTeleporting
+                    && isExteriorActorCellId(oldCellId)
+                    && isExteriorActorCellId(destCellId)
+                    && hasPreCommitVisualPosition
+                    && (preCommitVisualCell == oldCellId || preCommitVisualCell == destCellId)
+                    && commitPositionCell == destCellId
+                    && handoffDistanceSq <= kMaxSeamlessCellHandoffDistanceSq
+                    && (!destinationAuthority || retainedAuthority);
+                const bool pinToCanonicalCell = preserveBufferedTimeline
+                    && !destinationAuthority
+                    && preCommitVisualCell != destCellId;
+                constexpr float kDeferredCellStoreRebindDistance = 64.f;
+                const bool deferObserverCellStoreRebind = preserveBufferedTimeline
+                    && !destinationAuthority
+                    && boundCellAtCommit == oldCellId
+                    && exteriorCellBorderDistance(preCommitVisualPosition)
+                        <= kDeferredCellStoreRebindDistance;
+                const uint64_t bufferedLatestTimestamp = primaryRuntime->snapshots.empty()
+                    ? 0 : primaryRuntime->snapshots.back().serverTimestamp;
+                const bool commitBehindBufferedTimeline = preserveBufferedTimeline
+                    && list.serverTimestamp != 0
+                    && bufferedLatestTimestamp != 0
+                    && list.serverTimestamp < bufferedLatestTimestamp;
+
                 primaryRuntime->state.cellId = destCellId;
                 mergeActorState(*primaryRuntime, actorState, true);
-                // The reliable migration commit supersedes every positional
-                // sample buffered under the source cell. Rebase interpolation
-                // to the committed transform so an old queued sample cannot be
-                // replayed on the following frame and make World::moveObject
-                // automatically put the Ptr back into an earlier CellStore.
-                primaryRuntime->rebaseOnNextAuthoritativeSnapshot = true;
+                // Teleports and discontinuous migrations still rebase. A normal
+                // adjacent exterior crossing keeps its buffered timeline: the
+                // Ptr is moved to the canonical destination CellStore below,
+                // while applyBoundActorState pins that CellStore until the
+                // smoothed render transform has crossed the border too.
+                primaryRuntime->rebaseOnNextAuthoritativeSnapshot = !preserveBufferedTimeline;
                 BaseActor handoffState = actorState;
                 if (!hasAuthorityForActor(primaryRuntime->actorNetId, destCellId) && handoffState.isMoving)
                 {
@@ -2360,15 +2421,93 @@ namespace mwmp
                             component *= velocityScale;
                     }
                 }
-                queueSnapshot(*primaryRuntime, handoffState, list);
+                // PositionV2 travels on a separate lane and can reach the
+                // observer before this reliable cell commit. Never append an
+                // older commit behind that newer buffered sample: doing so
+                // makes the interpolation clock run backward at the border.
+                if (!commitBehindBufferedTimeline)
+                    queueSnapshot(*primaryRuntime, handoffState, list);
+                primaryRuntime->cellChangeVisualContinuity = pinToCanonicalCell;
+                primaryRuntime->deferCellStoreRebind = deferObserverCellStoreRebind;
+                if (preserveBufferedTimeline)
+                {
+                    primaryRuntime->state.position = preCommitVisualPosition;
+                    Log(Debug::Info) << "[MPDIAG] Actor cell continuity accepted"
+                                     << " actorNetId=" << primaryRuntime->actorNetId
+                                     << " refId=" << actorState.refId
+                                     << " mpNum=" << actorState.mpNum
+                                     << " from=" << oldCellId
+                                     << " to=" << destCellId
+                                     << " visualCell=" << preCommitVisualCell
+                                     << " commitCell=" << commitPositionCell
+                                     << " sourceAuthority=" << sourceAuthority
+                                     << " destinationAuthority=" << destinationAuthority
+                                     << " retainedAuthority=" << retainedAuthority
+                                     << " pinned=" << pinToCanonicalCell
+                                     << " skippedOlderCommit=" << commitBehindBufferedTimeline
+                                     << " commitTs=" << list.serverTimestamp
+                                     << " bufferedLatestTs=" << bufferedLatestTimestamp
+                                     << " handoffDistance=" << std::sqrt(handoffDistanceSq)
+                                     << " velocity=(" << handoffState.velocity.linear[0] << ","
+                                     << handoffState.velocity.linear[1] << ","
+                                     << handoffState.velocity.linear[2] << ")"
+                                     << " axes=(" << handoffState.animFlags.animSide << ","
+                                     << handoffState.animFlags.animFwd << ")"
+                                     << " snapshots=" << primaryRuntime->snapshots.size();
+                }
+                else if (oldCellId != destCellId
+                    && !actorState.position.isTeleporting
+                    && isExteriorActorCellId(oldCellId)
+                    && isExteriorActorCellId(destCellId))
+                {
+                    Log(Debug::Info) << "[MPDIAG] Actor cell continuity rejected"
+                                     << " actorNetId=" << primaryRuntime->actorNetId
+                                     << " refId=" << actorState.refId
+                                     << " mpNum=" << actorState.mpNum
+                                     << " from=" << oldCellId
+                                     << " to=" << destCellId
+                                     << " hasVisual=" << hasPreCommitVisualPosition
+                                     << " visualCell=" << preCommitVisualCell
+                                     << " commitCell=" << commitPositionCell
+                                     << " handoffDistance=" << std::sqrt(handoffDistanceSq)
+                                     << " sourceAuthority=" << sourceAuthority
+                                     << " destinationAuthority=" << destinationAuthority
+                                     << " retainedAuthority=" << retainedAuthority
+                                     << " commitTs=" << list.serverTimestamp
+                                     << " bufferedLatestTs=" << bufferedLatestTimestamp;
+                }
                 rememberServerSpawnedActorTimestamp(actorState.mpNum, list.serverTimestamp);
                 indexActorNetId(primaryRuntime->actorNetId, oldCellId, destCellId);
                 // ActorCellChange is the reliable canonical migration commit.
-                // Rebind the existing Ptr immediately on every interested
-                // client; waiting for the authority/non-authority update path
-                // leaves the actor in an unloaded source CellStore and makes
-                // it disappear during the handoff.
-                if (resolveActorBinding(destCellId, *primaryRuntime, true))
+                // Authorities rebind immediately. Observers keep an actor in
+                // the still-loaded source CellStore for the first 64 units past
+                // an exterior seam so scene/mechanics reconstruction cannot
+                // introduce a visible border pause.
+                const std::string boundCellBefore = boundCellAtCommit;
+                const auto bindingStarted = std::chrono::steady_clock::now();
+                const bool bindingResolved = deferObserverCellStoreRebind
+                    || resolveActorBinding(destCellId, *primaryRuntime, true);
+                const double bindingElapsedMs = std::chrono::duration<double, std::milli>(
+                    std::chrono::steady_clock::now() - bindingStarted).count();
+                const std::string boundCellAfter = !primaryRuntime->boundActor.isEmpty()
+                    ? cellIdForPtr(primaryRuntime->boundActor) : std::string();
+                Log(bindingElapsedMs >= 8.0 ? Debug::Warning : Debug::Info)
+                    << "[MPDIAG] Actor cell commit binding"
+                    << " actorNetId=" << primaryRuntime->actorNetId
+                    << " refId=" << actorState.refId
+                    << " mpNum=" << actorState.mpNum
+                    << " from=" << oldCellId
+                    << " to=" << destCellId
+                    << " sourceAuthority=" << sourceAuthority
+                    << " destinationAuthority=" << destinationAuthority
+                    << " retainedAuthority=" << retainedAuthority
+                    << " continuity=" << preserveBufferedTimeline
+                    << " deferredCellStoreRebind=" << deferObserverCellStoreRebind
+                    << " resolved=" << bindingResolved
+                    << " boundBefore=" << boundCellBefore
+                    << " boundAfter=" << boundCellAfter
+                    << " elapsedMs=" << bindingElapsedMs;
+                if (bindingResolved)
                 {
                     // If this client becomes destination authority, its local
                     // copy can still be interpolation-delayed even when the Ptr
@@ -2376,7 +2515,8 @@ namespace mwmp
                     // to the reliable commit before local simulation resumes;
                     // otherwise its first snapshots run backwards toward the
                     // border. This mirrors TES3MP's LocalActor handoff.
-                    if (hasAuthorityForActor(primaryRuntime->actorNetId, destCellId)
+                    if (destinationAuthority
+                        && !retainedAuthority
                         && !primaryRuntime->state.isDead)
                     {
                         MWBase::World* world = MWBase::Environment::get().getWorld();
@@ -2622,6 +2762,7 @@ namespace mwmp
             // canonical cell is accepted below and retires the guard before
             // the snapshot is queued.
             const std::string snapshotPositionCellId = exteriorCellIdForPosition(actorState.position);
+            const bool hadPendingCellHandoff = !runtime.previousCellChangeCellId.empty();
             if (runtime.state.mpNum != 0
                 && !runtime.previousCellChangeCellId.empty()
                 && isExteriorActorCellId(runtime.state.cellId)
@@ -2669,6 +2810,49 @@ namespace mwmp
             synthetic.authorityGeneration = list.authorityGeneration;
             synthetic.snapshotSequence = list.sequence;
             synthetic.serverTimestamp = list.serverTimestamp;
+            if (hadPendingCellHandoff
+                && !runtime.cellChangeFirstSnapshotLogged)
+            {
+                const uint64_t receiveTimeMs = currentClientTimeMs();
+                const uint64_t receiveGapMs = runtime.lastClientSnapshotReceiveTimeMs != 0
+                    && receiveTimeMs >= runtime.lastClientSnapshotReceiveTimeMs
+                    ? receiveTimeMs - runtime.lastClientSnapshotReceiveTimeMs : 0;
+                const uint64_t commitToSnapshotMs = runtime.cellChangeCommitClientTimeMs != 0
+                    && receiveTimeMs >= runtime.cellChangeCommitClientTimeMs
+                    ? receiveTimeMs - runtime.cellChangeCommitClientTimeMs : 0;
+                float predictedCorrectionDistance = 0.f;
+                if (!runtime.snapshots.empty() && runtime.lastClientSnapshotReceiveTimeMs != 0)
+                {
+                    const BufferedSnapshot& previous = runtime.snapshots.back();
+                    const double predictionMs = std::min<double>(
+                        static_cast<double>(receiveGapMs) + 50.0, 750.0);
+                    const Position predicted = extrapolatePosition(
+                        previous.position, previous.velocity, predictionMs);
+                    const float correctionX = actorState.position.pos[0] - predicted.pos[0];
+                    const float correctionY = actorState.position.pos[1] - predicted.pos[1];
+                    const float correctionZ = actorState.position.pos[2] - predicted.pos[2];
+                    predictedCorrectionDistance = std::sqrt(correctionX * correctionX
+                        + correctionY * correctionY + correctionZ * correctionZ);
+                }
+                runtime.cellChangeFirstSnapshotLogged = true;
+                Log(Debug::Info) << "[MPDIAG] Actor handoff first position"
+                                 << " actorNetId=" << runtime.actorNetId
+                                 << " refId=" << runtime.state.refId
+                                 << " mpNum=" << runtime.state.mpNum
+                                 << " canonical=" << runtime.state.cellId
+                                 << " previous=" << runtime.previousCellChangeCellId
+                                 << " receiveGapMs=" << receiveGapMs
+                                 << " commitToSnapshotMs=" << commitToSnapshotMs
+                                 << " serverGapMs="
+                                 << (runtime.lastServerTimestamp != 0
+                                         && list.serverTimestamp >= runtime.lastServerTimestamp
+                                     ? list.serverTimestamp - runtime.lastServerTimestamp : 0)
+                                 << " predictedCorrectionDistance=" << predictedCorrectionDistance
+                                 << " positionCell=" << snapshotPositionCellId
+                                 << " velocity=(" << actorState.velocity.linear[0] << ","
+                                 << actorState.velocity.linear[1] << ","
+                                 << actorState.velocity.linear[2] << ")";
+            }
             mergeActorState(runtime, actorState, true);
             queueSnapshot(runtime, actorState, synthetic);
             completeFreshCellBootstrap(runtime, "ActorPositionV2", list.serverTimestamp);
@@ -4645,19 +4829,30 @@ namespace mwmp
         // Keep two 25 ms active snapshots buffered so ordinary arrival jitter does
         // not alternate between movement and one-snapshot holds (tiny-step motion).
         static constexpr double kInterpolationDelayMs = 50.0;
-        static constexpr double kMaxExtrapolationMs = 40.0;
+        static constexpr double kDefaultMaxExtrapolationMs = 40.0;
+        static constexpr double kCellHandoffMaxExtrapolationMs = 750.0;
+        const BufferedSnapshot& latestSnapshot = actor.snapshots.back();
+        const bool latestHasMovementAxes = std::abs(latestSnapshot.animFwd) > 0.1f
+            || std::abs(latestSnapshot.animSide) > 0.1f;
+        const bool predictExteriorCellHandoff = !actor.previousCellChangeCellId.empty()
+            && latestSnapshot.isMoving
+            && latestHasMovementAxes
+            && !latestSnapshot.position.isTeleporting
+            && isExteriorActorCellId(actor.state.cellId);
+        const double maxExtrapolationMs = predictExteriorCellHandoff
+            ? kCellHandoffMaxExtrapolationMs : kDefaultMaxExtrapolationMs;
 
         const double latestTimestamp = static_cast<double>(actor.snapshots.back().serverTimestamp);
         const double estimatedServerNow = latestTimestamp + (std::max(0.f, actor.latestSnapshotAge) * 1000.0);
         const double desiredRenderTimestamp = std::min(
             estimatedServerNow - kInterpolationDelayMs,
-            latestTimestamp + kMaxExtrapolationMs);
+            latestTimestamp + maxExtrapolationMs);
         const double earliestTimestamp = static_cast<double>(actor.snapshots.front().serverTimestamp);
         const double targetRenderTimestamp = std::max(desiredRenderTimestamp, earliestTimestamp);
 
         if (!actor.hasInterpolationRenderTimestamp
             || actor.interpolationRenderTimestamp < earliestTimestamp
-            || actor.interpolationRenderTimestamp > latestTimestamp + kMaxExtrapolationMs)
+            || actor.interpolationRenderTimestamp > latestTimestamp + maxExtrapolationMs)
         {
             actor.interpolationRenderTimestamp = earliestTimestamp;
             actor.hasInterpolationRenderTimestamp = true;
@@ -4724,7 +4919,7 @@ namespace mwmp
         }
         else if (renderTimestamp > latestTimestamp)
         {
-            const double extrapolationMs = std::min(renderTimestamp - latestTimestamp, kMaxExtrapolationMs);
+            const double extrapolationMs = std::min(renderTimestamp - latestTimestamp, maxExtrapolationMs);
             const BufferedSnapshot& latest = actor.snapshots.back();
             const bool movementInputActive = std::abs(latest.animFwd) > 0.1f
                 || std::abs(latest.animSide) > 0.1f;
@@ -4733,9 +4928,41 @@ namespace mwmp
             // 25 ms active cadence interpolation is sufficient; retain a short cap
             // only for latency-sensitive combat movement.
             if (latest.isMoving && movementInputActive
-                && actor.state.ai.type == BaseActor::AIAction::Type::Combat)
-                target = extrapolatePosition(actor.snapshots.back().position, actor.snapshots.back().velocity,
-                    extrapolationMs);
+                && (actor.state.ai.type == BaseActor::AIAction::Type::Combat
+                    || predictExteriorCellHandoff))
+            {
+                Velocity predictionVelocity = latest.velocity;
+                if (predictExteriorCellHandoff)
+                {
+                    const float planarSpeed = std::sqrt(
+                        predictionVelocity.linear[0] * predictionVelocity.linear[0]
+                        + predictionVelocity.linear[1] * predictionVelocity.linear[1]);
+                    constexpr float kMaxCellHandoffPredictionSpeed = 200.f;
+                    if (planarSpeed > kMaxCellHandoffPredictionSpeed)
+                    {
+                        const float scale = kMaxCellHandoffPredictionSpeed / planarSpeed;
+                        predictionVelocity.linear[0] *= scale;
+                        predictionVelocity.linear[1] *= scale;
+                    }
+                    if (!actor.cellChangeHandoffPredictionLogged
+                        && extrapolationMs > kDefaultMaxExtrapolationMs)
+                    {
+                        actor.cellChangeHandoffPredictionLogged = true;
+                        Log(Debug::Info) << "[MPDIAG] Actor handoff prediction engaged"
+                                         << " actorNetId=" << actor.actorNetId
+                                         << " refId=" << actor.state.refId
+                                         << " mpNum=" << actor.state.mpNum
+                                         << " canonical=" << actor.state.cellId
+                                         << " previous=" << actor.previousCellChangeCellId
+                                         << " extrapolationMs=" << extrapolationMs
+                                         << " planarSpeed=" << planarSpeed
+                                         << " cappedSpeed="
+                                         << std::min(planarSpeed, kMaxCellHandoffPredictionSpeed);
+                    }
+                }
+                target = extrapolatePosition(
+                    actor.snapshots.back().position, predictionVelocity, extrapolationMs);
+            }
             else
                 target = actor.snapshots.back().position;
             presentationSnapshot = &latest;
@@ -7137,7 +7364,8 @@ namespace mwmp
                     const std::string statePositionCellId = exteriorCellIdForPosition(actor.state.position);
                     if (!statePositionCellId.empty() && statePositionCellId != targetCellId)
                     {
-                        Log(Debug::Warning) << "[MP] ActorSync: force-moving ActorCellChange with mismatched transform cell"
+                        Log(actor.cellChangeVisualContinuity ? Debug::Info : Debug::Warning)
+                                            << "[MP] ActorSync: force-moving ActorCellChange with mismatched transform cell"
                                             << " targetCell=" << targetCellId
                                             << " positionCell=" << statePositionCellId
                                             << " boundCell=" << currentBoundCellId
@@ -7241,7 +7469,10 @@ namespace mwmp
             int preservedAuthorityHello = 0;
             int preservedAuthorityFlee = 0;
             int preservedAuthorityAlarm = 0;
-            if (forceCanonicalCell)
+            const bool preserveLocalAuthorityAi = forceCanonicalCell
+                && hasAuthorityForActor(actor.actorNetId, targetCellId);
+            const auto canonicalMoveStarted = std::chrono::steady_clock::now();
+            if (preserveLocalAuthorityAi)
             {
                 MWMechanics::CreatureStats& preMoveStats = actor.boundActor.getClass().getCreatureStats(actor.boundActor);
                 MWMechanics::AiSequence& preMoveAiSequence = preMoveStats.getAiSequence();
@@ -7266,9 +7497,11 @@ namespace mwmp
                                  << " packages=" << preservedAuthorityAiSequence.mPackages.size()
                                  << " fight=" << preservedAuthorityFight;
             }
+            const auto aiCaptureFinished = std::chrono::steady_clock::now();
 
             actor.boundActor = world->moveObject(actor.boundActor, targetCell,
                 osg::Vec3f(movePos->pos[0], movePos->pos[1], movePos->pos[2]));
+            const auto worldMoveFinished = std::chrono::steady_clock::now();
             if (actor.boundActor.isEmpty())
                 return false;
 
@@ -7286,7 +7519,7 @@ namespace mwmp
             const bool forcedAuthoritativeCellChange = forceCanonicalCell;
             if (!forcedAuthoritativeCellChange)
                 applyDefaultAuthorityAi();
-            if (forcedAuthoritativeCellChange)
+            if (preserveLocalAuthorityAi)
             {
                 MWMechanics::CreatureStats& postMoveStats = actor.boundActor.getClass().getCreatureStats(actor.boundActor);
                 MWMechanics::AiSequence& postMoveAiSequence = postMoveStats.getAiSequence();
@@ -7391,6 +7624,30 @@ namespace mwmp
                                          << " fight=" << rebuiltFight;
                     }
                 }
+            }
+            const auto aiRestoreFinished = std::chrono::steady_clock::now();
+            if (forceCanonicalCell)
+            {
+                const double aiCaptureMs = std::chrono::duration<double, std::milli>(
+                    aiCaptureFinished - canonicalMoveStarted).count();
+                const double worldMoveMs = std::chrono::duration<double, std::milli>(
+                    worldMoveFinished - aiCaptureFinished).count();
+                const double aiRestoreMs = std::chrono::duration<double, std::milli>(
+                    aiRestoreFinished - worldMoveFinished).count();
+                const double totalMoveMs = std::chrono::duration<double, std::milli>(
+                    aiRestoreFinished - canonicalMoveStarted).count();
+                Log(totalMoveMs >= 8.0 ? Debug::Warning : Debug::Info)
+                    << "[MPDIAG] Actor canonical cell move timing"
+                    << " actorNetId=" << actor.actorNetId
+                    << " refId=" << actor.state.refId
+                    << " mpNum=" << actor.state.mpNum
+                    << " from=" << currentBoundCellId
+                    << " to=" << targetCellId
+                    << " localAuthority=" << preserveLocalAuthorityAi
+                    << " aiCaptureMs=" << aiCaptureMs
+                    << " worldMoveMs=" << worldMoveMs
+                    << " aiRestoreMs=" << aiRestoreMs
+                    << " totalMs=" << totalMoveMs;
             }
             Log(Debug::Info) << "[MP] ActorSync: moved bound actor between cells"
                              << " cell=" << targetCellId
@@ -7936,7 +8193,76 @@ namespace mwmp
             || (earlyHitFlags & (AnimFlags::MF_KNOCKED_DOWN | AnimFlags::MF_KNOCKED_OUT)) != 0;
         if (!skipPositionUpdate)
         {
-            actor.boundActor = world->moveObject(actor.boundActor, osg::Vec3f(pos.pos[0], pos.pos[1], pos.pos[2]));
+            MWWorld::CellStore* continuityCell = nullptr;
+            const std::string renderedPositionCell = exteriorCellIdForPosition(pos);
+            const std::string boundCellId = cellIdForPtr(actor.boundActor);
+            if (actor.deferCellStoreRebind && boundCellId == actor.state.cellId)
+                actor.deferCellStoreRebind = false;
+
+            if (actor.deferCellStoreRebind)
+            {
+                constexpr float kDeferredCellStoreRebindDistance = 64.f;
+                const float borderDistance = exteriorCellBorderDistance(pos);
+                const bool readyForCellStoreRebind = renderedPositionCell == actor.state.cellId
+                    && borderDistance > kDeferredCellStoreRebindDistance;
+                if (readyForCellStoreRebind)
+                {
+                    MWWorld::World& worldImp = static_cast<MWWorld::World&>(*world);
+                    continuityCell = findActiveCellById(worldImp, actor.state.cellId);
+                    if (continuityCell)
+                    {
+                        actor.deferCellStoreRebind = false;
+                        Log(Debug::Info) << "[MPDIAG] Actor deferred CellStore rebind completed"
+                                         << " actorNetId=" << actor.actorNetId
+                                         << " refId=" << actor.state.refId
+                                         << " mpNum=" << actor.state.mpNum
+                                         << " from=" << boundCellId
+                                         << " to=" << actor.state.cellId
+                                         << " renderedCell=" << renderedPositionCell
+                                         << " borderDistance=" << borderDistance;
+                    }
+                }
+                if (actor.deferCellStoreRebind)
+                {
+                    actor.boundActor = world->moveObject(actor.boundActor,
+                        osg::Vec3f(pos.pos[0], pos.pos[1], pos.pos[2]));
+                }
+            }
+            else if (actor.cellChangeVisualContinuity
+                && isExteriorActorCellId(actor.state.cellId)
+                && renderedPositionCell != actor.state.cellId)
+            {
+                MWWorld::World& worldImp = static_cast<MWWorld::World&>(*world);
+                continuityCell = findActiveCellById(worldImp, actor.state.cellId);
+            }
+
+            if (actor.deferCellStoreRebind)
+            {
+                // The source CellStore remains loaded during an adjacent
+                // exterior crossing. The transform above continues smoothly;
+                // ownership is switched once the actor is clear of the seam.
+            }
+            else if (continuityCell)
+            {
+                actor.boundActor = world->moveObject(actor.boundActor, continuityCell,
+                    osg::Vec3f(pos.pos[0], pos.pos[1], pos.pos[2]));
+            }
+            else
+            {
+                if (actor.cellChangeVisualContinuity)
+                {
+                    actor.cellChangeVisualContinuity = false;
+                    Log(Debug::Info) << "[MPDIAG] Actor cell continuity completed"
+                                     << " actorNetId=" << actor.actorNetId
+                                     << " refId=" << actor.state.refId
+                                     << " mpNum=" << actor.state.mpNum
+                                     << " cell=" << actor.state.cellId
+                                     << " renderedCell=" << renderedPositionCell
+                                     << " snapshots=" << actor.snapshots.size();
+                }
+                actor.boundActor = world->moveObject(actor.boundActor,
+                    osg::Vec3f(pos.pos[0], pos.pos[1], pos.pos[2]));
+            }
             world->rotateObject(actor.boundActor, osg::Vec3f(pos.rot[0], pos.rot[1], pos.rot[2]));
         }
 

@@ -263,9 +263,12 @@ void Main::frame(float dt)
 {
     if (!mClient) return;
 
+    const auto frameStarted = std::chrono::steady_clock::now();
     mClient->update();
+    const auto clientUpdateFinished = std::chrono::steady_clock::now();
     if (mNetworkBridge && mClient->isConnected())
         mNetworkBridge->drainOutgoing(*mClient);
+    const auto bridgeFinished = std::chrono::steady_clock::now();
 
     // Handle unexpected server disconnect - return player to main menu.
     if (mUnexpectedDisconnect)
@@ -280,17 +283,48 @@ void Main::frame(float dt)
     if (!mClient->isConnected()) return;
 
     tryAutoEnterWorld();
+    const auto autoEnterFinished = std::chrono::steady_clock::now();
     if (!mClient->isConnected()) return;
 
     mPlayerSync->update(dt);
+    const auto playerSyncFinished = std::chrono::steady_clock::now();
     mPlayerList->updateAll(dt);
+    const auto playerListFinished = std::chrono::steady_clock::now();
     mActorSync->update(dt);
+    const auto actorSyncFinished = std::chrono::steady_clock::now();
     mObjectSync->update(dt);
     mWorldObjectSync->update(dt);
     mWorldStateSync->update(dt);
+    const auto worldSyncFinished = std::chrono::steady_clock::now();
 
     mChatWindow->update(dt);
     pollChargenAppearance(dt);
+    const auto frameFinished = std::chrono::steady_clock::now();
+
+    const double totalMs = std::chrono::duration<double, std::milli>(
+        frameFinished - frameStarted).count();
+    if (totalMs >= 16.0)
+    {
+        Log(totalMs >= 50.0 ? Debug::Warning : Debug::Info)
+            << "[MPDIAG] Multiplayer frame phases"
+            << " totalMs=" << totalMs
+            << " clientUpdateMs=" << std::chrono::duration<double, std::milli>(
+                clientUpdateFinished - frameStarted).count()
+            << " bridgeMs=" << std::chrono::duration<double, std::milli>(
+                bridgeFinished - clientUpdateFinished).count()
+            << " autoEnterMs=" << std::chrono::duration<double, std::milli>(
+                autoEnterFinished - bridgeFinished).count()
+            << " playerSyncMs=" << std::chrono::duration<double, std::milli>(
+                playerSyncFinished - autoEnterFinished).count()
+            << " playerListMs=" << std::chrono::duration<double, std::milli>(
+                playerListFinished - playerSyncFinished).count()
+            << " actorSyncMs=" << std::chrono::duration<double, std::milli>(
+                actorSyncFinished - playerListFinished).count()
+            << " worldSyncMs=" << std::chrono::duration<double, std::milli>(
+                worldSyncFinished - actorSyncFinished).count()
+            << " chatAndChargenMs=" << std::chrono::duration<double, std::milli>(
+                frameFinished - worldSyncFinished).count();
+    }
 
     // -- Chargen completion watcher ------------------------------------------
     // Fires once when the player is in a cell after chargen dialogs are shown.
