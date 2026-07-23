@@ -1594,6 +1594,31 @@ void LuaServerContext::syncActors(std::vector<LuaActorSnapshot> actors)
     }
 }
 
+void LuaServerContext::upsertActor(LuaActorSnapshot actor)
+{
+    const uint32_t mpNum = actor.actor.mpNum;
+    if (mpNum == 0)
+        return;
+
+    std::lock_guard<std::mutex> lock(mActorsMutex);
+    mActorsByMpNum.insert_or_assign(mpNum, std::move(actor));
+}
+
+void LuaServerContext::removeActor(uint32_t mpNum)
+{
+    if (mpNum == 0)
+        return;
+
+    std::lock_guard<std::mutex> lock(mActorsMutex);
+    mActorsByMpNum.erase(mpNum);
+}
+
+void LuaServerContext::clearActors()
+{
+    std::lock_guard<std::mutex> lock(mActorsMutex);
+    mActorsByMpNum.clear();
+}
+
 void LuaServerContext::syncPlacedObjects(std::vector<PlacedObject> objects)
 {
     std::lock_guard<std::mutex> lock(mPlacedObjectsMutex);

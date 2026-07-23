@@ -1241,7 +1241,7 @@ bool MPServer::teleportPlayer(uint32_t guid, const std::string& cellId, const Po
     client->loadedActorCellsSequence = 0;
 
     const std::string newCell = makeCellKey(client->player.cell);
-    syncLuaSnapshot();
+    syncLuaPlayerSnapshot();
 
     for (const std::string& oldActorCellId : oldActorInterestCells)
     {
@@ -1386,7 +1386,7 @@ bool MPServer::killPlayer(uint32_t guid, const std::string& deathMessage)
         broadcastNameColorMessage(client->name + " " + deathMessage);
     else
         announcePlayerDeath(*client, pkt);
-    syncLuaSnapshot();
+    syncLuaPlayerSnapshot();
     return true;
 }
 
@@ -1633,7 +1633,8 @@ void MPServer::run()
         mAdminHttpHost = "127.0.0.1";
     }
 
-    syncLuaSnapshot();
+    rebuildLuaActorSnapshot();
+    syncLuaPlayerSnapshot();
     mLua.start();
     mLua.onServerInit();
     startAdminHttpServer();
@@ -1668,7 +1669,8 @@ void MPServer::run()
         processIncomingMessages();
         tick(dt);
         mLua.drainOutbound();
-        syncLuaSnapshot();
+        flushLuaActorChanges();
+        syncLuaPlayerSnapshot();
 
         const auto loopEnd = Clock::now();
         const double loopMs = std::chrono::duration<double, std::milli>(loopEnd - now).count();
@@ -1985,7 +1987,7 @@ void MPServer::onClientDisconnected(HSteamNetConnection conn, const std::string&
     }
     else if (!actorCell.empty())
         refreshIfOwnedByDisconnectedPlayer(actorCell);
-    syncLuaSnapshot();
+    syncLuaPlayerSnapshot();
 }
 
 // ---------------------------------------------------------------------------
@@ -2165,7 +2167,10 @@ void MPServer::refreshActorAuthorityForCell(const std::string& cellId, uint32_t 
         {
             broadcastActorIdentityRemovalForCell(cellId, cellState, removedRecords);
             for (const ActorRegistryRecord& record : removedRecords)
+            {
+                markLuaActorRemoved(record.actor.mpNum);
                 forgetActorNetId(record.actorNetId, record.actor);
+            }
             if (mPlayerDb)
                 scheduleGeneratedDynamicRecordGc("actor_cell_empty");
             Log(Debug::Info) << "[Server] Cleared " << removedRuntimeActors
@@ -4411,7 +4416,7 @@ MPServer::DynamicReferenceCleanupStats MPServer::cleanupDynamicReferences(
     }
 
     if (snapshotDirty)
-        syncLuaSnapshot();
+        syncLuaPlayerSnapshot();
 
     const std::size_t totalRemoved = stats.placedObjects + stats.containers + stats.containerItems
         + stats.doorStates + stats.inventoryItems + stats.equipmentItems;
@@ -5132,7 +5137,7 @@ void MPServer::handleCharacterSelect(ConnectedClient& c, const uint8_t* data, si
     if (mWorld.hasWeather)
         sendTo(c.conn, buildWorldWeatherPacket());
 
-    syncLuaSnapshot();
+    syncLuaPlayerSnapshot();
     mLua.requestGlobalStorageSnapshot(c.guid);
     mLua.onPlayerConnect(c.guid, c.name);
 }
@@ -5310,7 +5315,7 @@ void MPServer::handlePlayerCellChange(ConnectedClient& c, const uint8_t* data, s
         return;
     }
 
-    syncLuaSnapshot();
+    syncLuaPlayerSnapshot();
     mLua.onPlayerCellChange(c.guid, c.name, newCell, oldCell);
 
     if (!oldCell.empty() && oldCell != newCell)
@@ -5429,7 +5434,7 @@ void MPServer::handlePlayerLoadedCells(ConnectedClient& c, const uint8_t* data, 
                         << " added=" << addedCells.size()
                         << " removed=" << removedCells.size()
                         << " seq=" << pkt.sequence;
-    syncLuaSnapshot();
+    syncLuaPlayerSnapshot();
 }
 
 // ---------------------------------------------------------------------------
@@ -5759,7 +5764,7 @@ void MPServer::handlePlayerInventory(ConnectedClient& c, const uint8_t* data, si
         }
     }
 
-    syncLuaSnapshot();
+    syncLuaPlayerSnapshot();
     scheduleGeneratedDynamicRecordGc("player_inventory");
     PacketPlayerInventory authoritative;
     authoritative.setPlayer(&c.player);
@@ -5914,7 +5919,7 @@ void MPServer::handlePlayerStatsDynamic(ConnectedClient& c, const uint8_t* data,
             Log(Debug::Warning) << "[PlayerDB] saveCharacterStats error: " << e.what();
         }
     }
-    syncLuaSnapshot();
+    syncLuaPlayerSnapshot();
     broadcastToAll(std::vector<uint8_t>(data, data + size), c.conn);
 }
 
@@ -5948,7 +5953,7 @@ void MPServer::handlePlayerDeath(ConnectedClient& c, const uint8_t* data, size_t
                      << " killerGuid=" << pkt.killerGuid
                      << " killerRefId='" << pkt.killerRefId << "'";
     announcePlayerDeath(c, pkt);
-    syncLuaSnapshot();
+    syncLuaPlayerSnapshot();
 }
 
 // ---------------------------------------------------------------------------
@@ -5985,7 +5990,7 @@ void MPServer::handlePlayerResurrect(ConnectedClient& c, const uint8_t* data, si
     broadcastToAll(std::vector<uint8_t>(data, data + size), c.conn);
 
     Log(Debug::Info) << "[Server] Relayed PlayerResurrect for " << c.name;
-    syncLuaSnapshot();
+    syncLuaPlayerSnapshot();
 }
 
 // ---------------------------------------------------------------------------
@@ -6467,6 +6472,40 @@ void MPServer::handleActorList(ConnectedClient& c, const uint8_t* data, size_t s
             scheduleGeneratedDynamicRecordGc("actor_list_unlink");
     }
 
+    for (const auto& [actorKey, record] : cellState.actors)
+        markLuaActorDirty(record, incoming.cellId);
+
+    for (const ActorRegistryRecord& previousRecord : previousCellRecords)
+    {
+        const uint32_t mpNum = previousRecord.actor.mpNum;
+        if (mpNum == 0)
+            continue;
+
+        const std::string actorKey = makeActorKey(previousRecord.actor);
+        if (cellState.actors.find(actorKey) != cellState.actors.end())
+            continue;
+
+        const auto locationIt = mWorld.actorLocations.find(actorKey);
+        if (locationIt == mWorld.actorLocations.end())
+        {
+            markLuaActorRemoved(mpNum);
+            continue;
+        }
+
+        const auto trackedCellIt = mWorld.actorCells.find(locationIt->second);
+        if (trackedCellIt == mWorld.actorCells.end())
+        {
+            markLuaActorRemoved(mpNum);
+            continue;
+        }
+
+        const auto trackedActorIt = trackedCellIt->second.actors.find(actorKey);
+        if (trackedActorIt == trackedCellIt->second.actors.end())
+            markLuaActorRemoved(mpNum);
+        else
+            markLuaActorDirty(trackedActorIt->second, trackedCellIt->first);
+    }
+
     for (const std::string& migratedCellId : migratedActorCells)
     {
         auto migratedCellIt = mWorld.actorCells.find(migratedCellId);
@@ -6596,6 +6635,7 @@ void MPServer::handleActorPosition(ConnectedClient& c, const uint8_t* data, size
         stored->lastSnapshotTime = incoming.serverTimestamp;
         ensureActorNetId(*stored, incoming.cellId);
         persistSpawnedActorIfNeeded(*stored, incoming.serverTimestamp, false);
+        markLuaActorDirty(*stored, incoming.cellId);
         filtered.actors.push_back(actor);
     }
 
@@ -7057,6 +7097,7 @@ void MPServer::handleActorPositionV2(ConnectedClient& c, const uint8_t* data, si
             rememberActorLocation(destIt->second.actor, destinationCellId);
             persistSpawnedActorIfNeeded(destIt->second, timestamp, false);
             upsertSpawnedActorDynamicRecordLinkIfNeeded(destIt->second.actor);
+            markLuaActorDirty(destIt->second, destinationCellId);
             if (destinationCellState.authorityGuid == 0)
                 refreshActorAuthorityForCell(destinationCellId, c.guid);
 
@@ -7089,6 +7130,7 @@ void MPServer::handleActorPositionV2(ConnectedClient& c, const uint8_t* data, si
         record->lastSnapshotTime = timestamp;
         ensureActorNetId(*record, cellId);
         persistSpawnedActorIfNeeded(*record, timestamp, false);
+        markLuaActorDirty(*record, cellId);
 
         ActorList& outgoing = updatesByCell[cellId];
         if (outgoing.cellId.empty())
@@ -7344,6 +7386,7 @@ void MPServer::handleActorPresentationV2(ConnectedClient& c, const uint8_t* data
         actor.cellId = cellId;
         record->lastSnapshotTime = timestamp;
         ensureActorNetId(*record, cellId);
+        markLuaActorDirty(*record, cellId);
         if (actor.mpNum != 0 && actor.isDead && !wasDead)
         {
             Log(Debug::Info) << "[Server] ActorPresentationV2 observed spawned death transition"
@@ -7452,6 +7495,7 @@ void MPServer::handleActorAnimFlags(ConnectedClient& c, const uint8_t* data, siz
         stored->actor.animFlags = actor.animFlags;
         stored->lastSnapshotTime = incoming.serverTimestamp;
         persistSpawnedActorIfNeeded(*stored);
+        markLuaActorDirty(*stored, incoming.cellId);
         filtered.actors.push_back(actor);
     }
 
@@ -7508,6 +7552,7 @@ void MPServer::handleActorAnimPlay(ConnectedClient& c, const uint8_t* data, size
         stored->actor.animPlay = actor.animPlay;
         stored->lastSnapshotTime = incoming.serverTimestamp;
         persistSpawnedActorIfNeeded(*stored);
+        markLuaActorDirty(*stored, incoming.cellId);
         filtered.actors.push_back(actor);
     }
 
@@ -7594,6 +7639,7 @@ void MPServer::handleActorAttack(ConnectedClient& c, const uint8_t* data, size_t
         stored->actor.attack = actor.attack;
         stored->lastSnapshotTime = incoming.serverTimestamp;
         persistSpawnedActorIfNeeded(*stored);
+        markLuaActorDirty(*stored, incoming.cellId);
         filtered.actors.push_back(actor);
     }
 
@@ -7759,6 +7805,7 @@ void MPServer::handleActorAttackV2(ConnectedClient& c, const uint8_t* data, size
         record->lastSnapshotTime = timestamp;
         const ActorInstanceId actorNetId = ensureActorNetId(*record, cellId);
         persistSpawnedActorIfNeeded(*record);
+        markLuaActorDirty(*record, cellId);
 
         ActorAttackV2List& outgoing = updatesByCell[cellId];
         if (outgoing.events.empty())
@@ -7886,6 +7933,7 @@ void MPServer::handleActorCast(ConnectedClient& c, const uint8_t* data, size_t s
         stored->actor.cast = actor.cast;
         stored->lastSnapshotTime = incoming.serverTimestamp;
         persistSpawnedActorIfNeeded(*stored);
+        markLuaActorDirty(*stored, incoming.cellId);
         filtered.actors.push_back(actor);
     }
 
@@ -8039,6 +8087,7 @@ void MPServer::handleActorCellChange(ConnectedClient& c, const uint8_t* data, si
         rememberDeadVanillaActor(storedMovedRecord);
         persistSpawnedActorIfNeeded(storedMovedRecord);
         upsertSpawnedActorDynamicRecordLinkIfNeeded(storedMovedRecord.actor);
+        markLuaActorDirty(storedMovedRecord, destinationCellId);
 
         if (storedMovedRecord.actor.mpNum != 0 && storedMovedRecord.actor.isDead && !wasDead)
             sendActorLifecycleEvent("death", storedMovedRecord.actor, storedMovedRecord.persistent);
@@ -8281,6 +8330,7 @@ void MPServer::handleActorDeath(ConnectedClient& c, const uint8_t* data, size_t 
         rememberActorLocation(stored->actor, incoming.cellId);
         persistSpawnedActorIfNeeded(*stored);
         upsertSpawnedActorDynamicRecordLinkIfNeeded(stored->actor);
+        markLuaActorDirty(*stored, incoming.cellId);
         if (stored->actor.mpNum == 0 && stored->actor.isDead)
         {
             Log(Debug::Info) << "[Server] ActorDeath stored vanilla corpse transform"
@@ -8361,6 +8411,7 @@ void MPServer::handleActorEquipment(ConnectedClient& c, const uint8_t* data, siz
         stored->actor.equipment = actor.equipment;
         stored->lastSnapshotTime = incoming.serverTimestamp;
         persistSpawnedActorIfNeeded(*stored);
+        markLuaActorDirty(*stored, incoming.cellId);
         filtered.actors.push_back(actor);
     }
 
@@ -8428,6 +8479,7 @@ void MPServer::handleActorStatsDynamic(ConnectedClient& c, const uint8_t* data, 
         stored->actor.isDead = actor.isDead;
         stored->lastSnapshotTime = incoming.serverTimestamp;
         persistSpawnedActorIfNeeded(*stored);
+        markLuaActorDirty(*stored, incoming.cellId);
         if (wasDead && !stored->actor.isDead)
             forgetDeadVanillaActor(stored->actor, incoming.cellId);
         if (actor.isDead && !wasDead)
@@ -8493,6 +8545,7 @@ void MPServer::handleActorAI(ConnectedClient& c, const uint8_t* data, size_t siz
         updateActorAuthorityLeaseFromAi(
             incoming.cellId, *stored, stored->actor, incoming.serverTimestamp, "ActorAI");
         persistSpawnedActorIfNeeded(*stored);
+        markLuaActorDirty(*stored, incoming.cellId);
         filtered.actors.push_back(actor);
     }
 
@@ -9343,6 +9396,7 @@ bool MPServer::spawnActor(
     }
 
     persistSpawnedActorIfNeeded(registryRecord);
+    markLuaActorDirty(registryRecord, cellId);
 
     ActorList actorList;
     actorList.cellId = cellId;
@@ -9432,6 +9486,7 @@ bool MPServer::removeActor(uint32_t mpNum, const std::string& cellId)
     if (!removed)
         return false;
 
+    markLuaActorRemoved(mpNum);
     broadcastActorIdentityRemovalForCell(resolvedCellId, cellIt->second, removedRecords);
 
     for (const ActorRegistryRecord& record : removedRecords)
@@ -9510,7 +9565,10 @@ bool MPServer::resetCellStateForTesting(const std::string& cellId)
             ensureActorNetId(record, cellId);
             removedRecords.push_back(record);
             if (record.actor.mpNum != 0)
+            {
                 ++runtimeSpawnedActors;
+                markLuaActorRemoved(record.actor.mpNum);
+            }
             else
             {
                 ++runtimeVanillaActors;
@@ -9606,7 +9664,7 @@ bool MPServer::resetCellStateForTesting(const std::string& cellId)
 
     refreshActorAuthorityForCell(cellId);
     sendActorStateToInterestedClients(cellId);
-    syncLuaSnapshot();
+    syncLuaPlayerSnapshot();
 
     Log(Debug::Info) << "[Server] Reset cell state"
                      << " cell=" << cellId
@@ -9788,7 +9846,7 @@ void MPServer::setPlayerNickname(uint32_t guid, const std::string& nickname)
     PacketPlayerBaseInfo pkt;
     pkt.setPlayer(&c->player);
     broadcastToAll(pkt.encode());
-    syncLuaSnapshot();
+    syncLuaPlayerSnapshot();
 
     Log(Debug::Info) << "[Server] " << c->slotName
                      << " nickname set to '" << displayName << "'";
@@ -9849,7 +9907,7 @@ bool MPServer::acceptPlacedObject(PlacedObject& object, ConnectedClient* source)
 }
 
 // ---------------------------------------------------------------------------
-void MPServer::syncLuaSnapshot()
+void MPServer::syncLuaPlayerSnapshot()
 {
     if (!mLua.isLoaded())
         return;
@@ -9886,6 +9944,17 @@ void MPServer::syncLuaSnapshot()
     }
 
     mLua.syncSnapshot(getUptime(), mWorld.gameHour, players);
+}
+
+// ---------------------------------------------------------------------------
+void MPServer::rebuildLuaActorSnapshot()
+{
+    if (!mLua.isLoaded())
+    {
+        mLuaDirtyActors.clear();
+        mLuaRemovedActors.clear();
+        return;
+    }
 
     std::vector<LuaActorSnapshot> actors;
     for (const auto& [cellId, cellState] : mWorld.actorCells)
@@ -9904,6 +9973,70 @@ void MPServer::syncLuaSnapshot()
         }
     }
     mLua.syncActors(std::move(actors));
+    mLuaDirtyActors.clear();
+    mLuaRemovedActors.clear();
+}
+
+// ---------------------------------------------------------------------------
+void MPServer::markLuaActorDirty(const ActorRegistryRecord& record, const std::string& cellId)
+{
+    const uint32_t mpNum = record.actor.mpNum;
+    if (mpNum == 0)
+        return;
+
+    mLuaRemovedActors.erase(mpNum);
+    mLuaDirtyActors.insert_or_assign(mpNum, LuaActorLocation { cellId, makeActorKey(record.actor) });
+}
+
+// ---------------------------------------------------------------------------
+void MPServer::markLuaActorRemoved(uint32_t mpNum)
+{
+    if (mpNum == 0)
+        return;
+
+    mLuaDirtyActors.erase(mpNum);
+    mLuaRemovedActors.insert(mpNum);
+}
+
+// ---------------------------------------------------------------------------
+void MPServer::flushLuaActorChanges()
+{
+    if (!mLua.isLoaded())
+    {
+        mLuaDirtyActors.clear();
+        mLuaRemovedActors.clear();
+        return;
+    }
+
+    for (uint32_t mpNum : mLuaRemovedActors)
+        mLua.removeActor(mpNum);
+
+    for (const auto& [mpNum, location] : mLuaDirtyActors)
+    {
+        const auto cellIt = mWorld.actorCells.find(location.cellId);
+        if (cellIt == mWorld.actorCells.end())
+        {
+            mLua.removeActor(mpNum);
+            continue;
+        }
+
+        const auto actorIt = cellIt->second.actors.find(location.actorKey);
+        if (actorIt == cellIt->second.actors.end() || actorIt->second.actor.mpNum != mpNum)
+        {
+            mLua.removeActor(mpNum);
+            continue;
+        }
+
+        LuaActorSnapshot snapshot;
+        snapshot.actor = actorIt->second.actor;
+        if (snapshot.actor.cellId.empty())
+            snapshot.actor.cellId = location.cellId;
+        snapshot.persistent = actorIt->second.persistent;
+        mLua.upsertActor(std::move(snapshot));
+    }
+
+    mLuaRemovedActors.clear();
+    mLuaDirtyActors.clear();
 }
 
 // ---------------------------------------------------------------------------
@@ -10116,7 +10249,7 @@ bool MPServer::grantInventoryItem(ConnectedClient& c, const std::string& refId, 
         mPlayerDb->saveCharacterInventory(c.dbCharacterId, c.player.inventoryChanges.items);
 
     sendAuthoritativeInventory(c);
-    syncLuaSnapshot();
+    syncLuaPlayerSnapshot();
     scheduleGeneratedDynamicRecordGc("grant_inventory_item");
     return true;
 }

@@ -332,10 +332,16 @@ private:
     // ── Validation ────────────────────────────────────────────────────────
     bool validateMovement(const ConnectedClient& c, const BasePlayer& proposed) const;
 
+    struct ActorRegistryRecord;
+
     // ── Packet builders ───────────────────────────────────────────────────
     std::vector<uint8_t> buildWorldTimePacket()    const;
     std::vector<uint8_t> buildWorldWeatherPacket() const;
-    void syncLuaSnapshot();
+    void syncLuaPlayerSnapshot();
+    void rebuildLuaActorSnapshot();
+    void markLuaActorDirty(const ActorRegistryRecord& record, const std::string& cellId);
+    void markLuaActorRemoved(uint32_t mpNum);
+    void flushLuaActorChanges();
     void syncLuaAuthorityState();
     void sendAuthoritativeInventory(ConnectedClient& c);
     void sendAuthoritativeEquipment(
@@ -353,7 +359,6 @@ private:
     bool reconcileInventoryInstanceIds(ConnectedClient& c, std::vector<Item>& items);
     bool reconcileEquipmentInstanceIds(ConnectedClient& c);
     bool grantInventoryItem(ConnectedClient& c, const std::string& refId, int count);
-    struct ActorRegistryRecord;
     struct CellActorState;
     bool worldMpNumInUse(uint32_t mpNum) const;
     std::optional<uint32_t> reserveWorldMpNum();
@@ -450,6 +455,12 @@ private:
         std::unordered_map<std::string, ActorRegistryRecord> actors;
         std::unordered_set<std::string> resetSuppressedVanillaDeaths;
         std::unordered_map<std::string, uint64_t> staleLiveVanillaDeathResendMs;
+    };
+
+    struct LuaActorLocation
+    {
+        std::string cellId;
+        std::string actorKey;
     };
 
     // ── State ─────────────────────────────────────────────────────────────
@@ -581,6 +592,8 @@ private:
 
     // ── Scripting ─────────────────────────────────────────────────────────
     LuaServerContext mLua { this };
+    std::unordered_map<uint32_t, LuaActorLocation> mLuaDirtyActors;
+    std::unordered_set<uint32_t> mLuaRemovedActors;
 
     // ── Master server ──────────────────────────────────────────────────────
     // Populated from server.cfg / command-line before run() is called.

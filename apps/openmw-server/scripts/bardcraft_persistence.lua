@@ -668,6 +668,7 @@ local function flattenBardcraftPerformancePayload(guid, source, data, event)
         scheduledBandStart = relayField(event, "scheduledBandStart") == true,
         joinStartMusicTime = relayField(event, "joinStartMusicTime"),
         joinStartServerTime = relayField(event, "joinStartServerTime"),
+        audioEnabled = relayField(event, "audioEnabled") ~= false,
         perfType = relayField(event, "perfType"),
         songTitle = song.title,
         songId = song.id,
@@ -2026,6 +2027,29 @@ local function sanitizedGuiNpcPerformers(value)
     return performers
 end
 
+local function sanitizedGuiPlayerPerformers(value)
+    local performers = {}
+    if type(value) ~= "table" then
+        return performers
+    end
+    for _, requested in ipairs(value) do
+        if #performers >= 32 then
+            break
+        end
+        if type(requested) == "table" then
+            local memberGuid = tonumber(requested.memberGuid or requested.guid)
+            local part = normalizedPartIndex(requested.part or requested.partIndex)
+            if memberGuid and memberGuid > 0 and part and part <= 1024 then
+                table.insert(performers, {
+                    memberGuid = math.floor(memberGuid),
+                    part = part,
+                })
+            end
+        end
+    end
+    return performers
+end
+
 local function firstAvailableSuggestedPart(occupied, preferred)
     local candidate = normalizedPartIndex(preferred) or 1
     while occupied[candidate] do
@@ -2204,11 +2228,13 @@ local function sameCellBandMembers(leader, band)
 end
 
 local function sendScheduledBandLocalPlay(target, selector, requestedPart, occupied, startServerTime, now, leader,
-    bandSessionId, role, perfType, npcPartSlotOffset, npcPartSlotStride, guiNpcPerformers, npcPerformanceMode)
+    bandSessionId, role, perfType, npcPartSlotOffset, npcPartSlotStride, guiNpcPerformers, npcPerformanceMode,
+    conductorOnly)
     local delaySeconds = math.max(0, (tonumber(startServerTime) or now) - now)
     mp.send(tonumber(target.guid), "BC_BardcraftStartLocalPerformance", {
         selector = selector,
         requestedPartIndex = requestedPart,
+        conductorOnly = conductorOnly == true,
         occupiedPartIndices = occupiedPartList(occupied),
         serverTime = now,
         startServerTime = startServerTime,
@@ -2228,7 +2254,8 @@ local function sendScheduledBandLocalPlay(target, selector, requestedPart, occup
     })
 end
 
-local function trySendScheduledBandLocalPlay(player, selector, requestedPart, perfType, reason, guiNpcPerformers)
+local function trySendScheduledBandLocalPlay(player, selector, requestedPart, perfType, reason, guiNpcPerformers,
+    guiPlayerPerformers, conductorOnly)
     local leaderGuid = tonumber(player and player.guid)
     local band = leaderGuid and activeBandForLeader(leaderGuid, reason or "command-play") or nil
     if (not band or tableCount(band.members) == 0) and leaderGuid and isBandDisbanded(leaderGuid) then
@@ -2266,59 +2293,110 @@ local function trySendScheduledBandLocalPlay(player, selector, requestedPart, pe
         leaderGuid = leaderGuid,
         perfType = perfType,
     }
-    local hasGuiNpcPerformers = type(guiNpcPerformers) == "table"
-    guiNpcPerformers = sanitizedGuiNpcPerformers(guiNpcPerformers)
-    local npcPerformanceMode = npcPerformanceModeForGuid(leaderGuid)
-    local occupied = {}
-    local leaderPart = normalizedPartIndex(requestedPart) or 1
-    occupied[leaderPart] = true
-    local participants = {
-        {
-            player = player,
-            part = requestedPart or leaderPart,
-            role = "leader",
-        },
-    }
 
-    for index, member in ipairs(members) do
-        local memberPart = firstAvailableSuggestedPart(occupied, 1)
-        occupied[memberPart] = true
-        pendingScheduledBandStartsByLeaderGuid[tonumber(member.guid)] = {
-            bandSessionId = bandSessionId,
-            startServerTime = startServerTime,
-            expiresAt = startServerTime + 8.0,
-            selector = selector,
-            role = "member",
-            leaderGuid = leaderGuid,
-            perfType = perfType,
-        }
+    local hasGuiNpcPerformers = type(guiNpcPerformers) == "table"
+    local hasGuiPlayerPerformers = type(guiPlayerPerformers) == "table"
+    guiNpcPerformers = sanitizedGuiNpcPerformers(guiNpcPerformers)
+    guiPlayerPerformers = sanitizedGuiPlayerPerformers(guiPlayerPerformers)
+    local npcPerformanceMode = npcPerformanceModeForGuid(leaderGuid)
+
+    local requestedMemberParts = {}
+    for _, performer in ipairs(guiPlayerPerformers) do
+        local memberGuid = tonumber(performer.memberGuid)
+        if memberGuid and band.members[memberGuid] and requestedMemberParts[memberGuid] == nil then
+            requestedMemberParts[memberGuid] = performer.part
+        end
+    end
+
+    conductorOnly = conductorOnly == true
+    local occupied = {}
+    local leaderPart = normalizedPartIndex(requestedPart)
+    if not conductorOnly and not leaderPart then
+        leaderPart = 1
+    end
+    if leaderPart then
+        occupied[leaderPart] = true
+    end
+
+    local participants = {}
+    local leaderNeedsLocalStart = leaderPart ~= nil or #guiNpcPerformers > 0 or not hasGuiNpcPerformers
+    if leaderNeedsLocalStart then
         table.insert(participants, {
-            player = member.player,
-            part = memberPart,
-            role = "member",
+            player = player,
+            part = leaderPart,
+            role = "leader",
+            conductorOnly = conductorOnly,
         })
-        member.player:sendMessage(string.format(
-            "[Bardcraft] Band performance scheduled by %s.",
-            playerDisplayName(player)))
+    end
+
+    local appliedGuiPlayerAssignments = 0
+    local scheduledMemberCount = 0
+    for _, member in ipairs(members) do
+        local preferredPart = normalizedPartIndex(requestedMemberParts[tonumber(member.guid)])
+        local memberPart = nil
+        if preferredPart then
+            -- GUI assignments are authoritative, including intentional shared
+            -- parts. Automatic assignments still prefer unused parts.
+            memberPart = preferredPart
+            appliedGuiPlayerAssignments = appliedGuiPlayerAssignments + 1
+            if occupied[memberPart] then
+                mp.log(string.format(
+                    "[bardcraft] gui player shared-part assignment accepted leader=%s member=%s part=%s",
+                    tostring(leaderGuid),
+                    tostring(member.guid),
+                    tostring(memberPart)))
+            end
+        elseif not hasGuiPlayerPerformers then
+            memberPart = firstAvailableSuggestedPart(occupied, 1)
+        else
+            mp.log(string.format(
+                "[bardcraft] gui player left unassigned leader=%s member=%s conductorOnly=%s",
+                tostring(leaderGuid),
+                tostring(member.guid),
+                tostring(conductorOnly)))
+        end
+
+        if memberPart then
+            occupied[memberPart] = true
+            pendingScheduledBandStartsByLeaderGuid[tonumber(member.guid)] = {
+                bandSessionId = bandSessionId,
+                startServerTime = startServerTime,
+                expiresAt = startServerTime + 8.0,
+                selector = selector,
+                role = "member",
+                leaderGuid = leaderGuid,
+                perfType = perfType,
+            }
+            table.insert(participants, {
+                player = member.player,
+                part = memberPart,
+                role = "member",
+                conductorOnly = false,
+            })
+            scheduledMemberCount = scheduledMemberCount + 1
+            member.player:sendMessage(string.format(
+                "[Bardcraft] Band performance scheduled by %s.",
+                playerDisplayName(player)))
+        end
     end
 
     local scheduledGuiNpcPerformers = {}
-    local sharedPlayerPartCount = 0
+    local sharedNpcAssignments = 0
+    local assignedNpcParts = {}
     for _, performer in ipairs(guiNpcPerformers) do
-        -- Conductor supports multiple performers per MIDI part. Preserve the
-        -- explicit GUI assignment even when a player is already using that
-        -- part; dropping it made instrument reassignment appear ineffective in
-        -- multiplayer bands and made two-part songs unable to use any NPCs.
-        table.insert(scheduledGuiNpcPerformers, performer)
-        if occupied[performer.part] then
-            sharedPlayerPartCount = sharedPlayerPartCount + 1
+        local sharesExistingPart = occupied[performer.part] == true
+            or assignedNpcParts[performer.part] == true
+        if sharesExistingPart then
+            sharedNpcAssignments = sharedNpcAssignments + 1
             mp.log(string.format(
-                "[bardcraft] gui npc assignment shares player part leader=%s actorMpNum=%s actorId=%s part=%s",
+                "[bardcraft] gui npc shared-part assignment accepted leader=%s actorMpNum=%s actorId=%s part=%s",
                 tostring(leaderGuid),
                 tostring(performer.actorMpNum),
                 tostring(performer.actorId),
                 tostring(performer.part)))
         end
+        table.insert(scheduledGuiNpcPerformers, performer)
+        assignedNpcParts[performer.part] = true
     end
 
     local participantCount = #participants
@@ -2347,26 +2425,33 @@ local function trySendScheduledBandLocalPlay(player, selector, requestedPart, pe
             npcOwnerIndexByGuid[participantGuid] or index,
             npcOwnerCount > 0 and npcOwnerCount or participantCount,
             participant.role == "leader" and hasGuiNpcPerformers and scheduledGuiNpcPerformers or nil,
-            npcPerformanceMode)
+            npcPerformanceMode,
+            participant.conductorOnly == true)
     end
     player:sendMessage(string.format(
-        "[Bardcraft] Band performance scheduled in %.1fs for %d member(s): %s",
+        "[Bardcraft] Band performance scheduled in %.1fs for %d assigned player member(s): %s",
         BAND_SCHEDULED_START_LEAD_SECONDS,
-        #members,
+        scheduledMemberCount,
         selector))
     mp.log(string.format(
-        "[bardcraft] band scheduled start leader=%s name=%s selector=%s requestedPart=%s members=%d npcAssignments=%s npcPolicy=%s npcOwners=%d npcRequested=%d npcScheduled=%d npcSharedPlayerParts=%d startServerTime=%.3f delay=%.3f bandSession=%s",
+        "[bardcraft] band scheduled start leader=%s name=%s selector=%s requestedPart=%s conductorOnly=%s leaderLocalStart=%s membersAvailable=%d membersScheduled=%d playerAssignments=%s playerRequested=%d playerApplied=%d npcAssignments=%s npcPolicy=%s npcOwners=%d npcRequested=%d npcScheduled=%d npcSharedAssignments=%d startServerTime=%.3f delay=%.3f bandSession=%s",
         tostring(player.guid),
         tostring(player.name),
         tostring(selector),
         tostring(requestedPart),
+        tostring(conductorOnly),
+        tostring(leaderNeedsLocalStart),
         #members,
+        scheduledMemberCount,
+        tostring(hasGuiPlayerPerformers and "gui" or "auto"),
+        #guiPlayerPerformers,
+        appliedGuiPlayerAssignments,
         tostring(hasGuiNpcPerformers and "gui" or "auto"),
         npcPerformanceMode,
         npcOwnerCount,
         #guiNpcPerformers,
         #scheduledGuiNpcPerformers,
-        sharedPlayerPartCount,
+        sharedNpcAssignments,
         startServerTime,
         BAND_SCHEDULED_START_LEAD_SECONDS,
         tostring(bandSessionId)))
@@ -2531,6 +2616,7 @@ local function sendPendingNpcBandMemberProvision(requestId, pending, actorMpNum,
                 ownerGuid = ownerGuid,
                 ownerName = pending.ownerName,
                 isOwner = targetGuid == ownerGuid,
+                following = pending.following ~= false,
                 enableTestWaterWalking = TEST_WATERWALK_ENABLED,
                 reason = reason or "provision",
             })
@@ -2648,6 +2734,7 @@ local function spawnNpcBandMember(player, requestedRecordId)
         recordId = recordId,
         cell = cell,
         position = spawnPosition,
+        following = true,
         createdAt = serverUptime(),
     }
 
@@ -2698,6 +2785,13 @@ local function recordNpcBandMemberProvision(guid, data)
     record.provisionGuid = tonumber(guid)
     record.provisionedAt = serverUptime()
     record.ownerName = record.ownerName or (pending and pending.ownerName)
+    if data.following ~= nil then
+        record.following = data.following ~= false
+    elseif pending and pending.following ~= nil then
+        record.following = pending.following ~= false
+    elseif record.following == nil then
+        record.following = true
+    end
     record.provisionedGuids = record.provisionedGuids or {}
     if guid then
         record.provisionedGuids[tonumber(guid)] = true
@@ -2747,6 +2841,7 @@ local function sendNpcBandMemberProvision(target, ownerGuid, record, reason, all
         ownerGuid = tonumber(ownerGuid),
         ownerName = record.ownerName or playerDisplayName(owner),
         isOwner = targetGuid == tonumber(ownerGuid),
+        following = record.following ~= false,
         enableTestWaterWalking = TEST_WATERWALK_ENABLED,
         reason = reason,
         preprovision = adjacentPreprovision and not cellLoaded,
@@ -2824,6 +2919,48 @@ local function updateNpcBandMemberCell(guid, data)
             return
         end
     end
+end
+
+local function updateNpcBandMemberFollowState(guid, data)
+    local ownerGuid = tonumber(guid)
+    local actorMpNum = data and tonumber(data.actorMpNum) or nil
+    if not ownerGuid or not actorMpNum or actorMpNum <= 0 then
+        return false
+    end
+
+    local records = npcBandMembersByOwnerGuid[ownerGuid]
+    local record = records and records[actorMpNum] or nil
+    if not record then
+        mp.log(string.format(
+            "[bardcraft] rejected npc follow state owner=%s actorMpNum=%s reason=not-owned",
+            tostring(ownerGuid), tostring(actorMpNum)))
+        return false
+    end
+
+    local following = data.following ~= false
+    record.following = following
+    local payload = {
+        ownerGuid = ownerGuid,
+        actorMpNum = actorMpNum,
+        following = following,
+        reason = data.reason or "owner-update",
+    }
+    local sent = 0
+    for _, target in ipairs(mp.getPlayers()) do
+        local targetGuid = tonumber(target.guid)
+        if targetGuid then
+            mp.send(targetGuid, "BC_BardcraftNpcFollowState", payload)
+            sent = sent + 1
+        end
+    end
+    mp.log(string.format(
+        "[bardcraft] npc follow state owner=%s actorMpNum=%s following=%s sent=%d reason=%s",
+        tostring(ownerGuid),
+        tostring(actorMpNum),
+        tostring(following),
+        sent,
+        tostring(payload.reason)))
+    return true
 end
 
 local function stopNpcBandMemberSessions(ownerGuid, actorMpNum, reason)
@@ -4717,6 +4854,10 @@ M.eventHandlers = {
         updateNpcBandMemberCell(senderGuid(data), data)
     end,
 
+    BC_BardcraftNpcFollowState = function(data)
+        updateNpcBandMemberFollowState(senderGuid(data), data)
+    end,
+
     BC_RequestBardcraftServerSongs = function(data)
         local guid = senderGuid(data)
         if not guid then
@@ -4860,6 +5001,13 @@ M.eventHandlers = {
         end
     end,
 
+    BC_RequestBardcraftBandState = function(data)
+        local guid = senderGuid(data)
+        if guid then
+            sendBandStateToGuid(guid, data and data.reason or "client-request")
+        end
+    end,
+
     BC_RequestBardcraftPerformanceAutoJoin = function(data)
         local guid = senderGuid(data)
         local player = guid and mp.getPlayer(guid) or nil
@@ -4876,7 +5024,9 @@ M.eventHandlers = {
         local player = guid and mp.getPlayer(guid) or nil
         local selector = data and (data.selector or data.songId or data.songSourceFile or data.songTitle)
         local requestedPart = data and (data.requestedPartIndex or data.partIndex or data.part)
+        local conductorOnly = data and data.conductorOnly == true
         local guiNpcPerformers = sanitizedGuiNpcPerformers(data and data.guiNpcPerformers)
+        local guiPlayerPerformers = sanitizedGuiPlayerPerformers(data and data.guiPlayerPerformers)
         if not player or not selector or tostring(selector) == "" then
             if guid then
                 mp.send(guid, "BC_BardcraftBandPerformanceStartRejected", {
@@ -4891,7 +5041,8 @@ M.eventHandlers = {
         end
 
         if trySendScheduledBandLocalPlay(
-            player, tostring(selector), requestedPart, data and data.perfType, "ui-request", guiNpcPerformers)
+            player, tostring(selector), requestedPart, data and data.perfType, "ui-request", guiNpcPerformers,
+            guiPlayerPerformers, conductorOnly)
         then
             return
         end
@@ -4899,6 +5050,7 @@ M.eventHandlers = {
         mp.send(guid, "BC_BardcraftStartLocalPerformance", {
             selector = selector,
             requestedPartIndex = requestedPart,
+            conductorOnly = conductorOnly,
             perfType = data and data.perfType,
             includeNpcBandMembers = true,
             npcPerformanceMode = npcPerformanceModeForGuid(guid),
@@ -4906,11 +5058,12 @@ M.eventHandlers = {
             reason = isBandDisbanded(guid) and "ui-solo-after-disband" or "ui-solo",
         })
         mp.log(string.format(
-            "[bardcraft] ui performance start routed solo guid=%s name=%s selector=%s part=%s npcPerformers=%d npcPolicy=%s reason=%s",
+            "[bardcraft] ui performance start routed solo guid=%s name=%s selector=%s part=%s conductorOnly=%s npcPerformers=%d npcPolicy=%s reason=%s",
             tostring(guid),
             tostring(player.name),
             tostring(selector),
             tostring(requestedPart),
+            tostring(conductorOnly),
             #guiNpcPerformers,
             npcPerformanceModeForGuid(guid),
             isBandDisbanded(guid) and "disbanded" or "no-active-band"))
@@ -4983,6 +5136,33 @@ M.eventHandlers = {
             return
         end
 
+        local selectedPart = normalizedPartIndex(data and data.partIndex or request.requestedPart)
+        local occupiedParts = collectOccupiedPartIndices(session, serverUptime())
+        local selectedPartOccupied = false
+        for _, occupiedPart in ipairs(occupiedParts) do
+            if normalizedPartIndex(occupiedPart) == selectedPart then
+                selectedPartOccupied = true
+                break
+            end
+        end
+        if not selectedPart or selectedPartOccupied then
+            pendingJoinRequests[tostring(joinRequestKey)] = nil
+            local player = mp.getPlayer(guid)
+            if player then
+                player:sendMessage(selectedPartOccupied
+                    and "[Bardcraft] That instrument part is already occupied. Choose an unoccupied part."
+                    or "[Bardcraft] No unoccupied playable instrument part is available.")
+            end
+            mp.log(string.format(
+                "[bardcraft] join ready rejected guid=%s session=%s part=%s reason=%s occupied=%d",
+                tostring(guid),
+                tostring(session.key),
+                tostring(selectedPart),
+                selectedPartOccupied and "part-occupied" or "missing-part",
+                #occupiedParts))
+            return
+        end
+
         local now = serverUptime()
         local start = computeFutureJoinStart(session, now)
 
@@ -5045,17 +5225,30 @@ M.eventHandlers = {
         childRelayPayload.delaySeconds = start.delaySeconds
         childRelayPayload.sourceGuid = tonumber(guid)
         childRelayPayload.sourceName = mp.getPlayer(guid) and mp.getPlayer(guid).name or nil
+        -- currentSessionPayload() describes the performance being joined, so it
+        -- carries the parent actor's identity. A child relay must instead identify
+        -- the joining player or receivers will route the new instrument into the
+        -- parent's NPC script (for example replacing Fargoth's lute with Ass's
+        -- flute and leaving Ass visually idle).
         childRelayPayload.actorId = data.actorId or "@0x1"
+        childRelayPayload.actorMpNum = tonumber(data.actorMpNum)
+        childRelayPayload.actorRecordId = data.actorRecordId
+        childRelayPayload.actorIsPlayer = true
+        childRelayPayload.actorCell = playerCellKey(mp.getPlayer(guid)) or session.cell
         childRelayPayload.instrument = data.partInstrument or data.instrument
         childRelayPayload.partIndex = data.partIndex
         childRelayPayload.partInstrument = data.partInstrument or data.instrument
         childRelayPayload.item = data.item
         childRelayPayload.sourceCharacterId = senderCharacterId(data)
         mp.log(string.format(
-            "[bardcraft] join child relay fields guid=%s child=%s parent=%s partIndex=%s instrument=%s partInstrument=%s item=%s",
+            "[bardcraft] join child relay fields guid=%s child=%s parent=%s actorId=%s actorMpNum=%s actorRecordId=%s actorIsPlayer=%s partIndex=%s instrument=%s partInstrument=%s item=%s",
             tostring(guid),
             tostring(childRelayPayload.sessionKey),
             tostring(childRelayPayload.joinedSessionKey),
+            tostring(childRelayPayload.actorId),
+            tostring(childRelayPayload.actorMpNum),
+            tostring(childRelayPayload.actorRecordId),
+            tostring(childRelayPayload.actorIsPlayer == true),
             tostring(childRelayPayload.partIndex),
             tostring(childRelayPayload.instrument),
             tostring(childRelayPayload.partInstrument),
@@ -5067,7 +5260,10 @@ M.eventHandlers = {
             sourceCharacterId = senderCharacterId(data),
             sourceName = mp.getPlayer(guid) and mp.getPlayer(guid).name or nil,
             actorId = childRelayPayload.actorId,
-            cell = session.cell,
+            actorMpNum = childRelayPayload.actorMpNum,
+            actorRecordId = childRelayPayload.actorRecordId,
+            actorIsPlayer = true,
+            cell = childRelayPayload.actorCell or session.cell,
             parentSessionKey = session.key,
             startMusicTime = start.startMusicTime,
             serverStartTime = start.startServerTime,

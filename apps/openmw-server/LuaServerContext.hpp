@@ -217,6 +217,9 @@ public:
     std::optional<std::string> getPlayerData(uint32_t guid, const std::string& key) const;
     void clearPlayerData(uint32_t guid);
     void syncActors(std::vector<LuaActorSnapshot> actors);
+    void upsertActor(LuaActorSnapshot actor);
+    void removeActor(uint32_t mpNum);
+    void clearActors();
     void syncPlacedObjects(std::vector<PlacedObject> objects);
     void upsertPlacedObject(PlacedObject object);
     void removePlacedObject(uint32_t mpNum);
