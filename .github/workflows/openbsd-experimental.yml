@@ -22,7 +22,7 @@ jobs:
         with:
           submodules: recursive
 
-      - name: Build core client on OpenBSD 7.9
+      - name: Build multiplayer client and server on OpenBSD 7.9
         uses: vmactions/openbsd-vm@v1.4.5
         with:
           release: "7.9"
@@ -78,4 +78,6 @@ jobs:
               -D BUILD_OPENMW_TESTS=OFF \
               -D BUILD_OPENCS_TESTS=OFF
 
-            cmake --build build-openbsd --target GameNetworkingSockets_s --parallel 2
+            cmake --build build-openbsd --target openmw openmw-server --parallel 2
+            ./build-openbsd/openmw --version
+            ./build-openbsd/openmw-server --help >/dev/null
