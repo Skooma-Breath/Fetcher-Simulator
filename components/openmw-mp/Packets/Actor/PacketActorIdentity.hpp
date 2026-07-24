@@ -36,12 +36,13 @@ namespace mwmp
             for (const auto& record : mIdentityList->actors)
             {
                 ws.write(record.actorNetId);
-                ws.write(record.persistent);
-                ws.write(record.serverSpawned);
-                ws.write(record.removed);
-                ws.write(record.baselineReset);
-                ws.write(record.teleport);
-                ws.write(record.migrationGeneration);
+                    ws.write(record.persistent);
+                    ws.write(record.serverSpawned);
+                    ws.write(record.removed);
+                    ws.write(record.baselineReset);
+                    ws.write(record.teleport);
+                    ws.write(record.migrationGeneration);
+                    ws.write(static_cast<uint8_t>(record.removalReason));
 
                 const BaseActor& actor = record.actor;
                 packActorIdentity(ws, actor);
@@ -79,12 +80,15 @@ namespace mwmp
             for (auto& record : mIdentityList->actors)
             {
                 rs.read(record.actorNetId);
-                rs.read(record.persistent);
-                rs.read(record.serverSpawned);
-                rs.read(record.removed);
-                rs.read(record.baselineReset);
-                rs.read(record.teleport);
-                rs.read(record.migrationGeneration);
+                    rs.read(record.persistent);
+                    rs.read(record.serverSpawned);
+                    rs.read(record.removed);
+                    rs.read(record.baselineReset);
+                    rs.read(record.teleport);
+                    rs.read(record.migrationGeneration);
+                    uint8_t rawRemovalReason = 0;
+                    rs.read(rawRemovalReason);
+                    record.removalReason = static_cast<ActorRemovalReason>(rawRemovalReason);
 
                 BaseActor& actor = record.actor;
                 unpackActorIdentity(rs, actor);

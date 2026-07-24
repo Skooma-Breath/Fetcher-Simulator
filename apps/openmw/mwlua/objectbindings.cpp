@@ -28,6 +28,8 @@
 #ifdef BUILD_MULTIPLAYER
 #include "../mwmp/Main.hpp"
 #include "../mwmp/sync/ActorSync.hpp"
+#include "../mwmp/sync/InventoryIdentity.hpp"
+#include "../mwmp/sync/WorldObjectSync.hpp"
 #endif
 
 #include "luaevents.hpp"
@@ -164,6 +166,100 @@ namespace MWLua
                 world->enable(newPtr);
             MWBase::Environment::get().getLuaManager()->objectTeleported(newPtr);
         }
+
+#ifdef BUILD_MULTIPLAYER
+        bool isLocalPlayerInventoryOwner(const MWWorld::Ptr& owner)
+        {
+            return mwmp::Main::isConnected() && !owner.isEmpty()
+                && owner == MWBase::Environment::get().getWorld()->getPlayerPtr();
+        }
+
+        std::string multiplayerCellId(const MWWorld::Ptr& ptr);
+
+        void notifyLocalPlayerDropped(const MWWorld::Ptr& ptr)
+        {
+            if (!mwmp::Main::isConnected() || ptr.isEmpty() || !ptr.isInCell())
+                return;
+
+            const ESM::RefId script = ptr.getClass().getScript(ptr);
+            if (!script.empty())
+                ptr.getRefData().getLocals().setVarByInt(script, "onpcdrop", 1);
+
+            const std::string cellId = multiplayerCellId(ptr);
+            if (cellId.empty())
+                return;
+
+            mwmp::Position position{};
+            const ESM::Position& source = ptr.getRefData().getPosition();
+            for (int i = 0; i < 3; ++i)
+            {
+                position.pos[i] = source.pos[i];
+                position.rot[i] = source.rot[i];
+            }
+
+            mwmp::Main::get().getWorldObjectSync().onLocalObjectPlaced(
+                ptr,
+                ptr.getCellRef().getRefId().serializeText(),
+                ptr.getCellRef().getCount(),
+                position,
+                cellId);
+            mwmp::forgetInventoryInstanceAlias(ptr.getCellRef().getRefNum());
+        }
+
+        std::string multiplayerCellId(const MWWorld::Ptr& ptr)
+        {
+            if (ptr.isEmpty() || !ptr.isInCell() || !ptr.getCell() || !ptr.getCell()->getCell())
+                return {};
+
+            const MWWorld::Cell* cell = ptr.getCell()->getCell();
+            if (cell->isExterior())
+                return "EXT:" + std::to_string(cell->getGridX()) + "," + std::to_string(cell->getGridY());
+            return std::string(cell->getNameId());
+        }
+
+        void synchronizeLuaContainerDelta(const MWWorld::Ptr& owner, const MWWorld::Ptr& item,
+            int count, mwmp::ContainerAction action)
+        {
+            if (!mwmp::Main::isConnected() || owner.isEmpty() || item.isEmpty() || count <= 0
+                || !owner.isInCell() || isLocalPlayerInventoryOwner(owner))
+                return;
+
+            const std::string cellId = multiplayerCellId(owner);
+            const std::string ownerRefId = owner.getCellRef().getRefId().serializeText();
+            if (cellId.empty() || ownerRefId.empty())
+                return;
+
+            auto& worldObjectSync = mwmp::Main::get().getWorldObjectSync();
+            const uint32_t ownerMpNum = worldObjectSync.getMpNumForObject(owner);
+            uint32_t ownerRefNum = owner.getCellRef().getRefNum().mIndex;
+            if (ownerMpNum == 0 && owner.getClass().isActor())
+            {
+                const uint32_t canonicalRefNum
+                    = mwmp::Main::get().getActorSync().getActorCanonicalRefNum(owner);
+                if (canonicalRefNum != 0)
+                    ownerRefNum = canonicalRefNum;
+            }
+
+            mwmp::ContainerItem changedItem;
+            changedItem.refId = item.getCellRef().getRefId().serializeText();
+            changedItem.count = count;
+            changedItem.charge = static_cast<int>(item.getCellRef().getCharge());
+            if (changedItem.refId.empty())
+                return;
+
+            worldObjectSync.onLocalContainerChanged(
+                cellId, ownerRefId, ownerRefNum, ownerMpNum, action, { changedItem });
+
+            Log(Debug::Info) << "[MP] Lua container transfer synchronized"
+                                << " action=" << static_cast<int>(action)
+                                << " ownerRefId=" << ownerRefId
+                                << " ownerRefNum=" << ownerRefNum
+                                << " ownerMpNum=" << ownerMpNum
+                                << " itemRefId=" << changedItem.refId
+                                << " count=" << changedItem.count
+                                << " cell=" << cellId;
+        }
+#endif
 
         template <typename ObjT>
         using Cell = std::conditional_t<std::is_same_v<ObjT, LObject>, LCell, GCell>;
@@ -496,6 +592,9 @@ namespace MWLua
                             p.getContainerStore()->remove(p, std::abs(signedCountToRemove), false);
                         else
                         {
+                            // World::deleteObject invokes the multiplayer deletion hook
+                            // before invalidating the Ptr, so do not send a second corpse
+                            // disposal request from this Lua-specific path.
                             MWBase::Environment::get().getWorld()->disable(p);
                             MWBase::Environment::get().getWorld()->deleteObject(p);
                         }
@@ -515,8 +614,18 @@ namespace MWLua
                     MWWorld::CellStore* cell = MWBase::Environment::get().getWorldScene()->getCurrentCell();
 
                     const MWWorld::Ptr& ptr = object.ptr();
+#ifdef BUILD_MULTIPLAYER
+                    const MWWorld::Ptr sourceOwner
+                        = ptr.getContainerStore() ? ptr.getContainerStore()->getPtr() : MWWorld::Ptr{};
+                    const bool detachedFromLocalPlayer = isLocalPlayerInventoryOwner(sourceOwner);
+#endif
                     MWWorld::Ptr splitted = ptr.getClass().copyToCell(ptr, *cell, count);
                     splitted.getRefData().disable();
+
+#ifdef BUILD_MULTIPLAYER
+                    if (detachedFromLocalPlayer)
+                        mwmp::Main::get().getWorldObjectSync().markLocalPlayerInventoryDetached(splitted);
+#endif
 
                     std::optional<DelayedRemovalFn> delayedRemovalFn = removeFn(ptr, count);
                     if (delayedRemovalFn.has_value())
@@ -535,17 +644,81 @@ namespace MWLua
                     destPtr.getClass().getContainerStore(destPtr); // raises an error if there is no container store
                     auditNativeMutation(context, "object.moveInto", ptr, destPtr.toString());
 
+                    const MWWorld::Ptr sourceOwner
+                        = ptr.getContainerStore() ? ptr.getContainerStore()->getPtr() : MWWorld::Ptr{};
+
+                    // Moving an object into the container it already belongs to is
+                    // semantically a no-op. The old delayed implementation removed,
+                    // re-added, and then zeroed the same stack, invalidating Lua/UI
+                    // handles used by drag-and-drop mods.
+                    if (!sourceOwner.isEmpty() && sourceOwner == destPtr)
+                    {
+#ifdef BUILD_MULTIPLAYER
+                        if (mwmp::Main::isConnected())
+                            mwmp::Main::get().getWorldObjectSync().forgetLocalPlayerInventoryDetached(ptr);
+#endif
+                        return;
+                    }
+
+#ifdef BUILD_MULTIPLAYER
+                    bool sourceWasKnownWorldObject = false;
+                    if (mwmp::Main::isConnected())
+                    {
+                        auto& worldObjectSync = mwmp::Main::get().getWorldObjectSync();
+                        sourceWasKnownWorldObject = sourceOwner.isEmpty() && ptr.isInCell()
+                            && worldObjectSync.getMpNumForObject(ptr) != 0;
+
+                        if (!sourceOwner.isEmpty())
+                            synchronizeLuaContainerDelta(
+                                sourceOwner, ptr, count, mwmp::ContainerAction::Remove);
+                        synchronizeLuaContainerDelta(destPtr, ptr, count, mwmp::ContainerAction::Add);
+
+                        // A detached split that is moved back into any inventory is
+                        // no longer a candidate for inventory-to-world placement.
+                        worldObjectSync.forgetLocalPlayerInventoryDetached(ptr);
+                    }
+#endif
+
                     std::optional<DelayedRemovalFn> delayedRemovalFn = removeFn(ptr, count);
-                    context.mLuaManager->addAction([item = object, count, cont = GObject(destPtr), delayedRemovalFn] {
-                        const MWWorld::Ptr& oldPtr = item.ptr();
-                        auto& refData = oldPtr.getCellRef();
-                        refData.setCount(count); // temporarily undo removal to run ContainerStore::add
-                        oldPtr.getRefData().enable();
-                        cont.ptr().getClass().getContainerStore(cont.ptr()).add(oldPtr, count, false);
-                        refData.setCount(0);
-                        if (delayedRemovalFn.has_value())
-                            (*delayedRemovalFn)(oldPtr);
-                    });
+                    context.mLuaManager->addAction(
+                        [item = object, count, cont = GObject(destPtr), delayedRemovalFn
+#ifdef BUILD_MULTIPLAYER
+                            , sourceWasKnownWorldObject
+#endif
+                        ] {
+                            const MWWorld::Ptr& oldPtr = item.ptr();
+                            auto& refData = oldPtr.getCellRef();
+                            refData.setCount(count); // temporarily undo removal to run ContainerStore::add
+                            oldPtr.getRefData().enable();
+                            MWWorld::ContainerStore& destinationStore
+                                = cont.ptr().getClass().getContainerStore(cont.ptr());
+                            MWWorld::ContainerStoreIterator inserted
+                                = destinationStore.add(oldPtr, count, false);
+                            const MWWorld::Ptr insertedPtr
+                                = inserted != destinationStore.end() ? *inserted : MWWorld::Ptr{};
+
+#ifdef BUILD_MULTIPLAYER
+                            if (mwmp::Main::isConnected() && sourceWasKnownWorldObject
+                                && cont.ptr() == MWBase::Environment::get().getWorld()->getPlayerPtr()
+                                && !insertedPtr.isEmpty())
+                            {
+                                mwmp::Main::get().getWorldObjectSync().onLocalObjectTaken(oldPtr, insertedPtr);
+                            }
+#endif
+
+                            refData.setCount(0);
+                            if (delayedRemovalFn.has_value())
+                                (*delayedRemovalFn)(oldPtr);
+
+                            // ContainerStore::add registers the destination stack
+                            // before the source world object is deleted. Register it
+                            // once more after deletion to advance the Ptr registry
+                            // revision and force cached Lua SafePtrs to resolve to the
+                            // completed live stack rather than a zero-count source.
+                            if (!insertedPtr.isEmpty())
+                                MWBase::Environment::get().getWorldModel()->registerPtr(insertedPtr);
+                        },
+                        "MoveIntoContainerAction");
                 };
                 objectT["teleport"] = [removeFn, context](const GObject& object, const sol::object& cellOrName,
                                           const osg::Vec3f& pos, const sol::object& options) {
@@ -568,11 +741,31 @@ namespace MWLua
                             rot = toEulerRotation(rotationArg, ptr.getClass().isActor());
                         placeOnGround = LuaUtil::getValueOrDefault(t["onGround"], placeOnGround);
                     }
+
+#ifdef BUILD_MULTIPLAYER
+                    const MWWorld::Ptr sourceOwner
+                        = ptr.getContainerStore() ? ptr.getContainerStore()->getPtr() : MWWorld::Ptr{};
+                    bool notifyLocalPlayerDrop = isLocalPlayerInventoryOwner(sourceOwner);
+                    if (mwmp::Main::isConnected())
+                    {
+                        auto& worldObjectSync = mwmp::Main::get().getWorldObjectSync();
+                        if (sourceOwner.isEmpty())
+                            notifyLocalPlayerDrop = worldObjectSync.consumeLocalPlayerInventoryDetached(ptr);
+                        else if (!notifyLocalPlayerDrop)
+                            synchronizeLuaContainerDelta(
+                                sourceOwner, ptr, count, mwmp::ContainerAction::Remove);
+                    }
+#endif
+
                     if (ptr.getContainerStore())
                     {
                         DelayedRemovalFn delayedRemovalFn = *removeFn(ptr, count);
                         context.mLuaManager->addAction(
-                            [object, cell, pos, rot, count, delayedRemovalFn, placeOnGround] {
+                            [object, cell, pos, rot, count, delayedRemovalFn, placeOnGround
+#ifdef BUILD_MULTIPLAYER
+                                , notifyLocalPlayerDrop
+#endif
+                            ] {
                                 MWWorld::Ptr oldPtr = object.ptr();
                                 oldPtr.getCellRef().setCount(count);
                                 MWWorld::Ptr newPtr = oldPtr.getClass().moveToCell(oldPtr, *cell);
@@ -580,6 +773,10 @@ namespace MWLua
                                 newPtr.getRefData().disable();
                                 teleportNotPlayer(newPtr, cell, pos, rot, placeOnGround);
                                 delayedRemovalFn(oldPtr);
+#ifdef BUILD_MULTIPLAYER
+                                if (mwmp::Main::isConnected() && notifyLocalPlayerDrop)
+                                    notifyLocalPlayerDropped(newPtr);
+#endif
                             },
                             "TeleportFromContainerAction");
                     }
@@ -590,9 +787,17 @@ namespace MWLua
                     {
                         ptr.getCellRef().setCount(0);
                         context.mLuaManager->addAction(
-                            [object, cell, pos, rot, count, placeOnGround] {
+                            [object, cell, pos, rot, count, placeOnGround
+#ifdef BUILD_MULTIPLAYER
+                                , notifyLocalPlayerDrop
+#endif
+                            ] {
                                 object.ptr().getCellRef().setCount(count);
                                 teleportNotPlayer(object.ptr(), cell, pos, rot, placeOnGround);
+#ifdef BUILD_MULTIPLAYER
+                                if (mwmp::Main::isConnected() && notifyLocalPlayerDrop)
+                                    notifyLocalPlayerDropped(object.ptr());
+#endif
                             },
                             "TeleportAction");
                     }

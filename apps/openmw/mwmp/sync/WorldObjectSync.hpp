@@ -47,9 +47,22 @@ namespace mwmp
         // inventory Ptr. Its mpNum becomes the stack's stable instanceId.
         void onLocalObjectTaken(const MWWorld::Ptr& worldObject, const MWWorld::Ptr& inventoryObject);
 
+        // Lua split() creates a disabled detached world Ptr before a later
+        // moveInto() or teleport(). Preserve whether that detached object came
+        // from the local player's inventory so a later world placement can use
+        // the normal ObjectPlace route without requiring a mod-specific patch.
+        void markLocalPlayerInventoryDetached(const MWWorld::Ptr& ptr);
+        bool consumeLocalPlayerInventoryDetached(const MWWorld::Ptr& ptr);
+        void forgetLocalPlayerInventoryDetached(const MWWorld::Ptr& ptr);
+
         // Called when the local player clicks the vanilla Dispose of Corpse button
-        // for a dead server-spawned actor corpse.
+        // for a dead actor corpse. Sends a dedicated CorpseDispose packet.
         void onLocalCorpseDisposed(const MWWorld::Ptr& ptr);
+
+        // Suppress local-delete hooks during remote/server-applied deletions
+        // so they are not echoed back as disposal requests.
+        void setSuppressLocalDelete(bool suppress) { mSuppressLocalDelete = suppress; }
+        bool isSuppressLocalDelete() const { return mSuppressLocalDelete; }
 
         // Called when the local player opens a container.
         // Sends action=Set with its current contents so the server can take authority.
@@ -111,8 +124,28 @@ namespace mwmp
         std::vector<PendingContainer> mPendingContainer;
         bool mSuppressLocalDelete = false;
         std::unordered_set<uint32_t> mPendingTakenMpNums;
+        std::unordered_set<ESM::RefNum> mLocalPlayerInventoryDetached;
 
         static constexpr float RETRY_RATE = 0.25f;
+    };
+
+    // RAII guard that saves and restores the suppression state so it is
+    // exception-safe and nesting-safe across multiple remote deletions.
+    class ScopedLocalDeleteSuppression
+    {
+    public:
+        explicit ScopedLocalDeleteSuppression(WorldObjectSync& sync)
+            : mSync(sync), mPrevious(sync.isSuppressLocalDelete())
+        {
+            mSync.setSuppressLocalDelete(true);
+        }
+        ~ScopedLocalDeleteSuppression() { mSync.setSuppressLocalDelete(mPrevious); }
+        ScopedLocalDeleteSuppression(const ScopedLocalDeleteSuppression&) = delete;
+        ScopedLocalDeleteSuppression& operator=(const ScopedLocalDeleteSuppression&) = delete;
+
+    private:
+        WorldObjectSync& mSync;
+        bool mPrevious;
     };
 
 } // namespace mwmp

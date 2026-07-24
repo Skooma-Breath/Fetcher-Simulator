@@ -309,6 +309,7 @@ private:
     void handleActorStatsDynamic(ConnectedClient& c, const uint8_t* data, size_t size);
     void handleActorAI          (ConnectedClient& c, const uint8_t* data, size_t size);
     void handleActorCombatRequest(ConnectedClient& c, const uint8_t* data, size_t size);
+    void handleCorpseDispose(ConnectedClient& c, const uint8_t* data, size_t size);
 
 
 // ── Broadcast helpers ─────────────────────────────────────────────────
@@ -485,7 +486,8 @@ private:
     void broadcastActorIdentityRemovalForCell(
         const std::string& cellId,
         CellActorState& cellState,
-        const std::vector<ActorRegistryRecord>& records);
+        const std::vector<ActorRegistryRecord>& records,
+        ActorRemovalReason removalReason = ActorRemovalReason::Generic);
     void upsertSpawnedActorDynamicRecordLinkIfNeeded(const BaseActor& actor);
     void rememberActorLocation(const BaseActor& actor, const std::string& cellId);
     void forgetActorLocation(const BaseActor& actor, const std::string& cellId = {});
@@ -493,6 +495,12 @@ private:
     void forgetDeadVanillaActor(const BaseActor& actor, const std::string& cellId = {});
     const ActorRegistryRecord* findDeadVanillaActor(
         const BaseActor& actor, std::string* cellId = nullptr) const;
+    void rememberDisposedVanillaActor(const BaseActor& actor);
+    const BaseActor* findDisposedVanillaActor(const BaseActor& actor) const;
+    bool disposeCorpseAuthoritative(
+        const ActorRegistryRecord& record,
+        const std::string& canonicalCellId,
+        uint32_t requestingGuid);
     bool rejectStaleAliveVanillaActor(
         const BaseActor& actor,
         const std::string& incomingCellId,
@@ -579,6 +587,7 @@ private:
         std::unordered_map<std::string, ActorInstanceId> actorNetIdsByKey;
         std::unordered_map<ActorInstanceId, std::string> actorKeysByNetId;
         std::unordered_map<std::string, std::unordered_map<std::string, ActorRegistryRecord>> deadVanillaActorCells;
+        std::unordered_map<std::string, BaseActor> disposedVanillaActors;
         uint64_t nextObjectMpNum = 1;
         uint64_t nextActorMpNum = 1;
         uint64_t nextDynamicRecordSequence = 1;

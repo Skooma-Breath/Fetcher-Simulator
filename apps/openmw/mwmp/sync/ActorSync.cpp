@@ -1786,12 +1786,35 @@ namespace mwmp
                         runtime.boundActor, "primary");
 
                     const uint32_t removedMpNum = previousState.mpNum != 0 ? previousState.mpNum : actorState.mpNum;
-                    if ((record.serverSpawned || removedMpNum != 0) && !runtime.boundActor.isEmpty())
+                    const bool isCorpseDisposal = record.removalReason == ActorRemovalReason::CorpseDisposed;
+                    bool shouldPhysicallyDelete = isCorpseDisposal
+                        || record.serverSpawned
+                        || removedMpNum != 0;
+                    if (shouldPhysicallyDelete && !runtime.boundActor.isEmpty())
                     {
                         const std::string boundCellId = cellIdForPtr(runtime.boundActor);
                         const std::string mappingCellId = !boundCellId.empty() ? boundCellId : previousState.cellId;
-                        forgetServerSpawnedActor(mappingCellId, runtime.boundActor, removedMpNum);
-                        MWBase::Environment::get().getWorld()->deleteObject(runtime.boundActor);
+                        // For server-authoritative CorpseDisposed removal, trust the
+                        // authoritative record even if the local death packet has not
+                        // yet arrived due to packet-lane ordering.
+                        if (isCorpseDisposal)
+                        {
+                            MWMechanics::CreatureStats& stats = runtime.boundActor.getClass().getCreatureStats(
+                                runtime.boundActor);
+                            if (!stats.isDead())
+                            {
+                                Log(Debug::Warning) << "[MP] ActorSync: CorpseDisposed removal before local death; deleting anyway"
+                                                    << " actorNetId=" << record.actorNetId
+                                                    << " refId=" << previousState.refId;
+                            }
+                        }
+                        if (shouldPhysicallyDelete)
+                        {
+                            forgetServerSpawnedActor(mappingCellId, runtime.boundActor, removedMpNum);
+                            ScopedLocalDeleteSuppression suppression(
+                                mwmp::Main::get().getWorldObjectSync());
+                            MWBase::Environment::get().getWorld()->deleteObject(runtime.boundActor);
+                        }
                     }
                     if (removedMpNum != 0)
                         forgetLocalMpNumMappings(removedMpNum);
@@ -1829,15 +1852,64 @@ namespace mwmp
                             mappedActor = mappedIt->second;
                     }
 
+                    // For CorpseDisposed, try to resolve vanilla corpses without mpNum.
+                    // Check the reconciled vanilla mapping first, then the active cell.
+                    const bool isCorpseDisposal = record.removalReason == ActorRemovalReason::CorpseDisposed;
+                    if (mappedActor.isEmpty() && isCorpseDisposal && actorState.mpNum == 0
+                        && !actorState.refId.empty())
+                    {
+                        // 1. Check the reconciled vanilla actor map (leveled-list replacements).
+                        auto reconciledIt = mReconciledVanillaActorsByNetId.find(record.actorNetId);
+                        if (reconciledIt != mReconciledVanillaActorsByNetId.end()
+                            && !reconciledIt->second.isEmpty())
+                        {
+                            mappedActor = reconciledIt->second;
+                            mReconciledVanillaActorsByNetId.erase(reconciledIt);
+                        }
+
+                        // 2. Fallback: scan the active cell by canonical refId/refNum.
+                        if (mappedActor.isEmpty())
+                        {
+                            MWBase::World* world = MWBase::Environment::get().getWorld();
+                            if (world)
+                            {
+                                MWWorld::World& worldImp = static_cast<MWWorld::World&>(*world);
+                                if (MWWorld::CellStore* targetCell = findActiveCellById(worldImp, actorState.cellId))
+                                {
+                                    targetCell->forEach([&](MWWorld::Ptr ptr) -> bool
+                                    {
+                                        if (ptr.isEmpty() || !ptr.getClass().isActor())
+                                            return true;
+                                        const uint32_t ptrRefNum = ptr.getCellRef().getRefNum().mIndex;
+                                        if (ptrRefNum == actorState.refNum
+                                            && ptr.getCellRef().getRefId().serializeText() == actorState.refId)
+                                        {
+                                            // Trust the server's authoritative CorpseDisposed removal,
+                                            // even if the local death packet has not arrived yet.
+                                            mappedActor = ptr;
+                                            return false;
+                                        }
+                                        return true;
+                                    });
+                                }
+                            }
+                        }
+                    }
+
                     if (!mappedActor.isEmpty())
                     {
-                        Log(Debug::Info) << "[MP] ActorSync: removing mapped server-spawned actor without primary runtime"
+                        Log(Debug::Info) << "[MP] ActorSync: removing mapped actor without primary runtime"
                                          << " actorNetId=" << record.actorNetId
                                          << " refId=" << actorState.refId
                                          << " mpNum=" << actorState.mpNum
-                                         << " cell=" << actorState.cellId;
+                                         << " cell=" << actorState.cellId
+                                         << " removalReason=" << static_cast<uint8_t>(record.removalReason);
                         forgetServerSpawnedActorPtrMappings(mappedActor, actorState.mpNum);
-                        MWBase::Environment::get().getWorld()->deleteObject(mappedActor);
+                        {
+                            ScopedLocalDeleteSuppression suppression(
+                                mwmp::Main::get().getWorldObjectSync());
+                            MWBase::Environment::get().getWorld()->deleteObject(mappedActor);
+                        }
                         ++removed;
                     }
                     else if (actorState.mpNum != 0)
