@@ -52,9 +52,11 @@ jobs:
           run: |
             set -eux
             export PATH="/usr/local/bin:${PATH}"
+            git config --global --add safe.directory "$GITHUB_WORKSPACE"
 
             cmake -S . -B build-openbsd -G Ninja \
               -D CMAKE_BUILD_TYPE=RelWithDebInfo \
+              -D CMAKE_CXX_SCAN_FOR_MODULES=OFF \
               -D CMAKE_INSTALL_PREFIX=/usr/local \
               -D BUILD_MULTIPLAYER=OFF \
               -D BUILD_DEDICATED_SERVER=OFF \
