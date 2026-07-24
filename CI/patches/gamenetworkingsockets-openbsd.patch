@@ -1,0 +1,140 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 9796b83..64ddf99 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -163,6 +163,8 @@ function(set_target_common_gns_properties TGT)
+ 		target_compile_definitions(${TGT} PUBLIC OSX)
+ 	elseif(CMAKE_SYSTEM_NAME MATCHES FreeBSD)
+ 		target_compile_definitions(${TGT} PUBLIC FREEBSD)
++	elseif(CMAKE_SYSTEM_NAME MATCHES OpenBSD)
++		target_compile_definitions(${TGT} PUBLIC OPENBSD)
+ 	elseif(CMAKE_SYSTEM_NAME MATCHES Windows)
+ 		target_compile_definitions(${TGT} PUBLIC _WINDOWS)
+ 		if(CMAKE_CXX_COMPILER_ID MATCHES "MSVC")
+diff --git a/include/steam/steamclientpublic.h b/include/steam/steamclientpublic.h
+index 2bd6625..f3d6ca7 100644
+--- a/include/steam/steamclientpublic.h
++++ b/include/steam/steamclientpublic.h
+@@ -1157,7 +1157,7 @@ enum ESteamIPv6ConnectivityState
+ // Define compile time assert macros to let us validate the structure sizes.
+ #define VALVE_COMPILE_TIME_ASSERT( pred ) typedef char compile_time_assert_type[(pred) ? 1 : -1];
+ 
+-#if defined(__linux__) || defined(__APPLE__) || defined(__FreeBSD__)
++#if defined(__linux__) || defined(__APPLE__) || defined(__FreeBSD__) || defined(__OpenBSD__)
+ // The 32-bit version of gcc has the alignment requirement for uint64 and double set to
+ // 4 meaning that even with #pragma pack(8) these types will only be four-byte aligned.
+ // The 64-bit version of gcc has the alignment requirement for these types set to
+diff --git a/src/CMakeLists.txt b/src/CMakeLists.txt
+index 8dd9f2a..a66e79c 100644
+--- a/src/CMakeLists.txt
++++ b/src/CMakeLists.txt
+@@ -291,6 +291,8 @@ macro(set_clientlib_target_properties GNS_TARGET)
+ 		#endif()
+ 	elseif(CMAKE_SYSTEM_NAME MATCHES FreeBSD)
+ 
++	elseif(CMAKE_SYSTEM_NAME MATCHES OpenBSD)
++
+ 	elseif(CMAKE_SYSTEM_NAME MATCHES Windows)
+ 		if(CMAKE_CXX_COMPILER_ID MATCHES "MSVC")
+ 			get_target_property(TARGET_TYPE ${GNS_TARGET} TYPE)
+diff --git a/src/public/minbase/minbase_identify.h b/src/public/minbase/minbase_identify.h
+index 98ae166..babf680 100644
+--- a/src/public/minbase/minbase_identify.h
++++ b/src/public/minbase/minbase_identify.h
+@@ -166,6 +166,12 @@
+ #elif defined( LINUX ) || defined( __LINUX__ ) || defined(linux) || defined(__linux) || defined(__linux__)
+ 	#define IsLinux() true
+ 	#define IsPosix() true
++#elif defined(__FreeBSD__)
++	#define IsFreeBSD() true
++	#define IsPosix() true
++#elif defined(__OpenBSD__)
++	#define IsOpenBSD() true
++	#define IsPosix() true
+ #elif defined( _POSIX_VERSION ) || defined( POSIX ) || defined( VALVE_POSIX )
+ 	#define IsPosix() true
+ #else
+@@ -229,6 +235,12 @@
+ #ifndef IsOSX
+ 	#define IsOSX() false
+ #endif
++#ifndef IsFreeBSD
++	#define IsFreeBSD() false
++#endif
++#ifndef IsOpenBSD
++	#define IsOpenBSD() false
++#endif
+ 
+ // Detect ARM
+ #ifndef IsARM
+diff --git a/src/public/minbase/minbase_types.h b/src/public/minbase/minbase_types.h
+index 0f35c5a..27c9dc7 100644
+--- a/src/public/minbase/minbase_types.h
++++ b/src/public/minbase/minbase_types.h
+@@ -75,7 +75,7 @@ typedef uint32 uint32_t;
+ // NOTE: int64_t must match the compiler stdint.h definition
+ // and so may not match the Steam int64.  Mixing the two is
+ // error-prone so always use the Steam non-_t types in Steam code.
+-#if defined(COMPILER_GCC) && defined(PLATFORM_64BITS) && !defined(__MINGW32__) && !IsOSX() && !(defined(IOS) || defined(TVOS))
++#if defined(COMPILER_GCC) && defined(PLATFORM_64BITS) && !defined(__MINGW32__) && !IsOSX() && !IsIOS() && !IsTVOS() && !IsOpenBSD()
+ #define INT64_DIFFERENT_FROM_INT64_T 1
+ typedef long int int64_t;
+ typedef unsigned long int uint64_t;
+diff --git a/src/public/tier0/platform_sockets.h b/src/public/tier0/platform_sockets.h
+index 5550c88..24caf27 100644
+--- a/src/public/tier0/platform_sockets.h
++++ b/src/public/tier0/platform_sockets.h
+@@ -112,7 +112,7 @@ typedef char SteamNetworkingErrMsg[ 1024 ];
+ 
+ 	#define PlatformSupportsRecvMsg() true
+ 
+-	#ifdef __APPLE__
++	#if defined(__APPLE__) || defined(__FreeBSD__) || defined(__OpenBSD__)
+ 		#define USE_POLL
+ 
+ 		// I can't get this to work on MacOS.  If someboddy believes that
+diff --git a/src/steamnetworkingsockets/clientlib/csteamnetworkingsockets.cpp b/src/steamnetworkingsockets/clientlib/csteamnetworkingsockets.cpp
+index 6012f7f..066986b 100644
+--- a/src/steamnetworkingsockets/clientlib/csteamnetworkingsockets.cpp
++++ b/src/steamnetworkingsockets/clientlib/csteamnetworkingsockets.cpp
+@@ -2438,8 +2438,10 @@ const char *CSteamNetworkingUtils::GetPlatformString()
+ 		return "windows";
+ 	#elif IsLinux()
+ 		return "linux";
+-	#elif defined( FREEBSD ) || defined( __FreeBSD__ )
++	#elif IsFreeBSD()
+ 		return "freebsd";
++	#elif IsOpenBSD()
++		return "openbsd";
+ 	#else
+ 		#error "Unknown platform"
+ 	#endif
+diff --git a/src/steamnetworkingsockets/clientlib/steamnetworkingsockets_lowlevel.cpp b/src/steamnetworkingsockets/clientlib/steamnetworkingsockets_lowlevel.cpp
+index 51092f3..21cc073 100644
+--- a/src/steamnetworkingsockets/clientlib/steamnetworkingsockets_lowlevel.cpp
++++ b/src/steamnetworkingsockets/clientlib/steamnetworkingsockets_lowlevel.cpp
+@@ -4189,7 +4189,11 @@ bool ResolveHostname( const char* pszHostname, CUtlVector< SteamNetworkingIPAddr
+ 
+ 	addrinfo hints;
+ 	V_memset( &hints, 0, sizeof( hints ) );
++#ifdef AI_V4MAPPED
+ 	hints.ai_flags = AI_V4MAPPED | AI_ADDRCONFIG;
++#else
++	hints.ai_flags = AI_ADDRCONFIG;
++#endif
+ 	hints.ai_family = AF_UNSPEC;
+ 	hints.ai_socktype = 0;
+ 	hints.ai_protocol = 0;
+diff --git a/src/tier0/dbg.cpp b/src/tier0/dbg.cpp
+index dd31cc3..9038e23 100644
+--- a/src/tier0/dbg.cpp
++++ b/src/tier0/dbg.cpp
+@@ -86,7 +86,7 @@ bool Plat_IsInDebugSession()
+ 	return (nTracePid != 0);
+ #elif IsPlaystation()
+ 	// NDA material
+-#elif IsNintendoSwitch()
++#elif IsNintendoSwitch() || IsOpenBSD()
+ 	return false;
+ #else
+ 	#error "HALP"

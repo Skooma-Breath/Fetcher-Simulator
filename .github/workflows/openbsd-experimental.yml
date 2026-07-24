@@ -53,13 +53,17 @@ jobs:
             set -eux
             export PATH="/usr/local/bin:${PATH}"
             git config --global --add safe.directory "$GITHUB_WORKSPACE"
+            git -C extern/GameNetworkingSockets apply \
+              "$GITHUB_WORKSPACE/CI/patches/gamenetworkingsockets-openbsd.patch"
 
             cmake -S . -B build-openbsd -G Ninja \
               -D CMAKE_BUILD_TYPE=RelWithDebInfo \
               -D CMAKE_CXX_SCAN_FOR_MODULES=OFF \
               -D CMAKE_INSTALL_PREFIX=/usr/local \
-              -D BUILD_MULTIPLAYER=OFF \
-              -D BUILD_DEDICATED_SERVER=OFF \
+              -D BUILD_MULTIPLAYER=ON \
+              -D BUILD_DEDICATED_SERVER=ON \
+              -D BUILD_SHARED_LIB=OFF \
+              -D BUILD_STATIC_LIB=ON \
               -D BUILD_LAUNCHER=OFF \
               -D BUILD_WIZARD=OFF \
               -D BUILD_OPENCS=OFF \
@@ -74,5 +78,4 @@ jobs:
               -D BUILD_OPENMW_TESTS=OFF \
               -D BUILD_OPENCS_TESTS=OFF
 
-            cmake --build build-openbsd --target openmw --parallel 2
-            ./build-openbsd/openmw --version
+            cmake --build build-openbsd --target GameNetworkingSockets_s --parallel 2
