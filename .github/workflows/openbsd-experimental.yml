@@ -1,0 +1,76 @@
+name: OpenBSD experimental
+
+on:
+  push:
+    branches:
+      - ci/openbsd
+
+permissions:
+  contents: read
+
+concurrency:
+  group: openbsd-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          submodules: recursive
+
+      - name: Build core client on OpenBSD 7.9
+        uses: vmactions/openbsd-vm@v1.4.5
+        with:
+          release: "7.9"
+          arch: x86_64
+          usesh: true
+          copyback: false
+          cache-after-prepare: true
+          prepare: |
+            pkg_add \
+              boost \
+              bullet \
+              cmake \
+              ffmpeg \
+              git \
+              icu4c \
+              lz4 \
+              luajit \
+              mygui \
+              ninja \
+              openal \
+              openscenegraph \
+              protobuf \
+              sdl2 \
+              sqlite3 \
+              tinyxml \
+              yaml-cpp
+          run: |
+            set -eux
+            export PATH="/usr/local/bin:${PATH}"
+
+            cmake -S . -B build-openbsd -G Ninja \
+              -D CMAKE_BUILD_TYPE=RelWithDebInfo \
+              -D CMAKE_INSTALL_PREFIX=/usr/local \
+              -D BUILD_MULTIPLAYER=OFF \
+              -D BUILD_DEDICATED_SERVER=OFF \
+              -D BUILD_LAUNCHER=OFF \
+              -D BUILD_WIZARD=OFF \
+              -D BUILD_OPENCS=OFF \
+              -D BUILD_MWINIIMPORTER=OFF \
+              -D BUILD_ESSIMPORTER=OFF \
+              -D BUILD_BSATOOL=OFF \
+              -D BUILD_ESMTOOL=OFF \
+              -D BUILD_NIFTEST=OFF \
+              -D BUILD_NAVMESHTOOL=OFF \
+              -D BUILD_BULLETOBJECTTOOL=OFF \
+              -D BUILD_COMPONENTS_TESTS=OFF \
+              -D BUILD_OPENMW_TESTS=OFF \
+              -D BUILD_OPENCS_TESTS=OFF
+
+            cmake --build build-openbsd --target openmw --parallel 2
+            ./build-openbsd/openmw --version
