@@ -1,10 +1,12 @@
 #include "WorldObjectSync.hpp"
 
 #include <algorithm>
+#include <cctype>
 #include <cmath>
 #include <exception>
 #include <optional>
 #include <cstdio>
+#include <string_view>
 
 #include <components/debug/debuglog.hpp>
 #include <components/esm/refid.hpp>
@@ -14,6 +16,7 @@
 #include <components/openmw-mp/Packets/Object/PacketObjectDelete.hpp>
 #include <components/openmw-mp/Packets/Object/PacketObjectMove.hpp>
 #include <components/openmw-mp/Packets/Object/PacketContainer.hpp>
+#include <components/openmw-mp/Packets/Actor/PacketCorpseDispose.hpp>
 
 #include "../../mwbase/environment.hpp"
 #include "../../mwbase/world.hpp"
@@ -129,6 +132,75 @@ namespace
         else
             it->count += item.count;
     }
+
+    std::string lowerAscii(std::string_view value)
+    {
+        std::string result(value);
+        std::transform(result.begin(), result.end(), result.begin(),
+            [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+        return result;
+    }
+
+    void appendOrMergeComparable(std::vector<ContainerItem>& items, ContainerItem item)
+    {
+        if (item.refId.empty() || item.count <= 0)
+            return;
+
+        item.refId = lowerAscii(item.refId);
+        auto it = std::find_if(items.begin(), items.end(),
+            [&](const ContainerItem& current)
+            {
+                return current.refId == item.refId && current.charge == item.charge;
+            });
+
+        if (it == items.end())
+            items.push_back(std::move(item));
+        else
+            it->count += item.count;
+    }
+
+    bool containerStoreMatchesRecord(
+        const MWWorld::ContainerStore& store, const std::vector<ContainerItem>& expected)
+    {
+        std::vector<ContainerItem> currentItems;
+        std::vector<ContainerItem> expectedItems;
+
+        for (auto it = store.begin(); it != store.end(); ++it)
+        {
+            ContainerItem item;
+            item.refId = it->getCellRef().getRefId().toString();
+            item.count = it->getCellRef().getCount();
+            item.charge = static_cast<int>(it->getCellRef().getCharge());
+            appendOrMergeComparable(currentItems, std::move(item));
+        }
+
+        for (const ContainerItem& item : expected)
+            appendOrMergeComparable(expectedItems, item);
+
+        auto less = [](const ContainerItem& left, const ContainerItem& right)
+        {
+            if (left.refId != right.refId)
+                return left.refId < right.refId;
+            return left.charge < right.charge;
+        };
+        std::sort(currentItems.begin(), currentItems.end(), less);
+        std::sort(expectedItems.begin(), expectedItems.end(), less);
+
+        if (currentItems.size() != expectedItems.size())
+            return false;
+
+        for (std::size_t i = 0; i < currentItems.size(); ++i)
+        {
+            if (currentItems[i].refId != expectedItems[i].refId
+                || currentItems[i].charge != expectedItems[i].charge
+                || currentItems[i].count != expectedItems[i].count)
+            {
+                return false;
+            }
+        }
+
+        return true;
+    }
 }
 
 WorldObjectSync::WorldObjectSync(NetworkClient& client)
@@ -216,10 +288,32 @@ void WorldObjectSync::onLocalObjectTaken(
         return;
 
     mPendingTakenMpNums.insert(mpNum);
-    const MWBase::Environment& environment = MWBase::Environment::get();
-    environment.getWorldModel()->deregisterLiveCellRef(*inventoryObject.getBase());
-    inventoryObject.getCellRef().setRefNum(inventoryInstanceRefNum(mpNum));
-    environment.getWorldModel()->registerPtr(inventoryObject);
+    // Preserve the Lua-visible RefNum of the newly inserted stack. Network
+    // capture resolves this alias to the authoritative world mpNum, so the
+    // transfer keeps its server identity without invalidating live script/UI
+    // handles that were created during moveInto().
+    setInventoryInstanceAlias(inventoryObject.getCellRef().getRefNum(), mpNum);
+}
+
+void WorldObjectSync::markLocalPlayerInventoryDetached(const MWWorld::Ptr& ptr)
+{
+    if (ptr.isEmpty())
+        return;
+    mLocalPlayerInventoryDetached.insert(ptr.getCellRef().getRefNum());
+}
+
+bool WorldObjectSync::consumeLocalPlayerInventoryDetached(const MWWorld::Ptr& ptr)
+{
+    if (ptr.isEmpty())
+        return false;
+    return mLocalPlayerInventoryDetached.erase(ptr.getCellRef().getRefNum()) != 0;
+}
+
+void WorldObjectSync::forgetLocalPlayerInventoryDetached(const MWWorld::Ptr& ptr)
+{
+    if (ptr.isEmpty())
+        return;
+    mLocalPlayerInventoryDetached.erase(ptr.getCellRef().getRefNum());
 }
 
 void WorldObjectSync::onLocalObjectDeleted(const MWWorld::Ptr& ptr)
@@ -267,14 +361,13 @@ void WorldObjectSync::onLocalCorpseDisposed(const MWWorld::Ptr& ptr)
         return;
 
     const uint32_t mpNum = getMpNumForObject(ptr);
-    uint32_t canonicalRefNum = 0;
+    const std::string refId = ptr.getCellRef().getRefId().serializeText();
+    uint32_t canonicalRefNum = ptr.getCellRef().getRefNum().mIndex;
     if (mpNum == 0 && Main::isInitialised())
-        canonicalRefNum = Main::get().getActorSync().getActorCanonicalRefNum(ptr);
-    if (mpNum == 0 && canonicalRefNum == 0)
     {
-        Log(Debug::Warning) << "[MP] WorldObjectSync: cannot dispose corpse without canonical identity"
-                            << " refId=" << ptr.getCellRef().getRefId().serializeText();
-        return;
+        const uint32_t resolvedRefNum = Main::get().getActorSync().getActorCanonicalRefNum(ptr);
+        if (resolvedRefNum != 0)
+            canonicalRefNum = resolvedRefNum;
     }
 
     std::string cellId;
@@ -290,16 +383,40 @@ void WorldObjectSync::onLocalCorpseDisposed(const MWWorld::Ptr& ptr)
             cellId = std::string(cell->getNameId());
     }
 
-    PacketObjectDelete pkt;
+    const ActorInstanceId actorNetId = Main::isInitialised()
+        ? Main::get().getActorSync().actorNetIdForPtr(cellId, ptr) : 0;
+
+    if (actorNetId == 0 && mpNum == 0 && (refId.empty() || canonicalRefNum == 0))
+    {
+        Log(Debug::Warning) << "[MP] WorldObjectSync: cannot dispose corpse without canonical identity"
+                            << " refId=" << refId
+                            << " refNum=" << canonicalRefNum
+                            << " cell=" << cellId;
+        return;
+    }
+
+    PacketCorpseDispose pkt;
+    pkt.actorNetId = actorNetId;
     pkt.mpNum = mpNum;
-    pkt.cellId = cellId;
-    pkt.refId = ptr.getCellRef().getRefId().serializeText();
+    pkt.refId = refId;
     pkt.refNum = canonicalRefNum;
-    mClient.sendReliable(pkt.encode());
-    Log(Debug::Info) << "[MP] WorldObjectSync: sent corpse dispose mpNum=" << mpNum
+    pkt.cellId = cellId;
+
+    const std::vector<uint8_t> encoded = pkt.encode();
+    PacketHeader header;
+    const bool hasHeader = BasePacket::peekHeader(encoded.data(), encoded.size(), header);
+    mClient.sendReliable(encoded);
+
+    Log(Debug::Info) << "[MP] WorldObjectSync: sent CorpseDispose"
+                     << " actorNetId=" << pkt.actorNetId
+                     << " mpNum=" << pkt.mpNum
                      << " refId=" << pkt.refId
                      << " refNum=" << pkt.refNum
-                     << " cell=" << cellId;
+                     << " cell=" << pkt.cellId
+                     << " bytes=" << encoded.size()
+                     << " headerValid=" << hasHeader
+                     << " headerType=" << (hasHeader ? header.type : 0)
+                     << " payloadSize=" << (hasHeader ? header.payloadSize : 0);
 }
 
 // ---------------------------------------------------------------------------
@@ -673,16 +790,21 @@ bool WorldObjectSync::tryApplyContainer(const ContainerRecord& record, Container
     auto& cstore = target.getClass().getContainerStore(target);
     const MWWorld::ESMStore& esmStore = world->getStore();
 
+    bool preservedSetHandles = false;
     if (action == ContainerAction::Set)
     {
-        if (record.items.empty())
-            clearDeadActorEquipmentVisuals(*world, target);
-        cstore.clear();
-        for (const auto& ci : record.items)
+        preservedSetHandles = containerStoreMatchesRecord(cstore, record.items);
+        if (!preservedSetHandles)
         {
-            MWWorld::ManualRef ref(esmStore, ESM::RefId::stringRefId(ci.refId), ci.count);
-            if (!ref.getPtr().isEmpty())
-                cstore.add(ref.getPtr(), ci.count);
+            if (record.items.empty())
+                clearDeadActorEquipmentVisuals(*world, target);
+            cstore.clear();
+            for (const auto& ci : record.items)
+            {
+                MWWorld::ManualRef ref(esmStore, ESM::RefId::stringRefId(ci.refId), ci.count);
+                if (!ref.getPtr().isEmpty())
+                    cstore.add(ref.getPtr(), ci.count);
+            }
         }
         if (record.items.empty())
             clearDeadActorEquipmentVisuals(*world, target);
@@ -707,7 +829,8 @@ bool WorldObjectSync::tryApplyContainer(const ContainerRecord& record, Container
     Log(Debug::Info) << "[MP] WorldObjectSync: applied Container action="
                      << static_cast<int>(action)
                      << " refId=" << record.refId
-                     << " mpNum=" << record.mpNum;
+                     << " mpNum=" << record.mpNum
+                     << " preservedSetHandles=" << preservedSetHandles;
     return true;
 }
 

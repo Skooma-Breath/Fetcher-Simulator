@@ -257,8 +257,14 @@ namespace mwmp
         /// Load persisted dead vanilla actors.
         std::vector<BaseActor> loadDeadVanillaActors();
 
+        /// Load persisted vanilla-actor disposal tombstones.
+        std::vector<BaseActor> loadDisposedVanillaActors();
+
         /// Insert or update one persisted dead vanilla actor.
         void upsertDeadVanillaActor(const BaseActor& actor);
+
+        /// Insert or update one vanilla-actor disposal tombstone.
+        void upsertDisposedVanillaActor(const BaseActor& actor);
 
         /// Delete one persisted dead vanilla actor by identity.
         void deleteDeadVanillaActor(std::string_view refId, uint32_t refNum);

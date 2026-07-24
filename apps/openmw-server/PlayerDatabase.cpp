@@ -1927,6 +1927,31 @@ CREATE INDEX IF NOT EXISTS idx_character_lua_storage_namespace
         return actors;
     }
 
+    std::vector<BaseActor> PlayerDatabase::loadDisposedVanillaActors()
+    {
+        sqlite3_stmt* s = prepare(
+            "SELECT ref_id, ref_num, cell_id"
+            " FROM world_dead_vanilla_actors WHERE is_dead = 0 ORDER BY cell_id, ref_id, ref_num");
+
+        std::vector<BaseActor> actors;
+        while (sqlite3_step(s) == SQLITE_ROW)
+        {
+            BaseActor actor;
+            const char* refId = reinterpret_cast<const char*>(sqlite3_column_text(s, 0));
+            const char* cellId = reinterpret_cast<const char*>(sqlite3_column_text(s, 2));
+            actor.refId = refId ? refId : "";
+            actor.refNum = static_cast<uint32_t>(sqlite3_column_int64(s, 1));
+            actor.mpNum = 0;
+            actor.cellId = cellId ? cellId : "";
+            actor.isDead = false;
+            actor.equipment.resize(BaseActor::NUM_EQUIPMENT_SLOTS);
+            actors.push_back(std::move(actor));
+        }
+
+        sqlite3_finalize(s);
+        return actors;
+    }
+
     void PlayerDatabase::upsertDeadVanillaActor(const BaseActor& actor)
     {
         if (actor.mpNum != 0 || actor.refId.empty() || actor.cellId.empty() || !actor.isDead)
@@ -1993,6 +2018,29 @@ CREATE INDEX IF NOT EXISTS idx_character_lua_storage_namespace
         sqlite3_bind_int64(s, 23, now);
         sqlite3_bind_int64(s, 24, now);
         checkSqlite(sqlite3_step(s), mDb, "upsertDeadVanillaActor");
+        sqlite3_finalize(s);
+    }
+
+    void PlayerDatabase::upsertDisposedVanillaActor(const BaseActor& actor)
+    {
+        if (actor.mpNum != 0 || actor.refId.empty() || actor.cellId.empty())
+            return;
+
+        const int64_t now = static_cast<int64_t>(std::time(nullptr));
+        sqlite3_stmt* s = prepare(
+            "INSERT INTO world_dead_vanilla_actors("
+            " ref_id, ref_num, cell_id, is_dead, created_at, updated_at)"
+            " VALUES(?1, ?2, ?3, 0, ?4, ?5)"
+            " ON CONFLICT(ref_id, ref_num) DO UPDATE SET"
+            " cell_id=excluded.cell_id,"
+            " is_dead=0,"
+            " updated_at=excluded.updated_at");
+        sqlite3_bind_text(s, 1, actor.refId.c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_int64(s, 2, actor.refNum);
+        sqlite3_bind_text(s, 3, actor.cellId.c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_int64(s, 4, now);
+        sqlite3_bind_int64(s, 5, now);
+        checkSqlite(sqlite3_step(s), mDb, "upsertDisposedVanillaActor");
         sqlite3_finalize(s);
     }
 

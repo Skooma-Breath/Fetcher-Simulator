@@ -167,6 +167,123 @@ namespace
         return count;
     }
 
+    bool sameInventoryItemSemantics(const Item& left, const Item& right)
+    {
+        return left.refId == right.refId
+            && left.count == right.count
+            && left.charge == right.charge
+            && std::abs(left.enchantmentCharge - right.enchantmentCharge) < 0.001f
+            && left.soul == right.soul;
+    }
+
+    bool applyAuthoritativeInventoryIdentityInPlace(
+        const MWWorld::Ptr& player, const std::vector<Item>& authoritativeItems, std::size_t& correctedIds)
+    {
+        correctedIds = 0;
+        if (player.isEmpty() || !player.getClass().hasInventoryStore(player))
+            return false;
+
+        struct LiveEntry
+        {
+            MWWorld::Ptr ptr;
+            Item item;
+            bool matched = false;
+        };
+
+        MWWorld::InventoryStore& inventory = player.getClass().getInventoryStore(player);
+        std::vector<LiveEntry> liveEntries;
+        for (auto it = inventory.begin(); it != inventory.end(); ++it)
+        {
+            const MWWorld::CellRef& cellRef = it->getCellRef();
+            if (cellRef.getCount() <= 0)
+                continue;
+
+            LiveEntry entry;
+            entry.ptr = *it;
+            entry.item.refId = cellRef.getRefId().serializeText();
+            entry.item.instanceId = inventoryInstanceId(cellRef.getRefNum());
+            entry.item.count = cellRef.getCount();
+            entry.item.charge = cellRef.getCharge();
+            entry.item.enchantmentCharge = cellRef.getEnchantmentCharge();
+            entry.item.soul = cellRef.getSoul().serializeText();
+            liveEntries.push_back(std::move(entry));
+        }
+
+        std::vector<const Item*> authoritative;
+        authoritative.reserve(authoritativeItems.size());
+        for (const Item& item : authoritativeItems)
+        {
+            if (!item.refId.empty() && item.count > 0)
+                authoritative.push_back(&item);
+        }
+        if (liveEntries.size() != authoritative.size())
+            return false;
+
+        struct Match
+        {
+            LiveEntry* live = nullptr;
+            const Item* authoritative = nullptr;
+        };
+        std::vector<Match> matches;
+        matches.reserve(authoritative.size());
+
+        for (const Item* requested : authoritative)
+        {
+            LiveEntry* match = nullptr;
+
+            // Preserve already-correct stable identities before pairing any
+            // otherwise-identical untagged stacks.
+            if (requested->instanceId != 0)
+            {
+                for (LiveEntry& live : liveEntries)
+                {
+                    if (!live.matched && live.item.instanceId == requested->instanceId
+                        && sameInventoryItemSemantics(live.item, *requested))
+                    {
+                        match = &live;
+                        break;
+                    }
+                }
+            }
+
+            if (!match)
+            {
+                for (LiveEntry& live : liveEntries)
+                {
+                    if (live.matched || !sameInventoryItemSemantics(live.item, *requested))
+                        continue;
+                    // An authoritative assignment may replace an untagged local
+                    // split. Never silently swap one nonzero stable identity for
+                    // a different nonzero identity.
+                    if (live.item.instanceId != 0 && requested->instanceId != 0
+                        && live.item.instanceId != requested->instanceId)
+                        continue;
+                    match = &live;
+                    break;
+                }
+            }
+
+            if (!match)
+                return false;
+            match->matched = true;
+            matches.push_back({ match, requested });
+        }
+
+        for (const Match& match : matches)
+        {
+            const uint32_t requestedId = match.authoritative->instanceId;
+            if (requestedId == 0 || match.live->item.instanceId == requestedId)
+                continue;
+
+            // Keep the live RefNum unchanged so existing Lua SafePtr handles stay
+            // valid. Network capture resolves this session-local RefNum through
+            // the alias and still sends the server-issued stable instance ID.
+            setInventoryInstanceAlias(match.live->ptr.getCellRef().getRefNum(), requestedId);
+            ++correctedIds;
+        }
+        return true;
+    }
+
     bool sameDynamicStat(const DynamicStat& left, const DynamicStat& right)
     {
         constexpr float eps = 0.01f;
@@ -604,11 +721,31 @@ void PlayerSync::queueAuthoritativeInventory(const BasePlayer& authoritative)
         return;
 
     MWBase::World* world = MWBase::Environment::get().getWorld();
-    if (!world) return;
+    if (!world)
+        return;
 
     MWWorld::Ptr player = world->getPlayerPtr();
-    if (!player.isEmpty())
-        applyPendingAuthoritativeState(player);
+    if (player.isEmpty())
+        return;
+
+    // Routine authoritative echoes and server-assigned IDs must not rebuild the
+    // local ContainerStore. Rebuilding invalidates Lua objects held by drag-and-
+    // drop mods. When the visible stacks already match, update only missing
+    // stable RefNums in place and preserve every live object handle.
+    std::size_t correctedIds = 0;
+    if (applyAuthoritativeInventoryIdentityInPlace(player, mAuthoritativeInventory.items, correctedIds))
+    {
+        mPendingInventoryRestore = false;
+        captureInventory(player);
+        snapshotInventory();
+        Log(correctedIds != 0 ? Debug::Info : Debug::Verbose)
+            << "[MP] PlayerSync: authoritative inventory matched live state"
+            << " identityCorrections=" << correctedIds
+                            << " stacks=" << inventoryStackCount(mAuthoritativeInventory.items);
+        return;
+    }
+
+    applyPendingAuthoritativeState(player);
 }
 
 void PlayerSync::queueAuthoritativeJournal(const BasePlayer& authoritative)
@@ -2467,6 +2604,11 @@ void PlayerSync::applyPendingAuthoritativeState(const MWWorld::Ptr& player)
             selected.soul = selectedRef.getSoul().serializeText();
             selectedEnchantItemBeforeRestore = std::move(selected);
         }
+
+        // A full authoritative rebuild invalidates every session-local inventory
+        // RefNum, so discard their network identity aliases before replacing the
+        // store. Restored rows below use their stable reserved RefNums directly.
+        clearInventoryInstanceAliases();
 
         // ContainerStore::clear() only zeroes stack counts. It does not reset
         // mSelectedEnchantItem, so retaining that iterator across the rebuild

@@ -3,6 +3,7 @@
 
 #include <cstdint>
 #include <limits>
+#include <unordered_map>
 
 #include <components/esm/formid.hpp>
 
@@ -20,8 +21,37 @@ namespace mwmp
         return ESM::RefNum{ .mIndex = instanceId, .mContentFile = InventoryInstanceContentFile };
     }
 
+    inline std::unordered_map<ESM::RefNum, uint32_t>& inventoryInstanceAliases()
+    {
+        static std::unordered_map<ESM::RefNum, uint32_t> aliases;
+        return aliases;
+    }
+
+    inline void setInventoryInstanceAlias(ESM::RefNum refNum, uint32_t instanceId)
+    {
+        if (!refNum.isSet() || instanceId == 0)
+            return;
+        inventoryInstanceAliases()[refNum] = instanceId;
+    }
+
+    inline void forgetInventoryInstanceAlias(ESM::RefNum refNum)
+    {
+        inventoryInstanceAliases().erase(refNum);
+    }
+
+    inline void clearInventoryInstanceAliases()
+    {
+        inventoryInstanceAliases().clear();
+    }
+
     inline uint32_t inventoryInstanceId(ESM::RefNum refNum)
     {
+        // A world round-trip can replace an older reserved inventory ID with
+        // a newly allocated world ID. The alias must win so live Lua object IDs
+        // remain stable while packets carry the corrected authoritative identity.
+        const auto it = inventoryInstanceAliases().find(refNum);
+        if (it != inventoryInstanceAliases().end())
+            return it->second;
         return refNum.mContentFile == InventoryInstanceContentFile ? refNum.mIndex : 0;
     }
 }

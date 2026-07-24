@@ -79,6 +79,7 @@
 #include <components/openmw-mp/Packets/Actor/PacketActorPresentationV2.hpp>
 #include <components/openmw-mp/Packets/Actor/PacketActorStatsDynamic.hpp>
 #include <components/openmw-mp/Packets/Actor/PacketActorCombatRequest.hpp>
+#include <components/openmw-mp/Packets/Actor/PacketCorpseDispose.hpp>
 #include <components/openmw-mp/Packets/Worldstate/PacketWorldTime.hpp>
 // PacketWorldWeather is defined in PacketWorldTime.hpp
 
@@ -570,7 +571,8 @@ namespace
         auto it = std::find_if(items.begin(), items.end(),
             [&](const mwmp::ContainerItem& current)
             {
-                return current.refId == item.refId && current.charge == item.charge;
+                return lowerAscii(current.refId) == lowerAscii(item.refId)
+                    && current.charge == item.charge;
             });
 
         if (it == items.end())
@@ -781,7 +783,8 @@ namespace
         auto it = std::find_if(items.begin(), items.end(),
             [&](const mwmp::ContainerItem& current)
             {
-                return current.refId == item.refId && current.charge == item.charge;
+                return lowerAscii(current.refId) == lowerAscii(item.refId)
+                    && current.charge == item.charge;
             });
 
         if (action == mwmp::ContainerAction::Add)
@@ -809,7 +812,7 @@ namespace
 
         for (auto current = items.begin(); remaining > 0 && current != items.end();)
         {
-            if (current->refId != item.refId)
+            if (lowerAscii(current->refId) != lowerAscii(item.refId))
             {
                 ++current;
                 continue;
@@ -2362,7 +2365,8 @@ void MPServer::broadcastActorIdentityForCell(
 void MPServer::broadcastActorIdentityRemovalForCell(
     const std::string& cellId,
     CellActorState& cellState,
-    const std::vector<ActorRegistryRecord>& records)
+    const std::vector<ActorRegistryRecord>& records,
+    ActorRemovalReason removalReason)
 {
     if (records.empty())
         return;
@@ -2388,6 +2392,7 @@ void MPServer::broadcastActorIdentityRemovalForCell(
         identity.persistent = record.persistent;
         identity.serverSpawned = record.actor.mpNum != 0;
         identity.removed = true;
+        identity.removalReason = removalReason;
         identity.migrationGeneration = record.migrationGeneration;
         identity.actor = record.actor;
         identity.actor.cellId = cellId;
@@ -3019,13 +3024,53 @@ const MPServer::ActorRegistryRecord* MPServer::findDeadVanillaActor(
     return nullptr;
 }
 
+void MPServer::rememberDisposedVanillaActor(const BaseActor& actor)
+{
+    if (actor.mpNum != 0 || actor.refId.empty() || actor.cellId.empty())
+        return;
+
+    BaseActor tombstone = actor;
+    tombstone.mpNum = 0;
+    tombstone.isDead = false;
+    const std::string actorKey = makeActorKey(tombstone);
+    mWorld.disposedVanillaActors[actorKey] = tombstone;
+    if (mPlayerDb)
+        mPlayerDb->upsertDisposedVanillaActor(tombstone);
+}
+
+const BaseActor* MPServer::findDisposedVanillaActor(const BaseActor& actor) const
+{
+    if (actor.mpNum != 0 || actor.refId.empty())
+        return nullptr;
+
+    const auto it = mWorld.disposedVanillaActors.find(makeActorKey(actor));
+    return it != mWorld.disposedVanillaActors.end() ? &it->second : nullptr;
+}
+
 bool MPServer::rejectStaleAliveVanillaActor(
     const BaseActor& actor,
     const std::string& incomingCellId,
     const ConnectedClient& sender,
     const char* packetName) const
 {
-    if (actor.mpNum != 0 || actor.refId.empty() || actor.isDead)
+    if (actor.mpNum != 0 || actor.refId.empty())
+        return false;
+
+    if (const BaseActor* disposed = findDisposedVanillaActor(actor))
+    {
+        const bool importantPacket = std::strcmp(packetName, "ActorList") == 0
+            || std::strcmp(packetName, "ActorAttack") == 0
+            || std::strcmp(packetName, "ActorCellChange") == 0;
+        Log(importantPacket ? Debug::Info : Debug::Verbose) << "[Server] " << packetName
+                            << " ignored disposed vanilla actor from " << sender.name
+                            << " refId=" << actor.refId
+                            << " refNum=" << actor.refNum
+                            << " incomingCell=" << incomingCellId
+                            << " disposedCell=" << disposed->cellId;
+        return true;
+    }
+
+    if (actor.isDead)
         return false;
 
     std::string deadCellId;
@@ -3665,6 +3710,16 @@ void MPServer::onClientMessage(ConnectedClient& client,
 
     auto type = static_cast<PacketType>(hdr.type);
 
+    if (type == PacketType::CorpseDispose)
+    {
+        Log(Debug::Info) << "[Server] CorpseDispose wire packet received"
+                         << " client=" << client.name
+                         << " bytes=" << size
+                         << " headerType=" << hdr.type
+                         << " payloadSize=" << hdr.payloadSize
+                         << " sequence=" << hdr.sequence;
+    }
+
     // Must complete handshake before any other packet is processed.
     if (!client.handshakeComplete
         && type != PacketType::Handshake
@@ -3738,6 +3793,7 @@ void MPServer::onClientMessage(ConnectedClient& client,
         case PacketType::ActorStatsDynamic: handleActorStatsDynamic(client, data, size); break;
         case PacketType::ActorAI:          handleActorAI(client, data, size);            break;
         case PacketType::ActorCombatRequest: handleActorCombatRequest(client, data, size); break;
+        case PacketType::CorpseDispose:     handleCorpseDispose(client, data, size);     break;
         default:
             Log(Debug::Verbose) << "[Server] Unhandled packet type " << hdr.type;
             break;
@@ -3771,6 +3827,7 @@ void MPServer::loadPersistentWorldState()
     std::size_t objectCount = 0;
     std::size_t spawnedActorCount = 0;
     std::size_t deadVanillaActorCount = 0;
+    std::size_t disposedVanillaActorCount = 0;
     std::size_t dynamicRecordCount = 0;
     std::vector<DynamicRecordCatalogEntry> dynamicRecordCatalog;
 
@@ -3927,6 +3984,17 @@ void MPServer::loadPersistentWorldState()
         ++deadVanillaActorCount;
     }
 
+    for (BaseActor actor : mPlayerDb->loadDisposedVanillaActors())
+    {
+        actor.mpNum = 0;
+        actor.isDead = false;
+        if (actor.refId.empty() || actor.cellId.empty())
+            continue;
+        normalizeActorIdentity(actor);
+        mWorld.disposedVanillaActors[makeActorKey(actor)] = std::move(actor);
+        ++disposedVanillaActorCount;
+    }
+
     if (conflictingDeadVanillaActorsPurged != 0)
     {
         Log(Debug::Warning) << "[Server] Purged conflicting persisted vanilla corpses"
@@ -3946,6 +4014,7 @@ void MPServer::loadPersistentWorldState()
                      << objectCount
                      << " spawnedActors=" << spawnedActorCount
                      << " deadVanillaActors=" << deadVanillaActorCount
+                     << " disposedVanillaActors=" << disposedVanillaActorCount
                      << " containers=" << mWorld.containers.size()
                      << " doorCells=" << mWorld.doorStates.size()
                      << " dynamicRecords=" << dynamicRecordCount
@@ -6133,7 +6202,9 @@ void MPServer::handleActorList(ConnectedClient& c, const uint8_t* data, size_t s
     std::unordered_set<uint32_t> currentSpawnedActorMpNums;
     std::unordered_set<std::string> migratedActorCells;
     std::unordered_map<std::string, std::vector<BaseActor>> canonicalDeadVanillaCorrections;
+    std::unordered_map<std::string, std::vector<ActorRegistryRecord>> disposedVanillaCorrections;
     std::size_t staleDeadVanillaCorrections = 0;
+    std::size_t disposedVanillaCorrectionsQueued = 0;
     std::size_t missingIdentityDropped = 0;
     std::size_t ambiguousIdentityNormalized = 0;
     std::size_t unmanagedSpawnerDropped = 0;
@@ -6214,6 +6285,24 @@ void MPServer::handleActorList(ConnectedClient& c, const uint8_t* data, size_t s
         if (incomingActorNetId == 0 || !incomingActorNetIds.insert(incomingActorNetId).second)
         {
             ++duplicateIdentityDropped;
+            continue;
+        }
+        if (const BaseActor* disposed = findDisposedVanillaActor(actor))
+        {
+            const std::string actorKey = makeActorKey(actor);
+            const uint64_t nowMs = incoming.serverTimestamp != 0
+                ? incoming.serverTimestamp : currentServerTimeMs();
+            uint64_t& lastResendMs = cellState.staleLiveVanillaDeathResendMs[actorKey];
+            if (lastResendMs == 0 || nowMs >= lastResendMs + 1000)
+            {
+                lastResendMs = nowMs;
+                ActorRegistryRecord removal;
+                removal.actor = *disposed;
+                removal.actor.cellId = disposed->cellId;
+                removal.actorNetId = actorInstanceIdFromActor(removal.actor);
+                disposedVanillaCorrections[disposed->cellId].push_back(std::move(removal));
+                ++disposedVanillaCorrectionsQueued;
+            }
             continue;
         }
         if (rejectResetStaleDeadVanillaActor(actor, incoming.cellId, c, "ActorList"))
@@ -6629,6 +6718,20 @@ void MPServer::handleActorList(ConnectedClient& c, const uint8_t* data, size_t s
     broadcastActorIdentityForCell(incoming.cellId, cellState);
     broadcastActorToCell(incoming.cellId, out.encode(), c.conn);
     broadcastActorAuthorityLeasesForCell(incoming.cellId, cellState);
+    for (auto& [disposedCellId, removals] : disposedVanillaCorrections)
+    {
+        auto& disposedCellState = mWorld.actorCells[disposedCellId];
+        broadcastActorIdentityRemovalForCell(
+            disposedCellId, disposedCellState, removals, ActorRemovalReason::CorpseDisposed);
+    }
+    if (disposedVanillaCorrectionsQueued != 0)
+    {
+        Log(Debug::Info) << "[Server] ActorList corrected disposed vanilla actor(s)"
+                         << " from=" << c.name
+                         << " sourceCell=" << incoming.cellId
+                         << " actors=" << disposedVanillaCorrectionsQueued
+                         << " cells=" << disposedVanillaCorrections.size();
+    }
     if (staleDeadVanillaCorrections != 0)
     {
         Log(Debug::Verbose) << "[Server] ActorList correcting stale live canonical corpse"
@@ -8851,6 +8954,243 @@ void MPServer::handleActorCombatRequest(ConnectedClient& c, const uint8_t* data,
 }
 
 // ---------------------------------------------------------------------------
+bool MPServer::disposeCorpseAuthoritative(
+    const ActorRegistryRecord& record,
+    const std::string& canonicalCellId,
+    uint32_t requestingGuid)
+{
+    // Copy the entire record before any map mutations so references into
+    // erased map elements are never accessed.
+    const ActorRegistryRecord removedRecord = record;
+    const BaseActor actor = removedRecord.actor;
+    const bool wasPersistent = removedRecord.persistent;
+
+    if (removedRecord.actorNetId == 0)
+    {
+        Log(Debug::Verbose) << "[Server] disposeCorpseAuthoritative: actor missing actorNetId"
+                            << " refId=" << actor.refId
+                            << " mpNum=" << actor.mpNum
+                            << " cell=" << canonicalCellId;
+        return false;
+    }
+
+    std::vector<ActorRegistryRecord> removedRecords = { removedRecord };
+
+    // Remove the actor from its canonical actor cell.
+    auto cellIt = mWorld.actorCells.find(canonicalCellId);
+    if (cellIt != mWorld.actorCells.end())
+    {
+        const std::string actorKey = makeActorKey(actor);
+        cellIt->second.actors.erase(actorKey);
+        cellIt->second.resetSuppressedVanillaDeaths.erase(actorKey);
+        cellIt->second.staleLiveVanillaDeathResendMs.erase(actorKey);
+    }
+
+    forgetActorLocation(actor, canonicalCellId);
+
+    if (actor.mpNum == 0)
+    {
+        forgetDeadVanillaActor(actor, canonicalCellId);
+        rememberDisposedVanillaActor(actor);
+    }
+    else
+    {
+        if (mPlayerDb)
+            mPlayerDb->deleteSpawnedActorDynamicRecordLink(actor.mpNum, canonicalCellId);
+        if (actor.mpNum != 0 && wasPersistent && mPlayerDb)
+            deletePersistedSpawnedActor(actor.mpNum);
+    }
+
+    // Remove the authoritative container record.
+    const std::string containerKey = makeContainerKey(canonicalCellId, actor.refId, actor.refNum, actor.mpNum);
+    mWorld.containers.erase(containerKey);
+    if (mPlayerDb)
+        mPlayerDb->deleteContainerRecord(canonicalCellId, actor.refId, actor.refNum);
+
+    markLuaActorRemoved(actor.mpNum);
+
+    // Broadcast removal with CorpseDisposed reason.
+    broadcastActorIdentityRemovalForCell(canonicalCellId, cellIt != mWorld.actorCells.end()
+        ? cellIt->second : mWorld.actorCells[canonicalCellId], removedRecords, ActorRemovalReason::CorpseDisposed);
+
+    // Forget identity mappings after constructing and broadcasting the removal.
+    for (const ActorRegistryRecord& rec : removedRecords)
+        forgetActorNetId(rec.actorNetId, rec.actor);
+
+    Log(Debug::Info) << "[Server] Corpse disposed authoritatively"
+                     << " actorNetId=" << removedRecord.actorNetId
+                     << " refId=" << actor.refId
+                     << " mpNum=" << actor.mpNum
+                     << " cell=" << canonicalCellId
+                     << " requester=" << requestingGuid;
+    return true;
+}
+
+void MPServer::handleCorpseDispose(ConnectedClient& c, const uint8_t* data, size_t size)
+{
+    PacketCorpseDispose pkt;
+    if (!pkt.decode(data, size))
+    {
+        PacketHeader header;
+        const bool hasHeader = BasePacket::peekHeader(data, size, header);
+        Log(Debug::Warning) << "[Server] CorpseDispose decode failed"
+                            << " client=" << c.name
+                            << " bytes=" << size
+                            << " headerValid=" << hasHeader
+                            << " headerType=" << (hasHeader ? header.type : 0)
+                            << " payloadSize=" << (hasHeader ? header.payloadSize : 0)
+                            << " sequence=" << (hasHeader ? header.sequence : 0);
+        return;
+    }
+
+    Log(Debug::Info) << "[Server] CorpseDispose request from " << c.name
+                        << " actorNetId=" << pkt.actorNetId
+                        << " mpNum=" << pkt.mpNum
+                        << " refId=" << pkt.refId
+                        << " refNum=" << pkt.refNum
+                        << " cell=" << pkt.cellId;
+
+    // 1. Resolve the authoritative actor record by actorNetId first, then mpNum, then refId/refNum.
+    const ActorRegistryRecord* resolvedRecord = nullptr;
+    std::optional<ActorRegistryRecord> ownedResolvedRecord;
+    std::string canonicalCellId;
+
+    if (pkt.actorNetId != 0)
+    {
+        for (auto& [cellId, cellState] : mWorld.actorCells)
+        {
+            for (auto& [actorKey, record] : cellState.actors)
+            {
+                if (record.actorNetId == pkt.actorNetId)
+                {
+                    resolvedRecord = &record;
+                    canonicalCellId = cellId;
+                    break;
+                }
+            }
+            if (resolvedRecord) break;
+        }
+    }
+
+    if (!resolvedRecord && pkt.mpNum != 0)
+    {
+        for (auto& [cellId, cellState] : mWorld.actorCells)
+        {
+            for (auto& [actorKey, record] : cellState.actors)
+            {
+                if (record.actor.mpNum == pkt.mpNum)
+                {
+                    resolvedRecord = &record;
+                    canonicalCellId = cellId;
+                    break;
+                }
+            }
+            if (resolvedRecord) break;
+        }
+    }
+
+    if (!resolvedRecord && !pkt.refId.empty() && pkt.refNum != 0)
+    {
+        for (auto& [cellId, cellState] : mWorld.actorCells)
+        {
+            for (auto& [actorKey, record] : cellState.actors)
+            {
+                if (record.actor.mpNum == 0 && record.actor.refId == pkt.refId
+                    && record.actor.refNum == pkt.refNum)
+                {
+                    // If actorNetId was also provided, validate it matches.
+                    if (pkt.actorNetId != 0 && record.actorNetId != pkt.actorNetId)
+                        continue;
+                    resolvedRecord = &record;
+                    canonicalCellId = cellId;
+                    break;
+                }
+            }
+            if (resolvedRecord) break;
+        }
+    }
+
+    if (!resolvedRecord && !pkt.refId.empty() && pkt.refNum != 0)
+    {
+        // Persisted vanilla corpses may exist in deadVanillaActorCells without a
+        // matching actorCells entry. Resolve an owned copy, then continue through
+        // the same identity, loaded-cell, container, and death validation below.
+        BaseActor requested;
+        requested.refId = pkt.refId;
+        requested.refNum = pkt.refNum;
+        requested.cellId = pkt.cellId;
+
+        std::string deadCellId;
+        if (const ActorRegistryRecord* deadRecord = findDeadVanillaActor(requested, &deadCellId))
+        {
+            ownedResolvedRecord = *deadRecord;
+            canonicalCellId = deadCellId;
+            ensureActorNetId(*ownedResolvedRecord, canonicalCellId);
+            resolvedRecord = &*ownedResolvedRecord;
+        }
+    }
+
+    if (!resolvedRecord)
+    {
+        Log(Debug::Verbose) << "[Server] CorpseDispose rejected: actor not found"
+                            << " requester=" << c.name
+                            << " actorNetId=" << pkt.actorNetId
+                            << " mpNum=" << pkt.mpNum
+                            << " refId=" << pkt.refId;
+        return;
+    }
+
+    if (pkt.actorNetId != 0 && resolvedRecord->actorNetId != pkt.actorNetId)
+    {
+        Log(Debug::Verbose) << "[Server] CorpseDispose rejected: actorNetId mismatch"
+                            << " requester=" << c.name
+                            << " requested=" << pkt.actorNetId
+                            << " resolved=" << resolvedRecord->actorNetId
+                            << " refId=" << resolvedRecord->actor.refId;
+        return;
+    }
+
+    // 2. Verify it is dead.
+    if (!resolvedRecord->actor.isDead)
+    {
+        Log(Debug::Verbose) << "[Server] CorpseDispose rejected: actor is not dead"
+                            << " requester=" << c.name
+                            << " actorNetId=" << resolvedRecord->actorNetId
+                            << " refId=" << resolvedRecord->actor.refId;
+        return;
+    }
+
+    // 3. Verify the requester can access the corpse cell.
+    if (!clientHasActorCellLoaded(c, canonicalCellId))
+    {
+        Log(Debug::Verbose) << "[Server] CorpseDispose rejected: requester " << c.name
+                            << " does not have corpse cell loaded " << canonicalCellId;
+        return;
+    }
+
+    // 4. Verify the authoritative corpse container is empty.
+    const std::string containerKey = makeContainerKey(
+        canonicalCellId, resolvedRecord->actor.refId, resolvedRecord->actor.refNum, resolvedRecord->actor.mpNum);
+    auto containerIt = mWorld.containers.find(containerKey);
+    if (containerIt != mWorld.containers.end() && !containerIt->second.items.empty())
+    {
+        Log(Debug::Verbose) << "[Server] CorpseDispose rejected: corpse container is not empty"
+                            << " requester=" << c.name
+                            << " actorNetId=" << resolvedRecord->actorNetId
+                            << " refId=" << resolvedRecord->actor.refId;
+        return;
+    }
+
+    // 5. Perform authoritative disposal.
+    if (!disposeCorpseAuthoritative(*resolvedRecord, canonicalCellId, c.guid))
+    {
+        Log(Debug::Warning) << "[Server] CorpseDispose failed: disposal returned false"
+                            << " requester=" << c.name
+                            << " actorNetId=" << resolvedRecord->actorNetId;
+    }
+}
+
+// ---------------------------------------------------------------------------
 std::vector<uint8_t> MPServer::buildWorldWeatherPacket() const
 {
     PacketWorldWeather pkt;
@@ -9804,6 +10144,7 @@ bool MPServer::resetCellStateForTesting(const std::string& cellId)
     std::size_t runtimeSpawnedActors = 0;
     std::size_t runtimeVanillaActors = 0;
     std::size_t deadVanillaActors = 0;
+    std::size_t disposedVanillaActors = 0;
 
     auto cellIt = mWorld.actorCells.find(cellId);
     if (cellIt != mWorld.actorCells.end())
@@ -9842,6 +10183,17 @@ bool MPServer::resetCellStateForTesting(const std::string& cellId)
             ++deadVanillaActors;
         }
         mWorld.deadVanillaActorCells.erase(deadCellIt);
+    }
+
+    for (auto it = mWorld.disposedVanillaActors.begin(); it != mWorld.disposedVanillaActors.end();)
+    {
+        if (it->second.cellId != cellId)
+        {
+            ++it;
+            continue;
+        }
+        it = mWorld.disposedVanillaActors.erase(it);
+        ++disposedVanillaActors;
     }
 
     if (cellIt == mWorld.actorCells.end())
@@ -9920,6 +10272,7 @@ bool MPServer::resetCellStateForTesting(const std::string& cellId)
                      << " runtimeSpawnedActors=" << runtimeSpawnedActors
                      << " runtimeVanillaActors=" << runtimeVanillaActors
                      << " deadVanillaActors=" << deadVanillaActors
+                     << " disposedVanillaActors=" << disposedVanillaActors
                      << " resetSuppressedVanillaDeaths=" << resetSuppressedVanillaDeaths.size()
                      << " runtimePlacedObjects=" << runtimePlacedObjects
                      << " runtimeContainers=" << runtimeContainers

@@ -14,7 +14,7 @@ namespace mwmp
     static constexpr uint32_t ActorSyncProtocolVersionV1 = 1;
     // Still named v2 in code because this is the active ActorSync v2 lane, but
     // the wire number is bumped for the deterministic ActorInstanceId key break.
-    // Bumped for migrationGeneration additions (2026-07).
+    // Bumped for migrationGeneration + removalReason additions (2026-07).
     static constexpr uint32_t ActorSyncProtocolVersionV2 = 8;
 
     using ActorInstanceId = uint64_t;
@@ -120,6 +120,14 @@ namespace mwmp
         return static_cast<int32_t>(lhs - rhs) > 0;
     }
 
+    enum class ActorRemovalReason : uint8_t
+    {
+        Generic = 0,
+        Despawned = 1,
+        CellReset = 2,
+        CorpseDisposed = 3,
+    };
+
     enum ActorPresentationFlags : uint8_t
     {
         ActorPresentationMoving = 1u << 0,
@@ -169,6 +177,7 @@ namespace mwmp
         bool baselineReset = false;
         bool teleport = false;
         uint32_t migrationGeneration = 0;
+        ActorRemovalReason removalReason = ActorRemovalReason::Generic;
         BaseActor actor;
     };
 
